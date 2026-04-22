@@ -35,7 +35,11 @@ Then the SKILL-side equivalent (§2 item 2): same walker/parser logic in SKILL, 
 
 ## Open questions / blockers
 
-- **pyyaml not available** on dev machine's system Python (`/usr/bin/python3.11`). Phase 1 §2 requires a YAML parser. Decide: vendor pyyaml into the project tree for the offline-deploy constraint (DECISIONS #1 principle, README hard constraints), or pick a zero-dep alternative (restricted-YAML subset, TOML, plain JSON config). Resolve before starting §2.
+- **Config file format — pyyaml missing.** `/usr/bin/python3.11` has no `yaml` module, and the red-zone target is offline-only (README hard constraints). §2 loader can't start until this is resolved. Three options on the table:
+  - **(a) Vendor pyyaml** into the project tree (copy wheel + `sys.path` shim or bundled sdist). Keeps `.pvtproject` as YAML. Cost: one offline-install dance per env.
+  - **(b) Switch to TOML.** Python 3.11 has `tomllib` built-in, zero deps. Cost: schema.md §1 needs a rewrite (YAML → TOML), example file rename, DECISIONS entry explaining the switch.
+  - **(c) Switch to JSON.** Zero deps, but hand-writing config gets ugly (no comments, quote noise).
+  - Resolve this first thing next session; if we switch format, the spec change must be made before writing the loader.
 
 ## Context cheatsheet for fresh sessions
 
