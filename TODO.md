@@ -12,10 +12,10 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 
 ### 1. Specification (no code yet — pure documentation)
 
-- [ ] `docs/schema.md`: define `.pvtproject` YAML fields
-- [ ] `docs/schema.md`: define JSON dump format (per run)
-- [ ] `docs/schema.md`: define DuckDB tables (`runs` / `results` / `artifacts`) with types
-- [ ] `config/pvtproject.example.yaml`: minimal working example
+- [x] `docs/schema.md`: define `.pvtproject` YAML fields
+- [x] `docs/schema.md`: define JSON dump format (per run)
+- [x] `docs/schema.md`: define DuckDB tables (`runs` / `results` / `artifacts`) with types
+- [x] `config/pvtproject.example.yaml`: minimal working example
 
 ### 2. `.pvtproject` loader
 

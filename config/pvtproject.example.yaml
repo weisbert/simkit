@@ -1,0 +1,14 @@
+# Drop this file (renamed to `.pvtproject`) at the root of a circuit project tree.
+# The collector SKILL and the `pvt` CLI auto-discover it by walking up from cwd.
+# See docs/schema.md §1 for the full field reference.
+
+project: my_ldo                         # required; must match ^[a-z0-9_-]+$
+dbRoot: ./simkit_data                   # required; relative paths resolve from this file's dir
+
+author: yusheng                         # optional; falls back to $USER at dump time
+
+testbench_aliases:                      # optional; lib/cell/view -> human-readable alias
+  MY_LIB/ldo_top_tb/schematic: ldo_heavy_tb
+  MY_LIB/ldo_top_tb_lite/schematic: ldo_lite_tb
+
+schema_version: 1                       # optional; pins the YAML file format
