@@ -149,3 +149,19 @@ _Date: 2026-04-21_
 **Decision:** `../MyRunner/PvtDumpToJson.il` proved the dump path is feasible but is not the foundation. Phase 1 writes a new collector from scratch.
 
 **Why:** The POC doesn't match the final schema (three-tier IDs, artifacts, netlist capture, `.pvtproject` identity, etc.). Extending it would cost more than rewriting.
+
+---
+
+## #13 — `.pvtproject` is JSON, not YAML
+_Date: 2026-04-22_
+
+**Decision:** The project-identity file is strict JSON. Original plan in #6 specified YAML; that is superseded here. Both Python (stdlib `json`) and SKILL (one shared minimal parser, to be written when §2 SKILL-side work lands) read the same file.
+
+**Why:** The deciding factor is **one format across Python and SKILL with zero external dependencies**. The red-zone target is offline-only (no pip-on-demand), and SKILL has no YAML/TOML library. Alternatives evaluated:
+- **Vendor pyyaml**: solves Python only; SKILL still needs a YAML-subset parser or a stale-prone JSON mirror. Hidden two-source-of-truth cost.
+- **Switch to TOML**: `tomllib` is stdlib-read in 3.11, but SKILL would need a from-scratch TOML parser for a format that appears nowhere else in simkit. No reuse.
+- **Switch to JSON** (chosen): stdlib on Python; SKILL already needs a JSON helper for dump-related work, so the parser amortizes. Aligns with #2 (JSON for dumps). UX cost — no comments, strict quoting — is bounded because `.pvtproject` is small, flat, and rarely hand-edited. Mitigated by the reserved `_doc` key and `_`-prefix-ignored convention (see schema.md §1).
+
+**Alternatives considered:** see options (a)/(b) above. Fallback if JSON's hand-edit UX becomes painful in practice: revisit option (a) vendor pyyaml, and commit to either a SKILL YAML-subset parser or an explicit Python-generated JSON mirror at that time.
+
+**Supersedes / superseded by:** Amends #6 (file format only; layered-lookup and fallback-order decisions in #6 stand unchanged).

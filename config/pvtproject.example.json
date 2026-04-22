@@ -1,0 +1,15 @@
+{
+  "_doc": "Drop this file (renamed to `.pvtproject`) at the root of a circuit project tree. The collector SKILL and the `pvt` CLI auto-discover it by walking up from cwd. See docs/schema.md §1 for the full field reference. Keys starting with `_` are ignored by the loader and may be used for inline documentation.",
+
+  "project": "my_ldo",
+  "dbRoot": "./simkit_data",
+
+  "author": "yusheng",
+
+  "testbench_aliases": {
+    "MY_LIB/ldo_top_tb/schematic":      "ldo_heavy_tb",
+    "MY_LIB/ldo_top_tb_lite/schematic": "ldo_lite_tb"
+  },
+
+  "schema_version": 1
+}

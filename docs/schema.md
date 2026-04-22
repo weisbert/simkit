@@ -4,7 +4,7 @@
 
 This document defines five things, in dependency order:
 
-1. `.pvtproject` YAML format (project identity)
+1. `.pvtproject` JSON format (project identity)
 2. JSON dump format (what the collector SKILL writes per run)
 3. DuckDB tables (what the Python ingester loads into)
 4. Run-directory layout on disk
@@ -14,21 +14,22 @@ Every non-obvious field cites the `DECISIONS.md` entry that drives it.
 
 ---
 
-## 1. `.pvtproject` YAML format
+## 1. `.pvtproject` JSON format
 
-A project is declared by a single YAML file, conventionally placed at the root of a circuit project tree. It is discovered by walking up from cwd (see DECISIONS #6).
+A project is declared by a single JSON file, conventionally placed at the root of a circuit project tree. It is discovered by walking up from cwd (see DECISIONS #6). Format is strict JSON (no comments, no trailing commas) — see DECISIONS #13 for why JSON over YAML/TOML.
 
 | Field | Type | Required | Default | Validation / notes |
 |---|---|---|---|---|
 | `project` | str | yes | — | Project identifier. Must match `^[a-z0-9_-]+$`. Used as `project_id` in every dump. (#6) |
 | `dbRoot` | path | yes | — | Root directory for the DuckDB file and all run dumps. If relative, resolved from the `.pvtproject` file's own directory. If absolute, used as-is. (#2) |
 | `author` | str | no | value of `$USER` at dump time | Recorded into each run. Captured at dump time and stored; never looked up live at query time. (#10) |
-| `testbench_aliases` | map[str, str] | no | `{}` | Maps `lib/cell/view` → human-readable alias. Alias values must be unique within the project; duplicate aliases = load error. (#7) |
-| `schema_version` | int | no | `1` | Pins the YAML file format version. Separate from the JSON-dump `schema_version`. |
+| `testbench_aliases` | object[str → str] | no | `{}` | Maps `lib/cell/view` → human-readable alias. Alias values must be unique within the project; duplicate aliases = load error. (#7) |
+| `schema_version` | int | no | `1` | Pins the `.pvtproject` file format version. Separate from the JSON-dump `schema_version`. |
+| `_doc` | str \| object | no | — | Reserved for free-form human documentation (JSON has no comments). Loader ignores it; never validated. |
 
-**Unknown-key policy.** Top-level keys not listed above are warned (not errored) when the loader parses the file. Forward-compat: users may see newer templates carrying fields the current simkit doesn't yet understand.
+**Unknown-key policy.** Top-level keys not listed above (except `_doc`) are warned (not errored) when the loader parses the file. Forward-compat: users may see newer templates carrying fields the current simkit doesn't yet understand. Keys starting with `_` are reserved for user documentation and are silently ignored.
 
-**Example.** See `config/pvtproject.example.yaml`.
+**Example.** See `config/pvtproject.example.json`.
 
 ---
 

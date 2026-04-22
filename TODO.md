@@ -12,15 +12,15 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 
 ### 1. Specification (no code yet — pure documentation)
 
-- [x] `docs/schema.md`: define `.pvtproject` YAML fields
+- [x] `docs/schema.md`: define `.pvtproject` fields (JSON — see Decision #13)
 - [x] `docs/schema.md`: define JSON dump format (per run)
 - [x] `docs/schema.md`: define DuckDB tables (`runs` / `results` / `artifacts`) with types
-- [x] `config/pvtproject.example.yaml`: minimal working example
+- [x] `config/pvtproject.example.json`: minimal working example
 
 ### 2. `.pvtproject` loader
 
-- [ ] Python: walker + YAML parser + fallback order (env → file → error). Pure-Python module; unit-testable.
-- [ ] SKILL: equivalent walker + parser (SKILL has no YAML libs — use JSON on the SKILL side, or a restricted YAML subset).
+- [x] Python: walker + JSON parser + fallback order (env → file → error). Pure-Python module; unit-testable. — `python/simkit/project.py`, 30 tests passing.
+- [ ] SKILL: equivalent walker + minimal strict-JSON parser, reading the same file.
 
 ### 3. Collector SKILL (new, from scratch — do NOT extend POC)
 

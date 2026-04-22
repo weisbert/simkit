@@ -1,6 +1,6 @@
 # Project State
 
-_Last updated: 2026-04-22_
+_Last updated: 2026-04-22_ (late)
 
 ## Current phase
 
@@ -15,6 +15,8 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - **2026-04-21 → 2026-04-22**: initial design conversation closed all architectural questions. See `DECISIONS.md` entries #1–#12.
 - **2026-04-22**: project scaffold and git repo created; Phase 1 scope locked in `TODO.md`.
 - **2026-04-22**: Phase 1 §1 (Specification) complete — `docs/schema.md` fleshed out from skeleton; `config/pvtproject.example.yaml` created.
+- **2026-04-22**: Decided JSON over YAML/TOML for `.pvtproject` (see Decision #13); spec + example migrated; §2 loader unblocked.
+- **2026-04-22**: Phase 1 §2 item 1 done — Python loader `python/simkit/project.py` + 30 stdlib-`unittest` tests. Walker, env `PVT_PROJECT`, schema validation all in place.
 
 ## What's DONE
 
@@ -22,6 +24,7 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - Phase 1 scope defined (see `TODO.md`)
 - Project scaffold and git repo
 - Phase 1 §1 Specification: schema spec + example `.pvtproject`
+- Phase 1 §2 item 1 — Python `.pvtproject` loader (`python/simkit/project.py` + tests)
 
 ## What's IN PROGRESS
 
@@ -29,17 +32,13 @@ _(nothing — between tasks)_
 
 ## What's NEXT (next 1–2 sessions)
 
-Phase 1 §2 — **`.pvtproject` loader (Python)**. Walker (cwd → up), YAML parser, fallback order (env `PVT_PROJECT` → file → error). Pure-Python module, unit-testable, no Cadence dependency.
+Phase 1 §2 item 2 — **SKILL-side `.pvtproject` loader**. Same walker + a minimal strict-JSON parser in SKILL, reading the same file the Python loader reads (per Decision #13). Before coding, consult `SKILL_file/` PDFs on file I/O and string parsing. Validation rules should mirror the Python loader so the two agree on accept/reject.
 
-Then the SKILL-side equivalent (§2 item 2): same walker/parser logic in SKILL, using JSON or a restricted YAML subset (SKILL has no YAML libs).
+After §2 is fully done: move to §3 (collector SKILL from scratch, per Decision #12 — do NOT extend the POC).
 
 ## Open questions / blockers
 
-- **Config file format — pyyaml missing.** `/usr/bin/python3.11` has no `yaml` module, and the red-zone target is offline-only (README hard constraints). §2 loader can't start until this is resolved. Three options on the table:
-  - **(a) Vendor pyyaml** into the project tree (copy wheel + `sys.path` shim or bundled sdist). Keeps `.pvtproject` as YAML. Cost: one offline-install dance per env.
-  - **(b) Switch to TOML.** Python 3.11 has `tomllib` built-in, zero deps. Cost: schema.md §1 needs a rewrite (YAML → TOML), example file rename, DECISIONS entry explaining the switch.
-  - **(c) Switch to JSON.** Zero deps, but hand-writing config gets ugly (no comments, quote noise).
-  - Resolve this first thing next session; if we switch format, the spec change must be made before writing the loader.
+_(none)_
 
 ## Context cheatsheet for fresh sessions
 
