@@ -49,6 +49,16 @@
 ;; PVT_JSON_NULL which means "key is present with explicit JSON null".
 (defvar PVT_JSON_ABSENT 'pvt_absent)
 
+;; --- emitter-only sentinels for empty array / empty object --------------
+;; SKILL `nil` represents both "the empty list" and "no value", so the emitter
+;; cannot tell `[]` from `null` from a bare nil. Builders that need to emit a
+;; literal empty `[]` or `{}` (e.g. the collector's run.json `artifacts: []`
+;; when no artifacts were captured) must use these sentinels instead of nil.
+;; The parser does NOT produce them — by parser convention `[]` parses to nil
+;; — so they exist purely as a contract for emit-side callers.
+(defvar PVT_JSON_EMPTY_ARRAY  'pvt_json_empty_array)
+(defvar PVT_JSON_EMPTY_OBJECT 'pvt_json_empty_object)
+
 ;; Private sidecar slot that stores the insertion-order key list on each
 ;; parsed object table. Not meant to be read by anything other than
 ;; pvtJsonObjectKeys below.
@@ -74,6 +84,8 @@
 (procedure (pvtJsonFalsep  x)  (equal x PVT_JSON_FALSE))
 (procedure (pvtJsonBoolp   x)  (or (pvtJsonTruep x) (pvtJsonFalsep x)))
 (procedure (pvtJsonAbsentp x)  (equal x PVT_JSON_ABSENT))
+(procedure (pvtJsonEmptyArrayp  x) (equal x PVT_JSON_EMPTY_ARRAY))
+(procedure (pvtJsonEmptyObjectp x) (equal x PVT_JSON_EMPTY_OBJECT))
 
 
 ;; ----------------------------------------------------------------------------
@@ -688,6 +700,256 @@
          (cond
            ((or (null kl) (pvtJsonAbsentp kl)) nil)
            (t kl)))))
+)
+
+
+;; ============================================================================
+;; JSON emitter (writer)
+;;
+;; Inverse of the parser above, with the same value family:
+;;
+;;   numbers   -> int (printed via %d) or float (%g, ".0" appended if neither
+;;               '.' nor 'e' is present so the round-trip stays a float)
+;;   strings   -> "..."  with backslash, quote, and 0x00..0x1F escapes
+;;   nil       -> "null"  (parser also emits nil for the empty array, so an
+;;                empty array / nil / null all collapse to the JSON "null"
+;;                token in the emitter — see ROUND-TRIP CAVEAT below)
+;;   t         -> "true"  (alias for the PVT_JSON_TRUE sentinel)
+;;   PVT_JSON_TRUE  / 'pvt_json_true   -> "true"
+;;   PVT_JSON_FALSE / 'pvt_json_false  -> "false"
+;;   PVT_JSON_NULL  / 'pvt_json_null   -> "null"
+;;   tablep    -> "{...}"  (object). Key order comes from the sidecar
+;;               _PVT_JSON_KEYS_PROP list set by _pvtJsonParseObject; for
+;;               freshly-built tables (no sidecar) we fall back to arrayref
+;;               of every key returned by getSGkeys-equivalent walking, but
+;;               in practice all callers route through pvtJsonParseFile so
+;;               the sidecar is present.
+;;   listp     -> "[...]" (proper list — array)
+;;
+;; ROUND-TRIP CAVEAT.  The parser emits SKILL `nil` for both JSON `null` and
+;; the empty array `[]`. The emitter therefore picks one canonical mapping —
+;; we emit `nil` as `null`. Concretely:
+;;
+;;     parse "[]"     -> nil   ;  emit nil   -> "null"   (NOT "[]")
+;;     parse "null"   -> 'pvt_json_null  (sentinel) -> emit "null"
+;;
+;; If you want round-trip identity for empty arrays, parse with an
+;; empty-array sentinel layer above this module. Builders (e.g. the
+;; collector) that need to emit a literal `[]` or `{}` distinct from `null`
+;; use the PVT_JSON_EMPTY_ARRAY / PVT_JSON_EMPTY_OBJECT sentinels declared at
+;; the top of this file.
+;;
+;; ESCAPE / BYTE-SYNTHESIS ASYMMETRY.  The parser side decodes \uXXXX
+;; sequences into UTF-8 bytes via the precomputed _PVT_BYTE_LUT (see
+;; DECISIONS.md #15) because classic SKILL has no integer->char primitive.
+;; The emitter side does NOT need byte synthesis — it only needs to ESCAPE
+;; bytes the parser already produced.  For control characters we therefore
+;; just sprintf "\\u%04x" against the integer code; no LUT lookup needed.
+;; This asymmetry is intentional.
+;; ============================================================================
+
+;; Public entry point: emit to a fresh outstring port and return the string.
+;; Reuses pvtJsonEmitToPort so there is exactly one writer code path.
+(procedure (pvtJsonEmit value)
+  (let ((port (outstring)) (out nil))
+    (pvtJsonEmitToPort value port)
+    (setq out (getOutstring port))
+    (close port)
+    out)
+)
+
+;; Public entry point: stream the JSON form of `value` to an open output
+;; port. Used by the collector to write multi-MB run.json files without
+;; first building a giant in-memory string. Returns t on success.
+(procedure (pvtJsonEmitToPort value port)
+  (_pvtJsonEmitValue value port)
+  t
+)
+
+;; --- internal recursive walker --------------------------------------------
+
+(procedure (_pvtJsonEmitValue value port)
+  (prog ()
+    (cond
+      ;; Sentinels and t/nil first — they would otherwise be misclassified
+      ;; (e.g. 'pvt_json_true is a symbol, not a list, but symbolp matches
+      ;; both t and nil too on classic SKILL, so we test by `equal`).
+      ((equal value PVT_JSON_EMPTY_ARRAY)  (fprintf port "[]") (return t))
+      ((equal value PVT_JSON_EMPTY_OBJECT) (fprintf port "{}") (return t))
+      ((equal value PVT_JSON_NULL)   (fprintf port "null")  (return t))
+      ((equal value PVT_JSON_TRUE)   (fprintf port "true")  (return t))
+      ((equal value PVT_JSON_FALSE)  (fprintf port "false") (return t))
+      ((null value)                  (fprintf port "null")  (return t))
+      ((equal value t)               (fprintf port "true")  (return t))
+      ;; tablep BEFORE listp because both can match the same value in
+      ;; principle on some Cadence builds; the parser-produced object is
+      ;; always tablep, the parser-produced array is never tablep.
+      ((tablep value)                (_pvtJsonEmitObject value port) (return t))
+      ((listp value)                 (_pvtJsonEmitArray  value port) (return t))
+      ((stringp value)               (_pvtJsonEmitString value port) (return t))
+      ((integerp value)              (fprintf port "%d" value) (return t))
+      ((floatp value)                (_pvtJsonEmitFloat  value port) (return t))
+      (t
+        ;; Unknown type. We don't raise — the emitter is best-effort and
+        ;; the caller path is "build a string for output". Falling back to
+        ;; the symbol's print name as a JSON string keeps the output
+        ;; lexically valid; the test harness will fail the round-trip
+        ;; assertion if anything weird sneaks in, surfacing the bug.
+        (_pvtJsonEmitString (sprintf nil "%L" value) port)
+        (return t))))
+)
+
+;; --- floats ---------------------------------------------------------------
+;; %g format strips trailing ".0" from integer-valued floats (verified live:
+;; sprintf "%g" 150.0 -> "150"). For the parser to reread the result as a
+;; float instead of an integer, we re-add a ".0" when the formatted text
+;; contains neither '.' nor 'e'/'E'.
+
+(procedure (_pvtJsonEmitFloat f port)
+  (let ((s (sprintf nil "%g" f)))
+    (cond
+      ((_pvtJsonStringContainsAny s '("." "e" "E"))
+        (fprintf port "%s" s))
+      (t
+        (fprintf port "%s.0" s))))
+)
+
+(procedure (_pvtJsonStringContainsAny s charlist)
+  ;; Returns t iff `s` contains any of the single-char strings in charlist.
+  ;; Linear scan; charlist is short (3 elements above) so this is fine.
+  (prog (i n found)
+    (setq i 1)
+    (setq n (strlen s))
+    (while (and (leqp i n) (not found))
+      (let ((c (substring s i 1)))
+        (when (member c charlist) (setq found t)))
+      (setq i (plus i 1)))
+    (return found))
+)
+
+;; --- arrays ---------------------------------------------------------------
+
+(procedure (_pvtJsonEmitArray lst port)
+  (cond
+    ((null lst) (fprintf port "[]"))
+    (t
+      (fprintf port "[")
+      (_pvtJsonEmitValue (car lst) port)
+      (foreach elt (cdr lst)
+        (fprintf port ",")
+        (_pvtJsonEmitValue elt port))
+      (fprintf port "]")))
+)
+
+;; --- objects --------------------------------------------------------------
+;; Iteration uses the sidecar key list set by _pvtJsonParseObject. For an
+;; empty parsed object the sidecar is `nil` (set explicitly in the parser);
+;; for non-empty parsed objects it is a non-empty list of keys in insertion
+;; order. We probe the sidecar slot DIRECTLY here (rather than via
+;; pvtJsonObjectKeys, which collapses both "empty" and "no sidecar at all"
+;; to a return value of nil) so we can tell the two apart.
+;;
+;; Tables built outside the parser (i.e. with no sidecar at all — sidecar
+;; slot returns the table's own default sentinel, whatever that is) are
+;; emitted as the empty object "{}". This is best-effort: classic SKILL
+;; on ICADVM18.1 has no documented public way to enumerate the keys of a
+;; makeTable. The simkit emitter has no caller that constructs object
+;; values outside the parser; should §3 collector need to do so, it should
+;; either build via the parser or set the sidecar explicitly.
+
+(procedure (_pvtJsonEmitObject tab port)
+  (prog (sidecar keys first)
+    (setq sidecar (arrayref tab _PVT_JSON_KEYS_PROP))
+    ;; Sidecar may be: a list (parser-built, possibly empty), the table's
+    ;; own default value (table built outside parser), or anything else.
+    ;; The parser uses 'pvt_absent as the default, which pvtJsonAbsentp
+    ;; recognises; for any other table we can't introspect keys safely.
+    (cond
+      ((listp sidecar) (setq keys sidecar))
+      (t               (setq keys nil)))
+    (setq first t)
+    (fprintf port "{")
+    (foreach key keys
+      (cond
+        (first (setq first nil))
+        (t (fprintf port ",")))
+      (_pvtJsonEmitString key port)
+      (fprintf port ":")
+      (_pvtJsonEmitValue (arrayref tab key) port))
+    (fprintf port "}")
+    (return t))
+)
+
+;; --- strings --------------------------------------------------------------
+;; JSON requires escaping " and \ and the control chars 0x00..0x1F (RFC 8259
+;; §7). All other bytes (including 0x80..0xFF UTF-8 continuation bytes from
+;; multi-byte characters the parser already produced) pass through verbatim.
+
+(procedure (_pvtJsonEmitString s port)
+  (prog (i n ch code)
+    (fprintf port "\"")
+    (setq i 1)
+    (setq n (strlen s))
+    (while (leqp i n)
+      (setq ch (substring s i 1))
+      (cond
+        ((equal ch "\"") (fprintf port "\\\""))
+        ((equal ch "\\") (fprintf port "\\\\"))
+        ((equal ch "\b") (fprintf port "\\b"))
+        ((equal ch "\f") (fprintf port "\\f"))
+        ((equal ch "\n") (fprintf port "\\n"))
+        ((equal ch "\r") (fprintf port "\\r"))
+        ((equal ch "\t") (fprintf port "\\t"))
+        (t
+          (setq code (_pvtJsonByteOrd ch))
+          (cond
+            ((and code (lessp code 32))
+              ;; Other control char (e.g. 0x01..0x07, 0x0E..0x1F).
+              ;; Emitter-only path — see comment above re asymmetry with the
+              ;; parser's LUT.
+              (fprintf port "\\u%04x" code))
+            (t (fprintf port "%s" ch)))))
+      (setq i (plus i 1)))
+    (fprintf port "\"")
+    (return t))
+)
+
+;; Map a single-byte string to its 0..255 code, or nil for "not a 1-byte
+;; string we recognize as a control char". Only used by the emitter to
+;; decide whether to emit "\uXXXX" — for 0x20..0x7F ASCII we don't care
+;; about the code value (the char passes through), so this only needs to
+;; be accurate for control chars. We reuse the parser's named-control map
+;; and otherwise return 32 as a sentinel meaning "not a control char".
+(procedure (_pvtJsonByteOrd ch)
+  (cond
+    ((or (not (stringp ch)) (not (equal (strlen ch) 1))) nil)
+    ((equal ch "\n") 10)
+    ((equal ch "\r") 13)
+    ((equal ch "\t") 9)
+    ((equal ch "\b") 8)
+    ((equal ch "\f") 12)
+    ;; Catch any remaining bytes that printable-checks won't help with.
+    ;; We compare the 1-char string against the LUT to recover its code.
+    ;; This is O(255) per char in the worst case but only fires for raw
+    ;; control bytes outside the named set above — extremely rare in
+    ;; practice. For ASCII printable / multi-byte UTF-8 continuation we
+    ;; short-circuit by returning a non-control sentinel.
+    (t (_pvtJsonLookupByteCode ch)))
+)
+
+(procedure (_pvtJsonLookupByteCode ch)
+  ;; Linear search of _PVT_BYTE_LUT for a match. Returns the 1-based
+  ;; position (== code, since the LUT layout is "byte N at position N")
+  ;; or 32 if not found in the 1..31 control range. We only really need
+  ;; to distinguish "0..31 control" from "everything else"; any code >=
+  ;; 32 is fine as a non-control sentinel.
+  (prog (i)
+    (setq i 1)
+    (while (leqp i 31)
+      (when (equal ch (substring _PVT_BYTE_LUT i 1))
+        (return i))
+      (setq i (plus i 1)))
+    (return 32))
 )
 
 
