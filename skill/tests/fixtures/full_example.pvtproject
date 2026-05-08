@@ -1,0 +1,11 @@
+{
+  "_doc": "Largest valid example used to exercise every accept-path in one go.",
+  "project": "my_ldo",
+  "dbRoot": "./simkit_data",
+  "author": "yusheng",
+  "testbench_aliases": {
+    "MY_LIB/ldo_top_tb/schematic":      "ldo_heavy_tb",
+    "MY_LIB/ldo_top_tb_lite/schematic": "ldo_lite_tb"
+  },
+  "schema_version": 1
+}
