@@ -165,3 +165,48 @@ _Date: 2026-04-22_
 **Alternatives considered:** see options (a)/(b) above. Fallback if JSON's hand-edit UX becomes painful in practice: revisit option (a) vendor pyyaml, and commit to either a SKILL YAML-subset parser or an explicit Python-generated JSON mirror at that time.
 
 **Supersedes / superseded by:** Amends #6 (file format only; layered-lookup and fallback-order decisions in #6 stand unchanged).
+
+---
+
+## #14 — Target classic SKILL ('il), not SKILL++; idiom traps to avoid
+_Date: 2026-05-08_
+
+**Decision:** All `skill/*.il` code in simkit targets **classic SKILL ('il mode)**, not SKILL++ (`'ils`). Classic SKILL is what loads cleanly from `.cdsinit` on every Cadence install we care about (ICADVM18.1-64b primary; older IC6.1.x as a should-still-work secondary). SKILL++ is a non-goal; do not introduce it.
+
+**Why:** During §2.2 (SKILL `.pvtproject` loader) we discovered the worker had silently used SKILL++ idioms in classic SKILL files. Several "looked right" but failed at load time with cryptic errors, or — worse — failed at runtime in ways that produced *plausible-looking wrong results* (e.g. parens-off-by-one that made single-key JSON objects parse correctly while multi-key objects silently truncated). 12 distinct bugs in 1800 lines. Pinning the target language explicitly removes the ambiguity.
+
+**Idiom traps** (the canonical list — consult before / during any SKILL coding):
+
+1. **Symbol names cannot contain `:`.** `'pvt:ok` does not tokenize as a single symbol. Use `'pvt_ok` form. ROD's `:` syntax is sugar elsewhere; do not try to extend.
+2. **Hex literals are `0xFF`, not `16#FF`.** The `radix#value` form is rejected by the reader.
+3. **`(prog ((var init) ...) body)` is rejected.** Classic SKILL `prog` accepts only bare-symbol bindings; vars init to `nil`. Non-`nil` init values must use `(setq var initVal)` at the top of the prog body.
+4. **`let*` is not available** — use nested `let`. (Verified absent on ICADVM18.1.)
+5. **`defvar` overwrites already-bound variables** (unlike Common Lisp). Don't rely on idempotency. To pre-seed a value before `defvar` runs, use `setShellEnvVar` and have the file read it via `getShellEnvVar` inside the defvar body.
+6. **`cons` requires its 2nd arg to be a list** — no dotted pairs. Use `(list a b)` for 2-tuples.
+7. **`return` only escapes a `prog` form**, not a `procedure`. Every procedure body that uses `return` must be wrapped in `(prog () ...)`.
+8. **`getCurrentTime` returns a string** (e.g. `"May 8 14:37:37 2026"`), not an integer. Don't format with `%d`.
+9. **`sprintf` format strings:** `%X` (uppercase hex) is rejected — only `%x`. `%c` does not accept an integer arg — there is no public `intChar`/`charString` on this Cadence; for byte synthesis use a precomputed octal-escape LUT (see `_pvtJsonByteString` in `pvtJson.il`).
+10. **JSON booleans / null map to sentinel symbols, not `t`/`nil`.** Classic SKILL conflates `t` / `nil` / empty-list / false; without sentinels, validators can't distinguish "JSON true" from "integer 1" or "missing key" from "explicit null". `pvtJson.il` exports `pvt_json_true`, `pvt_json_false`, `pvt_json_null`, `pvt_absent`.
+11. **Built-in name shadowing risk.** `symbolToString` is a write-protected built-in; redefining it errors at load time. `prog`, `cons`, etc. are similarly protected. Always namespace-prefix helpers (`_pvtSymToStr` rather than `symbolToString`).
+12. **Whole-file paren count being balanced is not enough.** A misplaced `)` inside a `cond` arm of a `while` body can cause the post-`while` cleanup form to be parsed as an iteration body, silently changing semantics. Balance-only linters will not catch this. Use skillbridge to evaluate forms incrementally and check observable outputs against the Python reference.
+
+**How to verify before / during SKILL coding:** `../skill_tools/skillbridge/` is installed; the bridge is up at `/tmp/skill-server-default.sock` whenever Virtuoso is running on the dev host. Use Python with `skillbridge.Workspace.open()` to evaluate suspect forms (`ws['evalstring']('...')`) before relying on them. Skillbridge over CIW is the canonical local test runner for `skill/tests/` — see `skill/tests/README.md`.
+
+**Alternatives considered:** Targeting SKILL++ (`'ils`) — rejected because (a) it would force a `.cdsinit` change on every deploy and (b) the parts of SKILL++ we'd want (init-list `let`, generic functions) are not load-bearing for any current simkit feature.
+
+---
+
+## #15 — JSON parser uses precomputed byte LUT; NUL not supported
+_Date: 2026-05-08_
+
+**Decision:** `skill/pvtJson.il`'s string-decoding path synthesizes UTF-8 bytes by indexing into a precomputed 255-entry octal-escape lookup table (`_PVT_BYTE_LUT`). Codes 1–255 are supported; **code 0 (NUL, U+0000) is not** — classic SKILL strings are NUL-terminated, so a ` ` in JSON would truncate the surrounding string.
+
+**Why:** Classic SKILL has no documented integer-to-byte primitive (`%c` rejects integers; no `intChar` / `charString`). The natural alternative — a per-byte if/else cascade — is verbose and slow. A 255-byte LUT trades 255 bytes of memory for O(1) byte synthesis and clear code.
+
+**Implications:**
+- Safe for `.pvtproject`: spec forbids NUL; no field will ever contain it.
+- Safe for almost all collector outputs: Maestro test names, corner names, signal names are user-typed identifiers, no NUL.
+- **Risk surface:** if §3 collector or §4 ingester ever needs to round-trip an arbitrary user-supplied string (e.g. a free-form note pulled from Maestro that some user pasted binary into), it will silently truncate. Document this if it surfaces.
+- **Escape hatch if needed:** rewrite the parser to keep strings as integer-vector representations internally and only stringify at the API boundary, with explicit NUL-rejection or NUL-replacement. Estimated cost: ~half a day; not worth doing speculatively.
+
+**Alternatives considered:** Rejecting ` ` at parse time (cleaner but breaks RFC 8259 compliance — chose silent truncation as the practical accept-everything-shaped-like-JSON path until use cases prove otherwise).

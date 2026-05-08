@@ -20,7 +20,8 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 ### 2. `.pvtproject` loader
 
 - [x] Python: walker + JSON parser + fallback order (env → file → error). Pure-Python module; unit-testable. — `python/simkit/project.py`, 30 tests passing.
-- [ ] SKILL: equivalent walker + minimal strict-JSON parser, reading the same file.
+- [x] SKILL: equivalent walker + minimal strict-JSON parser, reading the same file. — `skill/pvtError.il` + `pvtJson.il` + `pvtProject.il`, 76 tests passing via skillbridge (commit `a3c8651`).
+- [ ] SKILL-only first-save dialog (`skill/pvtProjectDialog.il`) — separable from §3, can interleave.
 
 ### 3. Collector SKILL (new, from scratch — do NOT extend POC)
 
