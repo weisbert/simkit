@@ -210,3 +210,38 @@ _Date: 2026-05-08_
 - **Escape hatch if needed:** rewrite the parser to keep strings as integer-vector representations internally and only stringify at the API boundary, with explicit NUL-rejection or NUL-replacement. Estimated cost: ~half a day; not worth doing speculatively.
 
 **Alternatives considered:** Rejecting ` ` at parse time (cleaner but breaks RFC 8259 compliance — chose silent truncation as the practical accept-everything-shaped-like-JSON path until use cases prove otherwise).
+
+---
+
+## #16 — Result-DB slot accessors return funobj; must invoke via funcall
+_Date: 2026-05-10_
+
+**Decision:** When accessing slots on live ADE-XL result-DB objects (`axlrdb`, `axlrdbd`, `axlrdbo`, `axlrdbt`, `axlrdbc`) returned by `maeReadResDB` / `maeOpenResults`, slots that **produce objects** are exposed as funobj closures and MUST be invoked with `funcall`. Slots that **produce values** (string / number / symbol) are accessed bare. Code in `skill/pvtCollect.il` follows this rule (and `_pvtCollEvalThunk` does NOT defend against violating it — it merely masks the throw as nil).
+
+**Why:** Discovered during Phase 1 §3 verification on 2026-05-10. Tier-1 unit tests passed 168/0/0, but driving `PvtSave` against a real Maestro session via skillbridge silently produced **0 result rows on a history with 7 tests**. Root cause: 9 sites in `pvtCollect.il` wrote `(rdb->point pid)` / `(rdb->tests)` / `(out->test)` / `(testObj->corner)` / `(cornerObj->params)` / `(tst->corner)` / `(pt->outputs ?type 'expr)`. Bare access returned funobj instead of the intended object/list; subsequent `foreach` or function-application then threw, but errset inside `_pvtCollEvalThunk` swallowed the throw into nil, so the function returned a well-shaped empty result. Lines fixed: 558, 579, 595, 619, 624, 631, 664, 696, 702.
+
+**Slot inventory (verified empirically via `/tmp/probe_slots.il` against `sim_yusheng/Test/maestro:simkit_verify`):**
+
+| Object | Slot | Returns | Correct form |
+|---|---|---|---|
+| `axlrdb`  | `point pid` | `axlrdbd` (point) | `(funcall (rdb->point) pid)` |
+| `axlrdb`  | `tests` | list of `axlrdbt` | `(funcall (rdb->tests))` |
+| `axlrdbd` | `outputs ?type 'expr` | list of `axlrdbo` | `(funcall (pt->outputs) ?type 'expr)` |
+| `axlrdbo` | `cornerName` / `testName` / `name` / `value` | string / number | bare |
+| `axlrdbo` | `test` | `axlrdbt` | `(funcall out->test)` |
+| `axlrdbt` | `name` / `status` / `cornerName` / `pointID` | string / symbol / number | bare |
+| `axlrdbt` | `corner` | `axlrdbc` | `(funcall tst->corner)` |
+| `axlrdbc` | `params` | list of `(name value)` pairs | `(funcall cornerObj->params)` |
+
+**Verification idiom (mandatory for new ADE-XL slot access):** probe both forms via skillbridge first; if bare returns `funobj@…`, you need `funcall`. The probe pattern is preserved in `/tmp/probe_slots.il` for reference (will be ported into `skill/tests/` once a Tier-2 harness exists).
+
+**Why `_pvtCollEvalThunk` is not a defense:** the wrapper is what *masks* this class of bug. Any throw inside the wrapped lambda becomes nil, and 0 results looks identical to "no data found" at the next layer. The fix must be at the call site (use `funcall`), not at the thunk wrapper. Changing the wrapper to re-throw was considered and rejected — many legitimate ADE-XL calls return nil for benign reasons (no current history, empty test list), and we need to keep tolerating those.
+
+**Implications:**
+- This is the operational extension of trap-list #14, specific to `axlrdb*`. Consider it the canonical reference when writing any §3+ code that touches result DBs.
+- **Tier-1 tests covered all pure helpers and that mattered** (they caught structural bugs). But Tier-1 cannot exercise live-session bindings. **Tier-2 verification on a real session is mandatory before any §3-style "collector" feature is declared done.** Add to Phase 1 §6 acceptance.
+- After the fix, `PvtSave` on the verification history (7 tests, 49 outputs, 1 corner "TT") produced 42 ok rows + correct `corner_vars` (`temperature/model/VDD`) + correct `testbench_alias` resolution + valid JSON envelope.
+
+**Alternatives considered:** Switching to function-style getters (`axlGetTests`, `maeGetTests`, ...) — rejected because (a) several don't exist on ICADVM18.1 (`maeGetTests` threw in our probe), and (b) the ones that do exist return different shapes (`axlGetTests hsdb` returned `(1022 ("Test"))`, a count + name list, not a list of test objects), so they're not drop-in replacements.
+
+**Supersedes / superseded by:** Extends #14 (trap inventory).

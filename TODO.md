@@ -25,13 +25,14 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 
 ### 3. Collector SKILL (new, from scratch — do NOT extend POC)
 
-- [ ] Entry point `PvtSave(?histName ?label ?note ?captureScreenshot)`
-- [ ] Auto-capture: `project_id`, `testbench_id` (Maestro cellView path), timestamp, author
-- [ ] Pull Maestro per-test notes
-- [ ] Iterate history results → structured records (`ok` / `failed` / `running` / `no_convergence`)
-- [ ] Copy simulated netlist to run dir
-- [ ] Optional screenshot (waveform, results table) via `awvSaveAsImage` / `hiScreenShot`
-- [ ] Write JSON dump using the spec from task 1
+- [x] Entry point `PvtSave(?histName ?label ?note ?captureScreenshot)`
+- [x] Auto-capture: `project_id`, `testbench_id` (Maestro cellView path), timestamp, author
+- [x] Pull Maestro per-test notes (via `axlGetNote hsdb "test" name`; null when no note)
+- [x] Iterate history results → structured records (`ok` / `failed` / `running` / `no_convergence`)
+  - 9 funobj-call sites fixed during Tier-2 verification — see Decision #16. Tier-1 (76 + 41 = 168 tests) passed without exposing them; live skillbridge run produced 42 ok rows on a real 7-test/49-output history after the fix.
+- [ ] Copy simulated netlist to run dir — soft-miss path works (`netlist_path: null` when collector can't determine simulator); needs follow-up: detect Spectre via `axlGetMainSetupDB`-driven simulator probe rather than current heuristic, which warned `simulator nil is not Spectre` on a real spectre run.
+- [ ] Optional screenshot (waveform, results table) via `awvSaveAsImage` / `hiScreenShot` — explicitly deferred to v1.1; current behaviour is one-shot warn + return nil (Decision in S3_DESIGN §3.5).
+- [x] Write JSON dump using the spec from task 1 — round-trip verified via `python3 -m json.tool` and via the SKILL parser; `testbench_alias` resolution working.
 
 ### 4. Python ingester
 
