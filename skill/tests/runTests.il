@@ -168,8 +168,10 @@
 (load (strcat PVT_SKILL_ROOT "/pvtError.il"))
 (load (strcat PVT_SKILL_ROOT "/pvtJson.il"))
 (load (strcat PVT_SKILL_ROOT "/pvtProject.il"))
+(load (strcat PVT_SKILL_ROOT "/pvtCollect.il"))
 
 (load (strcat PVT_TEST_ROOT "/testPvtJson.il"))
 (load (strcat PVT_TEST_ROOT "/testPvtProject.il"))
+(load (strcat PVT_TEST_ROOT "/testPvtCollect.il"))
 
 (pvtTestRun)
