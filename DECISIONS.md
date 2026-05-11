@@ -245,3 +245,75 @@ _Date: 2026-05-10_
 **Alternatives considered:** Switching to function-style getters (`axlGetTests`, `maeGetTests`, ...) — rejected because (a) several don't exist on ICADVM18.1 (`maeGetTests` threw in our probe), and (b) the ones that do exist return different shapes (`axlGetTests hsdb` returned `(1022 ("Test"))`, a count + name list, not a list of test objects), so they're not drop-in replacements.
 
 **Supersedes / superseded by:** Extends #14 (trap inventory).
+
+---
+
+## #17 — Ingester wraps the dump validator inline by default
+_Date: 2026-05-11_
+
+**Decision:** `simkit.ingest.ingest_run_json` runs `simkit.validate.validate_dump` immediately after JSON parse and before BEGIN. Any `severity="error"` violation raises `ValidationError` (subclass of `IngestError` so existing catchers still match). Warnings are logged via `logging.getLogger("simkit.ingest")` when `on_warning="log"` (default). The seam: `validate=False` on the API and `pvt ingest --no-validate` on the CLI disable the inline call. The validator stays independently invocable as `pvt validate <path>` and `python -m simkit.validate <path>`.
+
+**Why:** Reconciles two planning positions. Plan-A (`docs/plans/§4_ingester.md` §10) wanted strict decoupling — ingester does shape checks only, validator runs separately. Plan-B (`docs/plans/§3_messy_data.md` §4.3) wanted the validator inlined so "loaded" implies "consistent." Without the inline call, the ingester surface and the validator surface drift apart silently; with the call always-on, the ingester pays for invariant checks every run (acceptable on Phase-1 row counts) and the validator's W1/W2 warnings become visible in the ingest log. The `--no-validate` flag preserves Plan-A's escape hatch for bulk-load scenarios where the dumps are known-clean.
+
+**Alternatives considered:**
+- Strict decoupling (Plan-A literal). Rejected: validator and ingester would diverge on every schema change.
+- Validator owns the transaction boundary too (call validator inside ingester, have validator decide error vs warning). Rejected: blurs which module fails which way.
+
+---
+
+## #18 — `runs.netlist_path` permanently nullable in DuckDB
+_Date: 2026-05-11_
+
+**Decision:** The `runs.netlist_path` column in DuckDB is `VARCHAR` (nullable). `docs/schema.md` §3 still declares `VARCHAR NOT NULL`; this is a known deviation. The validator emits the `W2` warning whenever the field is null on ingest. Closing the spec/impl gap (tightening to NOT NULL) is gated on the §3 SKILL collector's Spectre-detection fix landing — at that point the collector will no longer emit `null` for spectre runs and the DDL can be tightened in the same diff.
+
+**Why:** The May-10 §3 verification dump carries `"netlist_path": null` (the soft-miss path: `axlGetMainSetupDB`-based simulator probe heuristic returned `simulator nil is not Spectre`). Shipping an ingester that hard-rejects every existing collector dump because of the spec mismatch is dead on arrival; the W2 warning surfaces the gap without blocking the data path.
+
+**Alternatives considered:**
+- Tighten DDL to NOT NULL and force the collector fix first. Rejected as ordering — the ingester is the consumer of dumps, including pre-fix dumps already on disk; the spec change has to wait for the producer fix.
+- Treat null as an error in the ingester. Rejected for the same reason.
+
+---
+
+## #19 — Internal `simkit_meta` table for DB-side schema bookkeeping
+_Date: 2026-05-11_
+
+**Decision:** `bootstrap()` creates a `simkit_meta(key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL)` table and seeds it on first bootstrap with `('db_schema_version', '1')`. The table is **not** part of the public schema documented in `docs/schema.md` — it is internal bookkeeping for the data layer.
+
+**Why:** Future schema changes (DDL evolution beyond v1) need a signal that distinguishes "fresh DB at v1" from "old DB at v0.x missing columns." Column-presence sniffing works for v1 but degrades with every DDL change. A one-row commitment now is cheap and load-bearing the first time DDL evolves.
+
+**Alternatives considered:**
+- Sniff column presence at bootstrap time. Rejected: scales poorly past 1 schema version and obscures the version intent.
+- Store the version in `docs/schema.md` only. Rejected: that's documentation, not introspection — the DB can't self-describe.
+
+---
+
+## #20 — Per-file (per-run) ingest transactions
+_Date: 2026-05-11_
+
+**Decision:** `ingest_dump_dir` opens a fresh transaction per `run.json` instead of one transaction wrapping the whole walk. Combined with `--continue-on-error` (CLI) / `continue_on_error=True` (API), partial-success ingestion is supported: malformed dumps are surfaced and skipped, valid ones land.
+
+**Why:** simkit is an offline single-user tool; a hostile concurrent reader is not a threat model. The cost of one transaction per run is amortized over the relatively small Phase-1 row counts (hundreds to low thousands per run). The benefit is that a 10-run walk where dump 5 is malformed loads 9 valid runs instead of rolling back the whole batch. Matches how `git fetch` handles per-remote failures.
+
+**Alternatives considered:**
+- One transaction across the entire walk. Rejected: a single malformed dump anywhere in a 100-run archive would force re-ingestion of the other 99, with no upside for a single-user tool.
+
+---
+
+## #21 — Drop DuckDB FK declarations on `results` / `artifacts`; application-layer integrity
+_Date: 2026-05-11_
+
+**Decision:** The `RESULTS_DDL` and `ARTIFACTS_DDL` constants in `python/simkit/schema_sql.py` do **not** declare `REFERENCES runs(run_id)`, even though `docs/schema.md` §3 describes the relationship. The ingester and validator enforce the integrity at the application layer (per-run transactional insert ordering; validator catches dangling references during audit).
+
+**Why:** Surfaced during overnight implementation of §4. DuckDB enforces foreign keys per-statement and does **not** relax constraint checks for prior DELETEs within the same transaction — a documented DuckDB limitation, not a bug we can route around. The `on_conflict="replace"` flow deletes child rows (`artifacts`, `results`) then the parent row (`runs`) inside one transaction; the parent DELETE fails with `Constraint Error: ... still referenced by a foreign key in a different table` because the prior child DELETEs aren't yet visible. Two workarounds: (a) drop FK declarations and rely on application-layer integrity, or (b) split replace into two transactions (breaks atomicity). (a) is cleaner, matches DuckDB ETL idioms, and is consistent with what the ingester + validator already enforce.
+
+The spec text in `docs/schema.md` §3 is left descriptive ("results.run_id references runs.run_id") because it documents the conceptual relationship even if DuckDB DDL doesn't carry the constraint. Source comments in `schema_sql.py` (after `RESULTS_DDL` and `ARTIFACTS_DDL`) document the deviation in-line.
+
+**Alternatives considered:**
+- Two-transaction replace. Rejected: replacing a run becomes non-atomic; a failure between the two transactions leaves the DB in a half-replaced state.
+- Stick with FK and disallow `--force` replace. Rejected: the replace path is needed for the realistic "re-ingest after collector bugfix" scenario.
+- Wait for DuckDB to grow MATCH SIMPLE / deferred constraints. Open issue upstream; not Phase-1 timeline.
+
+**Implications:**
+- `pvt validate --from-db` (deferred to §5) becomes more important — it's the application-side enforcement of what FK would have caught.
+- Any future tool that writes directly to the DB without going through `ingest.py` MUST replicate the integrity checks. Document this in `python/README.md` when §5 CLI lands.
+

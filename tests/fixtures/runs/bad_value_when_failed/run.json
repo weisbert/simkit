@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "run": {
+    "run_id": "66666666-6666-4666-8666-666666666666",
+    "project_id": "synthetic",
+    "testbench_id": "lib/cell/view",
+    "testbench_alias": null,
+    "timestamp": "2026-05-10T17:00:00+08:00",
+    "author": "tester",
+    "label": null,
+    "note": null,
+    "netlist_path": "input.scs",
+    "history_name": "bad_val"
+  },
+  "results": [
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "tran",
+      "output": "__sim_status__",
+      "value": 42,
+      "status": "failed",
+      "sweep": {},
+      "corner_vars": {"temperature": "27"},
+      "test_note": null
+    }
+  ],
+  "artifacts": []
+}

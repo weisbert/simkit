@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "run": {
+    "run_id": "55555555-5555-4555-8555-555555555555",
+    "project_id": "synthetic",
+    "testbench_id": "lib/cell/view",
+    "testbench_alias": null,
+    "timestamp": "2026-05-10T16:00:00+08:00",
+    "author": "tester",
+    "label": null,
+    "note": null,
+    "netlist_path": "input.scs",
+    "history_name": "bad_stat"
+  },
+  "results": [
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "tran",
+      "output": "vout",
+      "value": 1.0,
+      "status": "potato",
+      "sweep": {},
+      "corner_vars": {"temperature": "27"},
+      "test_note": null
+    }
+  ],
+  "artifacts": []
+}

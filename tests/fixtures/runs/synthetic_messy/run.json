@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "run": {
+    "run_id": "22222222-2222-4222-8222-222222222222",
+    "project_id": "synthetic",
+    "testbench_id": "lib/cell/view",
+    "testbench_alias": "messy_tb",
+    "timestamp": "2026-05-10T13:00:00+08:00",
+    "author": "tester",
+    "label": null,
+    "note": "mix of statuses",
+    "netlist_path": null,
+    "history_name": "syn_messy"
+  },
+  "results": [
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "tran",
+      "output": "vout",
+      "value": 1.0,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {"temperature": "27", "model": "tt"},
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "WC_VDD",
+      "test": "tran",
+      "output": "__sim_status__",
+      "value": null,
+      "status": "no_convergence",
+      "sweep": {},
+      "corner_vars": {"temperature": "27", "model": "tt"},
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "noise",
+      "output": "__sim_status__",
+      "value": null,
+      "status": "running",
+      "sweep": {},
+      "corner_vars": {"temperature": "27", "model": "tt"},
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "spectreX",
+      "output": "__sim_status__",
+      "value": null,
+      "status": "failed",
+      "sweep": {},
+      "corner_vars": {"temperature": "27", "model": "tt"},
+      "test_note": "crashed during init"
+    }
+  ],
+  "artifacts": []
+}

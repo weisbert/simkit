@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "run": {
+    "run_id": "33333333-3333-4333-8333-333333333333",
+    "project_id": "synthetic",
+    "testbench_id": "lib/cell/view",
+    "testbench_alias": null,
+    "timestamp": "2026-05-10T14:00:00+08:00",
+    "author": "tester",
+    "label": null,
+    "note": null,
+    "netlist_path": "input.scs",
+    "history_name": "syn_art"
+  },
+  "results": [
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "tran",
+      "output": "delay",
+      "value": 4.2e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {"temperature": "27"},
+      "test_note": null
+    }
+  ],
+  "artifacts": [
+    {
+      "type": "waveform",
+      "relative_path": "artifacts/wave.psf",
+      "description": "auto-saved transient waveform",
+      "source": "auto",
+      "created_at": "2026-05-10T14:00:00+08:00"
+    }
+  ]
+}

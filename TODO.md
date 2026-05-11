@@ -45,19 +45,26 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
   - **(d) Python-side schema validator** — `python/simkit/validate.py`: ingester invariants — every (project, run_id, test, corner, point) triple has **either** ≥1 ok row **or** exactly one `__sim_status__` row, never both, never neither. Catches collector misclassifications even when the SKILL side passes its own tests. Recommended regardless of (a/b/c).
 
   **Recommendation:** **(a) + (d)** as the main pair. (a) gives static coverage of the row-shaping logic (the part most likely to have bugs); (d) gives a Python-side safety net the ingester runs on every dump. (c) becomes documentation-only ("here are the scenarios I want covered"); (b) deferred unless (a)+(d) prove insufficient.
+
+  **Status (2026-05-11):**
+  - (d) **DONE** — `python/simkit/validate.py` + `tests/test_validate.py` (50 tests). 24 invariants + 2 warnings. Wired inline in the ingester per DECISIONS #17. Independently invocable: `pvt validate <path>`.
+  - (a) **IN PROGRESS** — plan in `docs/plans/§3_messy_data.md`. Step 1 (add `_pvtCollWalkRdb` alongside) starting next. Step 3 swap + Tier-2 will be driven via skillbridge against `simkit_verify` history.
+  - (c) — documentation-only; will be logged in `skill/tests/tier2/scenarios.md` once (a) lands.
+  - (b) — still deferred.
 - [ ] Copy simulated netlist to run dir — soft-miss path works (`netlist_path: null` when collector can't determine simulator); needs follow-up: detect Spectre via `axlGetMainSetupDB`-driven simulator probe rather than current heuristic, which warned `simulator nil is not Spectre` on a real spectre run.
 - [ ] Optional screenshot (waveform, results table) via `awvSaveAsImage` / `hiScreenShot` — explicitly deferred to v1.1; current behaviour is one-shot warn + return nil (Decision in S3_DESIGN §3.5).
 - [x] Write JSON dump using the spec from task 1 — round-trip verified via `python3 -m json.tool` and via the SKILL parser; `testbench_alias` resolution working.
 
 ### 4. Python ingester
 
-- [ ] Scan dump dir → load to DuckDB
-- [ ] Handle schema evolution gracefully (JSON carries a `schema_version` field)
-- [ ] Idempotent: re-ingesting the same `run_id` is a no-op (or explicit error)
+- [x] Scan dump dir → load to DuckDB — `python/simkit/ingest.py` + `db.py` + `schema_sql.py`; 38 tests in `tests/test_ingest.py`.
+- [x] Handle schema evolution gracefully (JSON carries a `schema_version` field) — strict `== 1` for v1; unknown major → `SchemaVersionError`, non-int / zero / negative → `MalformedDumpError`.
+- [x] Idempotent: re-ingesting the same `run_id` is a no-op (or explicit error) — default `on_conflict="error"` raises `DuplicateRunError`; `"replace"` / `--force` deletes then re-inserts; `"skip"` returns `action="skipped"`. Per-run transactions (DECISIONS #20).
 
 ### 5. `pvt` CLI (minimal)
 
-- [ ] `pvt ingest <path>` — manual ingest trigger
+- [x] `pvt ingest <path>` — manual ingest trigger (`python -m simkit.cli ingest` — 7 CLI tests).
+- [x] `pvt validate <path>` — invariant audit (added in §4; 5 CLI tests). `--from-db` flag reserved but not implemented; exit 3 placeholder until §5 fills in.
 - [ ] `pvt attach <run_id> <file> --type ... --desc ...` — post-hoc artifact attach
 - [ ] `pvt label <run_id> <label>` — promote run → slice
 - [ ] `pvt list [--project ...] [--slice-only]`

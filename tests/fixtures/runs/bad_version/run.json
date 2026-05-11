@@ -1,0 +1,17 @@
+{
+  "schema_version": 2,
+  "run": {
+    "run_id": "44444444-4444-4444-8444-444444444444",
+    "project_id": "synthetic",
+    "testbench_id": "lib/cell/view",
+    "testbench_alias": null,
+    "timestamp": "2026-05-10T15:00:00+08:00",
+    "author": "tester",
+    "label": null,
+    "note": null,
+    "netlist_path": "input.scs",
+    "history_name": "bad_ver"
+  },
+  "results": [],
+  "artifacts": []
+}
