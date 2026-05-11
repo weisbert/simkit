@@ -41,6 +41,11 @@ from simkit.label import (
     set_run_label,
 )
 
+from simkit.list_runs import (
+    RunRow,
+    list_runs,
+)
+
 from simkit.db import (
     bootstrap,
     connect,
@@ -98,6 +103,9 @@ __all__ = [
     # label
     "LabelResult",
     "set_run_label",
+    # list
+    "RunRow",
+    "list_runs",
     # validate
     "Violation",
     "validate_dump",
