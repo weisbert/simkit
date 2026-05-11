@@ -768,7 +768,7 @@
          pid cname tname outName outVal statusSym
          sweepRaw noteRaw cornerParamsAssoc
          sweepObj cornerVarsObj cornerVarsAlist noteForRow
-         seenSet writtenSet seenKey keysSeen
+         seenSet writtenSet writtenByTest seenKey writtenByTestKey keysSeen
          rows firstTestName statusStr
          tstPid tstCname tstTname)
     ;; --- 1. extract walkData fields
@@ -780,6 +780,10 @@
     ;; --- 2. shape state
     (setq seenSet       (makeTable 'pvtSeen    nil))
     (setq writtenSet    (makeTable 'pvtWritten nil))
+    ;; Per-(cname,pid,tname) write set — pass-2 uses this for I1-safe skip.
+    ;; writtenSet alone is too coarse: different tests at the same (cname,pid)
+    ;; are independent I1 triples and must not block each other's sentinels.
+    (setq writtenByTest (makeTable 'pvtWrittenByTest nil))
     (setq keysSeen      nil)
     (setq rows          nil)
     (setq firstTestName nil)
@@ -837,6 +841,8 @@
                         sweepObj cornerVarsObj noteForRow)
                       rows))
               (setarray writtenSet seenKey t)
+              (setarray writtenByTest
+                        (sprintf nil "%s|%d|%s" cname pid tname) t)
               (cond
                 ((null firstTestName) (setq firstTestName tname))))))))
     ;; ===== PASS 2: failed / running sentinel rows ============================
@@ -848,7 +854,16 @@
       (cond
         ((and statusSym (not (equal statusSym 'done)))
           (cond
-            ((and tstPid tstCname tstTname)
+            ((and tstPid tstCname tstTname
+                  ;; Bug C fix (Step 4): skip if pass 1 already wrote an ok
+                  ;; row for this EXACT (cname,pid,tname). Validator I1 keys
+                  ;; sentinel/ok mutual-exclusion by (corner,point,test), so
+                  ;; the per-test set is what we need; the coarser writtenSet
+                  ;; would wrongly suppress sentinels for sibling tests that
+                  ;; share (cname,pid) (e.g. mid-flight: tran=done + noise=running).
+                  (null (arrayref writtenByTest
+                                  (sprintf nil "%s|%d|%s"
+                                           tstCname tstPid tstTname))))
               (setq statusStr
                     (cond
                       ((equal statusSym 'failed)  "failed")
@@ -859,7 +874,6 @@
                       ;; rather than silently coercing to "running" and hiding
                       ;; the gap. Step 4 / Bug A.
                       (t                          "unknown")))
-              ;; Bug C preserved: emit even if pass 1 already wrote (cname,pid).
               (setq sweepRaw (cadr (assoc tstPid pidSweepCache)))
               (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
               (setq cornerParamsAssoc (assoc tstCname cornerParamCache))

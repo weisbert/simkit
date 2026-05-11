@@ -625,16 +625,17 @@
       (pvtAssert (arrayref (car rows) "value")  1.5 "delay value"))))
 
 
-;; --- Bug C (pre-fix): pass-2 sentinel fires even when pass-1 already wrote
-(pvtTestRegister "collect/rows-pass2-CURRENTLY-emits-when-pass1-wrote"
+;; --- Bug C (post-fix): pass-2 skips when pass-1 already wrote (cname,pid)
+(pvtTestRegister "collect/rows-pass2-skips-when-pass1-wrote"
   (lambda ()
-    ;; Documents existing _pvtCollIterateResults behaviour: a 'running test
-    ;; whose tran already produced an ok row still emits a __sim_status__
-    ;; sentinel for the SAME (cname,pid). The validator's I1 invariant
-    ;; rejects this. Step 4 lands the writtenSet skip.
+    ;; Bug C fix (Step 4): a 'running test whose tran already produced an
+    ;; ok row in pass 1 must NOT emit a __sim_status__ sentinel in pass 2
+    ;; for the same (cname,pid). Validator I1 (mutual exclusion: either
+    ;; ≥1 ok row OR exactly one sentinel per (cname,pid), never both)
+    ;; would otherwise reject the dump. The writtenSet check is the gate.
     (let ((walk (_pvtCollTestMakeWalk
                   (list (list 1 "TT" "tran" "vout" 1.0))     ; pass 1 writes ok
-                  (list (list 1 "TT" "tran" 'running))       ; pass 2 emits anyway
+                  (list (list 1 "TT" "tran" 'running))       ; pass 2 should skip
                   (list (list 1 nil))
                   (list (list "TT" nil))
                   nil
@@ -642,10 +643,10 @@
           (result nil) (rows nil))
       (setq result (_pvtCollRowsFromTuples walk))
       (setq rows (cdr result))
-      (pvtAssert (length rows) 2
-                 "Bug C pre-fix: ok row + running sentinel coexist (validator I1 rejects)")
-      (pvtAssert (arrayref (nthelem 1 rows) "status") "ok" "row 1 is ok")
-      (pvtAssert (arrayref (nthelem 2 rows) "status") "running" "row 2 is running sentinel"))))
+      (pvtAssert (length rows) 1
+                 "Bug C fixed: only ok row remains, sentinel suppressed")
+      (pvtAssert (arrayref (car rows) "status") "ok" "row 1 is ok")
+      (pvtAssert (arrayref (car rows) "output") "vout" "row 1 is the pass-1 vout"))))
 
 
 ;; --- Bug D (pre-fix): pass-3 fallback marker is "_no_cache"
