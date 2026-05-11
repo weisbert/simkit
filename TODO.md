@@ -48,8 +48,8 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 
   **Status (2026-05-11):**
   - (d) **DONE** — `python/simkit/validate.py` + `tests/test_validate.py` (50 tests). 24 invariants + 2 warnings. Wired inline in the ingester per DECISIONS #17. Independently invocable: `pvt validate <path>`.
-  - (a) **IN PROGRESS** — plan in `docs/plans/§3_messy_data.md`. Step 1 (add `_pvtCollWalkRdb` alongside) starting next. Step 3 swap + Tier-2 will be driven via skillbridge against `simkit_verify` history.
-  - (c) — documentation-only; will be logged in `skill/tests/tier2/scenarios.md` once (a) lands.
+  - (a) **DONE through Step 3** — `_pvtCollIterateResults` is now a 5-line composer; new `_pvtCollWalkRdb` (live walk) + `_pvtCollRowsFromTuples` (pure shaper) handle the work. Tier-1: 215/1/0 (+16 tests / +48 assertions for all six TODO scenarios). Tier-2: byte-identical 42-row output vs pre-refactor on `simkit_verify`. **Step 4 — Bug A/B/C/D fixes still owed:** line-679 fallback `"running"`→`"unknown"` (Bug A), walker pid set from `tst->pointID` (Bug B), pass-2 writtenSet skip (Bug C), unify pass-3 marker on `_no_corner_vars` (Bug D). Each fix has a pre-fix test to invert.
+  - (c) — documentation-only; pending Step 4 fixes.
   - (b) — still deferred.
 - [ ] Copy simulated netlist to run dir — soft-miss path works (`netlist_path: null` when collector can't determine simulator); needs follow-up: detect Spectre via `axlGetMainSetupDB`-driven simulator probe rather than current heuristic, which warned `simulator nil is not Spectre` on a real spectre run.
 - [ ] Optional screenshot (waveform, results table) via `awvSaveAsImage` / `hiScreenShot` — explicitly deferred to v1.1; current behaviour is one-shot warn + return nil (Decision in S3_DESIGN §3.5).
