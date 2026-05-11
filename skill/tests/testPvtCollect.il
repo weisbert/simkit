@@ -558,13 +558,13 @@
                  "'aborted symbol → \"aborted\" via _pvtSymToStr"))))
 
 
-;; --- Scenario D2: nil status → "running" fallback (Bug A — pre-fix behaviour)
-(pvtTestRegister "collect/rows-non-symbol-status-CURRENTLY-becomes-running"
+;; --- Scenario D2: non-symbol status → "unknown" fallback (Bug A — post-fix)
+(pvtTestRegister "collect/rows-non-symbol-status-becomes-unknown"
   (lambda ()
-    ;; Documents the existing line-679 fallback. Plan-B §3 calls this
-    ;; Bug A: a nil / non-symbol status should arguably surface as
-    ;; "unknown" so the validator flags it. Step 4 flips this to
-    ;; "unknown" + the validator's I12 hard-error catches it.
+    ;; Bug A fix (Step 4): the pass-2 statusStr fallback for a non-symbol,
+    ;; non-nil status returns "unknown" rather than silently coercing to
+    ;; "running". The validator's I12 invariant rejects "unknown" as an
+    ;; illegal status, surfacing the upstream gap instead of hiding it.
     ;; NOTE: nil status is filtered out by the outer `(and statusSym ...)`
     ;; guard, so use a non-symbol non-nil status (a string) to exercise
     ;; the fallback arm specifically.
@@ -579,8 +579,8 @@
       (setq result (_pvtCollRowsFromTuples walk))
       (setq rows (cdr result))
       (pvtAssert (length rows) 1 "1 sentinel row")
-      (pvtAssert (arrayref (car rows) "status") "running"
-                 "non-symbol status → \"running\" (Bug A pre-fix)"))))
+      (pvtAssert (arrayref (car rows) "status") "unknown"
+                 "non-symbol status → \"unknown\" (Bug A fixed)"))))
 
 
 ;; --- Scenario E1: gappy pid sequence — pure shaper is gap-tolerant

@@ -854,7 +854,11 @@
                       ((equal statusSym 'failed)  "failed")
                       ((equal statusSym 'running) "running")
                       ((symbolp statusSym)        (_pvtSymToStr statusSym))
-                      (t                          "running")))
+                      ;; Non-symbol status (nil filtered upstream): surface as
+                      ;; "unknown" so validator I12 (status enum) hard-errors
+                      ;; rather than silently coercing to "running" and hiding
+                      ;; the gap. Step 4 / Bug A.
+                      (t                          "unknown")))
               ;; Bug C preserved: emit even if pass 1 already wrote (cname,pid).
               (setq sweepRaw (cadr (assoc tstPid pidSweepCache)))
               (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
