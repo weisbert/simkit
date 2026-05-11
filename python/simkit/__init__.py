@@ -36,6 +36,11 @@ from simkit.attach import (
     attach_artifact,
 )
 
+from simkit.label import (
+    LabelResult,
+    set_run_label,
+)
+
 from simkit.db import (
     bootstrap,
     connect,
@@ -90,6 +95,9 @@ __all__ = [
     # attach
     "AttachResult",
     "attach_artifact",
+    # label
+    "LabelResult",
+    "set_run_label",
     # validate
     "Violation",
     "validate_dump",
