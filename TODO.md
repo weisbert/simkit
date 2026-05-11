@@ -71,11 +71,11 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 ### 5. `pvt` CLI (minimal)
 
 - [x] `pvt ingest <path>` — manual ingest trigger (`python -m simkit.cli ingest` — 7 CLI tests).
-- [x] `pvt validate <path>` — invariant audit (added in §4; 5 CLI tests). `--from-db` flag reserved but not implemented; exit 3 placeholder until §5 fills in.
-- [ ] `pvt attach <run_id> <file> --type ... --desc ...` — post-hoc artifact attach
-- [ ] `pvt label <run_id> <label>` — promote run → slice
-- [ ] `pvt list [--project ...] [--slice-only]`
-- [ ] `pvt diff <slice_a> <slice_b>` — result-table diff + netlist diff
+- [x] `pvt validate <path>` — invariant audit. `--from-db <run_id>` now wired (DECISIONS #26 covers the DuckDB ↔ ISO normalisation).
+- [x] `pvt attach <run_id> <file> --type ... --desc ...` — post-hoc artifact attach (`simkit.attach`; 21 tests covering copy + dup + invalid-type + missing-src + `--as` rename).
+- [x] `pvt label <run_id> <label> [--force|--clear]` — promote run → slice (DECISIONS #25; `simkit.label`; 22 tests).
+- [x] `pvt list [--project ...] [--slice-only] [--json] [--limit N]` — table or JSON listing (`simkit.list_runs`; 17 tests; opens DB read-only).
+- [x] `pvt diff <slice_a> <slice_b> [--threshold REL] [--include-status] [--json]` — aligned table + unified netlist diff (DECISIONS #24 covers slice resolution; `simkit.diff`; 34 tests).
 
 ### 6. End-to-end validation
 

@@ -352,3 +352,55 @@ _Date: 2026-05-11_
 - Refactor the walker further to extract a pure pidList-from-tst-list helper. Possible but the helper would be trivial (one `foreach` + `sort`) and the bug is in *what data it iterates*, not in *how it deduplicates*. Refactor-for-test wouldn't move the test surface closer to the bug.
 - Drive a real "kill spectre mid-sweep" sim from skillbridge. Deferred — better belongs to a Tier-2 scenarios doc (`skill/tests/tier2/scenarios.md`) when that file lands per TODO §3 messy-data (c).
 
+---
+
+## #24 — `pvt diff` slice resolution: exact label, then run_id prefix
+_Date: 2026-05-12_
+
+**Decision:** `pvt diff <slice_a> <slice_b>` resolves each identifier with a two-step lookup against `runs`: (1) exact match on `runs.label`; (2) if no label match, `run_id` prefix match. Each step must yield exactly one row. Zero matches → `SliceNotFoundError` (exit 1); two or more → `AmbiguousSliceError` (exit 1). Label match always wins over prefix even when the same string would also prefix-match a different run.
+
+**Why:** Two ergonomics observations from §5 design:
+1. Users name slices via `pvt label` precisely so they can refer to them by mnemonic later. Forcing them to type or copy run_ids for diff defeats the slice abstraction.
+2. Run_ids are UUIDv4 hex; a 7-8 char prefix is almost always unique within a project. Falling back to prefix lets users diff arbitrary runs (including unlabeled drafts) without re-labeling.
+
+**Implications:**
+- A label that collides with a hex-only prefix string (e.g., the user labels a run `"abc1234"`) still resolves to the labeled run, not whatever else happened to start with `abc1234`. The label-first ordering makes this deterministic.
+- Ambiguity surfaces as exit 1 with a message listing all matches; no silent "pick the newest" fallback.
+- `resolve_slice` is a public helper (`simkit.diff.resolve_slice`) so future commands can reuse the same resolution rule.
+
+---
+
+## #25 — `pvt label` re-label policy: error without `--force`; `--clear` unconditional
+_Date: 2026-05-12_
+
+**Decision:** Setting `runs.label` over an existing non-null label without `--force` raises `LabelConflictError` (exit 1). With `--force`, the previous value is overwritten and the result carries `previous=<old>` for the CLI to surface in the success line. Clearing (`--clear`) sets `runs.label = NULL` unconditionally — no `--force` required — and is a noop (still exit 0) when the row was already null.
+
+**Why:** Labels are the slice retention signal (DECISIONS #11). A silent overwrite would let a typo demote a known-good slice's identifier; making the user opt in with `--force` keeps the gesture visible. Clearing, by contrast, is symmetric with the implicit "draft" state every fresh run begins in — there is no information loss the user could be surprised by.
+
+**Implications:**
+- `pvt label X new --force` succeeds against both null and non-null prior states; the user does not have to know in advance which case they're in. The CLI distinguishes the two via `action='set'` vs `'overwritten'` in the success line.
+- Repeated `pvt label X --clear` is safe — it never errors, never overwrites a non-null label by accident.
+- Empty / whitespace-only / multiline labels are rejected at the validation layer (`_validate_label`) regardless of `--force`.
+
+---
+
+## #26 — DuckDB TIMESTAMPTZ ↔ Python: CAST to VARCHAR + ISO normalisation
+_Date: 2026-05-12_
+
+**Decision:** When reading TIMESTAMPTZ columns from DuckDB in §5 query code, `CAST(col AS VARCHAR)` in SQL and re-normalise to strict ISO 8601 in Python via `datetime.fromisoformat(s.replace(' ', 'T', 1)).isoformat()`. Applied in `simkit.list_runs` (the list query) and `simkit.from_db` (run / artifact reconstruction). The ingester continues to send TIMESTAMPTZ-castable ISO strings on write.
+
+**Why:** Two compounding constraints surfaced during §5:
+1. DuckDB's Python binding routes TIMESTAMPTZ → Python `datetime` conversion through the `pytz` module. The deployment target is offline stdlib-only (no pip wheels); reading any TIMESTAMPTZ via `fetchall()` triggers `ModuleNotFoundError: No module named 'pytz'` and the query fails.
+2. DuckDB's `CAST(... AS VARCHAR)` emits `YYYY-MM-DD HH:MM:SS±hh` (space separator, hour-only offset). The validator's I6 invariant accepts only `YYYY-MM-DDTHH:MM:SS±hh:mm`, so a raw round-trip through the DB would fail validation when `pvt validate --from-db` is the consumer.
+
+The CAST-and-normalise pattern threads both needles: SQL-side avoids the pytz path, Python-side restores the strict form. `datetime.fromisoformat` is permissive in 3.11+ (matches stated minimum) and `isoformat()` emits the canonical `T` + `±HH:MM`.
+
+**Implications:**
+- Any new §5/§6 query touching `timestamp` / `ingested_at` / `created_at` must follow the same pattern; raw `SELECT timestamp` will start failing again. Helper `_normalize_iso` in `simkit.from_db` is reusable.
+- Sub-second precision is preserved (`fromisoformat` reads `.ffffff`); locale-specific DuckDB rendering (e.g. `+08` vs `-04:30`) is normalised to `±HH:MM` in both cases.
+- The DDL writes TIMESTAMPTZ on the ingest path with strings shaped `YYYY-MM-DDTHH:MM:SS±HH:MM` already, so no migration is needed.
+
+**Alternatives considered:**
+- Ship `pytz` as a vendored module in the offline bundle. Rejected: adds a transitive dependency surface for one decoding behaviour we control entirely on the read side.
+- Change the column type to `VARCHAR` and drop TIMESTAMPTZ. Rejected: would forfeit DuckDB's `EPOCH(...)` and time arithmetic for any future query layer; the CAST cost is constant per row and only paid in §5 listing/reconstruction paths.
+
