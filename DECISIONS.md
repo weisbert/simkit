@@ -317,3 +317,38 @@ The spec text in `docs/schema.md` §3 is left descriptive ("results.run_id refer
 - `pvt validate --from-db` (deferred to §5) becomes more important — it's the application-side enforcement of what FK would have caught.
 - Any future tool that writes directly to the DB without going through `ingest.py` MUST replicate the integrity checks. Document this in `python/README.md` when §5 CLI lands.
 
+---
+
+## #22 — Unify corner_vars failure markers on `_no_corner_vars` across all passes
+_Date: 2026-05-11_
+
+**Decision:** When `_pvtCollRowsFromTuples` cannot resolve `corner_vars` for a row, it emits the single marker key `_no_corner_vars` regardless of pass (1/2/3) or failure mode (cornerParamCache miss vs. cornerObj parse failure). Pre-fix the markers were mixed: pass 1/2 used `_parse_error` on parse failure and `_no_cache` on miss; pass 3 used `_no_cache` for both — three distinct keys for essentially one schema condition ("we didn't get corner_vars").
+
+**Why:** Surfaced during §3 Step 4 Bug D implementation. TODO phrased the fix as "unify pass-3 marker on `_no_corner_vars`", but inspection showed the inconsistency spanned all three passes. Unifying only pass-3 would leave the cross-pass schema mixed. The validator's W1 invariant warns on any `"_"`-prefixed key in `corner_vars` and already documents `_no_corner_vars` as the canonical marker (per `python/simkit/validate.py` lines 18–19) — so the consumer side was already shaped for a single marker. The collector now matches.
+
+**Implications:**
+- The 42-row reference fixture (`tests/fixtures/runs/bdc13f17-…/run.json`) does not exercise any marker site (all corners converged), so the change is invisible to the byte-identical Tier-2 regression.
+- Any downstream consumer that hand-checks for `_no_cache` or `_parse_error` keys must be updated. Within this repo, none do (only `validate.py` documents `_no_corner_vars`, and it warns generically on `_*`).
+
+**Alternatives considered:**
+- Strict literal reading of TODO ("only pass-3"). Rejected: leaves pass 1/2 still inconsistent and continues to require two-name handling downstream.
+- Preserve distinct semantics (`_no_cache` = cache miss, `_parse_error` = parse failure, `_no_corner_vars` = either). Rejected: the consumer hierarchy doesn't act on the distinction; the only useful information is "corner_vars unavailable for this row". If a future use case needs the cause, a separate field can record it without polluting the corner_vars key namespace.
+
+---
+
+## #23 — Walker-level Tier-1 testing of `_pvtCollWalkRdb` deferred
+_Date: 2026-05-11_
+
+**Decision:** `_pvtCollWalkRdb` does not have direct Tier-1 unit tests covering its live-rdb iteration paths (Section 2 pidList construction, Section 5 per-point walk). The pure `_pvtCollRowsFromTuples` shaper has full Tier-1 coverage (215+ tests). Bug B (walker pid set from `tst->pointID`) is verified solely by Tier-2 byte-identical regression on `simkit_verify` (a converged, contiguous-pid run) plus the shaper's existing gappy-pid Scenario E1 test which proves the shaper survives gap inputs.
+
+**Why:** Surfaced during §3 Step 4 Bug B implementation. The walker calls slot-accessor funobjs (`rdb->point`, `rdb->tests`, `tst->pointID`, etc.) — see Decision #16. Constructing a SKILL mock-rdb whose accessors are funobj-bearing slots and behave identically to live axlrdb objects is non-trivial: it touches every classic-SKILL trap in #14 (struct/array discipline, funobj construction, `defstruct` access semantics). The estimated cost is 0.5–1 session of pure infrastructure work that buys exactly one test surface; the alternative is a real sim with gappy pids (zero infra cost, low probability of one being produced organically).
+
+**Implications:**
+- Bug B fix is verified by zero-regression on the happy path (Tier-2) plus inspection of the new pidList construction logic — NOT by direct exercise of the gappy-pid path. A future real sim with non-contiguous pids will validate the fix empirically; until then, the path is correct-by-reasoning, not correct-by-test.
+- The `TODO.md` §3 messy-data section retains a flagged sub-item for "synthetic-rdb harness OR real gappy-pid sim" so the gap remains visible.
+
+**Alternatives considered:**
+- Build the synthetic-rdb harness now. Rejected: high infra cost for one test surface; the funobj-mocking sub-skill might not generalize beyond this case.
+- Refactor the walker further to extract a pure pidList-from-tst-list helper. Possible but the helper would be trivial (one `foreach` + `sort`) and the bug is in *what data it iterates*, not in *how it deduplicates*. Refactor-for-test wouldn't move the test surface closer to the bug.
+- Drive a real "kill spectre mid-sweep" sim from skillbridge. Deferred — better belongs to a Tier-2 scenarios doc (`skill/tests/tier2/scenarios.md`) when that file lands per TODO §3 messy-data (c).
+

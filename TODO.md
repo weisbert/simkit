@@ -46,11 +46,18 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 
   **Recommendation:** **(a) + (d)** as the main pair. (a) gives static coverage of the row-shaping logic (the part most likely to have bugs); (d) gives a Python-side safety net the ingester runs on every dump. (c) becomes documentation-only ("here are the scenarios I want covered"); (b) deferred unless (a)+(d) prove insufficient.
 
-  **Status (2026-05-11):**
+  **Status (2026-05-11 overnight — §3 Step 4 landed):**
   - (d) **DONE** — `python/simkit/validate.py` + `tests/test_validate.py` (50 tests). 24 invariants + 2 warnings. Wired inline in the ingester per DECISIONS #17. Independently invocable: `pvt validate <path>`.
-  - (a) **DONE through Step 3** — `_pvtCollIterateResults` is now a 5-line composer; new `_pvtCollWalkRdb` (live walk) + `_pvtCollRowsFromTuples` (pure shaper) handle the work. Tier-1: 215/1/0 (+16 tests / +48 assertions for all six TODO scenarios). Tier-2: byte-identical 42-row output vs pre-refactor on `simkit_verify`. **Step 4 — Bug A/B/C/D fixes still owed:** line-679 fallback `"running"`→`"unknown"` (Bug A), walker pid set from `tst->pointID` (Bug B), pass-2 writtenSet skip (Bug C), unify pass-3 marker on `_no_corner_vars` (Bug D). Each fix has a pre-fix test to invert.
-  - (c) — documentation-only; pending Step 4 fixes.
+  - (a) **DONE through Step 4** — `_pvtCollIterateResults` is the 5-line composer; `_pvtCollWalkRdb` (live walk) + `_pvtCollRowsFromTuples` (pure shaper). Step 4 fixed all four bugs in separate commits:
+    - Bug A: pass-2 fallback for non-symbol status → `"unknown"` (was silently `"running"`); validator I12 now flags the gap.
+    - Bug B: walker pidList built from `tst->pointID` across `(rdb->tests)` instead of `(while (rdb->point pid) ...)` count-up — gappy pid sequences no longer truncated. **Tier-1 coverage gap flagged**; see DECISIONS #23 (verified by Tier-2 happy-path regression, awaits real gappy-pid sim).
+    - Bug C: pass-2 added per-`(cname,pid,tname)` `writtenByTest` skip — validator I1 no longer at risk of ok+sentinel coexistence for the same triple.
+    - Bug D: unified marker `_no_corner_vars` across all three passes (scope expanded from TODO's "just pass-3" per DECISIONS #22).
+    - Tier-1: 215/1/0 maintained (the 1 baseline FAIL is the Maestro-open no-session test).
+    - Tier-2: 42/42 data rows byte-identical to 2026-05-10 reference fixture on `simkit_verify`.
+  - (c) — documentation-only; remains pending (Tier-2 scenarios doc not yet written).
   - (b) — still deferred.
+  - **Owed Bug B follow-up** (post-Step 4): walker-level Tier-1 test for gappy pidList. Either build a synthetic-rdb harness (DECISIONS #23) or capture a real gappy-pid sim and pin it as a fixture.
 - [ ] Copy simulated netlist to run dir — soft-miss path works (`netlist_path: null` when collector can't determine simulator); needs follow-up: detect Spectre via `axlGetMainSetupDB`-driven simulator probe rather than current heuristic, which warned `simulator nil is not Spectre` on a real spectre run.
 - [ ] Optional screenshot (waveform, results table) via `awvSaveAsImage` / `hiScreenShot` — explicitly deferred to v1.1; current behaviour is one-shot warn + return nil (Decision in S3_DESIGN §3.5).
 - [x] Write JSON dump using the spec from task 1 — round-trip verified via `python3 -m json.tool` and via the SKILL parser; `testbench_alias` resolution working.
