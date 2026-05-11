@@ -752,13 +752,11 @@
 ;;   (assoc key alist)        — the pair itself (nil iff key absent)
 ;; This lets the shaper distinguish "key absent" (e.g. unreachable corner)
 ;; from "key present with nil value" (e.g. cornerObj resolution failed).
-;; Behaviour parity with _pvtCollIterateResults:
-;;   pass 1 / pass 2 fallback marker: "_parse_error"  (cornerObj failed)
-;;   pass 3 fallback marker         : "_no_cache"     (cornerVars unknown)
-;; Unifying these is Plan-B Bug D, landing in Step 4.
-;;
-;; Bug A (line-679 non-symbol-status → "running" fallback) is also preserved
-;; here; Step 4 will switch it to "unknown" together with a schema.md edit.
+;; Unified fallback marker (Step 4 / Bug D): all three passes emit
+;; "_no_corner_vars" when corner_vars resolution fails, regardless of
+;; the reason (cache miss vs cornerObj parse failure). The validator W1
+;; generically warns on any "_"-prefixed key, and "_no_corner_vars" is
+;; the canonical marker named in validate.py.
 ;;
 ;; NOT YET WIRED — see _pvtCollWalkRdb header.
 ;; ============================================================================
@@ -810,15 +808,12 @@
               (setq cornerParamsAssoc (assoc cname cornerParamCache))
               (setq cornerVarsAlist
                     (cond
+                      ;; Unified Step 4 / Bug D marker for either failure
+                      ;; mode (cache miss or cornerObj parse failure).
                       ((null cornerParamsAssoc)
-                        ;; unreachable in normal walker output (walker
-                        ;; populates cache for every cname seen in outputs);
-                        ;; defensive — mirror pass 3's "_no_cache" marker.
-                        (list (list "_no_cache" cname)))
+                        (list (list "_no_corner_vars" cname)))
                       ((null (cadr cornerParamsAssoc))
-                        ;; cornerObj resolution failed — matches existing
-                        ;; pass-1 fallback marker (pvtCollect.il pre-refactor).
-                        (list (list "_parse_error" cname)))
+                        (list (list "_no_corner_vars" cname)))
                       (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
               (setq cornerVarsObj
                     (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))
@@ -879,10 +874,11 @@
               (setq cornerParamsAssoc (assoc tstCname cornerParamCache))
               (setq cornerVarsAlist
                     (cond
+                      ;; Unified Step 4 / Bug D marker.
                       ((null cornerParamsAssoc)
-                        (list (list "_no_cache" tstCname)))
+                        (list (list "_no_corner_vars" tstCname)))
                       ((null (cadr cornerParamsAssoc))
-                        (list (list "_parse_error" tstCname)))
+                        (list (list "_no_corner_vars" tstCname)))
                       (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
               (setq cornerVarsObj
                     (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))
@@ -913,13 +909,11 @@
                   (setq cornerParamsAssoc (assoc cnm cornerParamCache))
                   (setq cornerVarsAlist
                         (cond
+                          ;; Unified Step 4 / Bug D marker.
                           ((null cornerParamsAssoc)
-                            (list (list "_no_cache" cnm)))
+                            (list (list "_no_corner_vars" cnm)))
                           ((null (cadr cornerParamsAssoc))
-                            ;; Bug D preserved — pass-3 uses "_no_cache" today
-                            ;; even when walker has a (cname nil) entry that
-                            ;; pass 1/2 would have flagged "_parse_error".
-                            (list (list "_no_cache" cnm)))
+                            (list (list "_no_corner_vars" cnm)))
                           (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
                   (setq cornerVarsObj
                         (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))

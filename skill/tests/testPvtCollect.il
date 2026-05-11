@@ -649,13 +649,14 @@
       (pvtAssert (arrayref (car rows) "output") "vout" "row 1 is the pass-1 vout"))))
 
 
-;; --- Bug D (pre-fix): pass-3 fallback marker is "_no_cache"
-(pvtTestRegister "collect/rows-pass3-CURRENTLY-uses-no-cache-marker"
+;; --- Bug D (post-fix): pass-3 fallback marker is unified "_no_corner_vars"
+(pvtTestRegister "collect/rows-pass3-uses-no-corner-vars-marker"
   (lambda ()
-    ;; A "wave" output triggers pass-3 for an (cname,pid) where the walker
-    ;; captured (cname nil) — cornerObj resolution failed. Existing pass-3
-    ;; uses "_no_cache" while pass 1/2 used "_parse_error" for the same
-    ;; state. Step 4 unifies on "_no_corner_vars".
+    ;; Bug D fix (Step 4): all three passes emit "_no_corner_vars" when
+    ;; corner_vars resolution fails. Pre-fix, pass-3 used "_no_cache" and
+    ;; pass-1/2 used "_parse_error" / "_no_cache" for the same state; the
+    ;; validator W1 generically warns on "_"-prefixed keys, and
+    ;; "_no_corner_vars" is the canonical marker named in validate.py.
     (let ((walk (_pvtCollTestMakeWalk
                   (list (list 1 "TT" "tran" "vout" "wave"))    ; pass 3 fires for (TT,1)
                   nil
@@ -668,8 +669,8 @@
       (setq rows (cdr result))
       (pvtAssert (length rows) 1 "1 sentinel row from pass 3")
       (setq cv (arrayref (car rows) "corner_vars"))
-      (pvtAssert (and cv (arrayref cv "_no_cache")) "TT"
-                 "Bug D pre-fix: pass-3 emits {_no_cache: <cname>} marker"))))
+      (pvtAssert (and cv (arrayref cv "_no_corner_vars")) "TT"
+                 "Bug D fixed: pass-3 emits {_no_corner_vars: <cname>} marker"))))
 
 
 ;; --- test_note flattening: "" → JSON null
