@@ -69,3 +69,32 @@ class ValidationError(IngestError):
         else:  # pragma: no cover - defensive
             summary = "validation failed"
         super().__init__(summary)
+
+
+# ---------------------------------------------------------------------------
+# Post-hoc operations on already-ingested runs (§5).
+# ---------------------------------------------------------------------------
+
+
+class RunNotFoundError(SimkitError):
+    """A ``run_id`` referenced by a §5 CLI verb is not in the ``runs`` table."""
+
+
+class InvalidArtifactTypeError(SimkitError):
+    """``pvt attach`` was given an artifact type outside the schema enum."""
+
+
+class DuplicateArtifactError(SimkitError):
+    """``pvt attach`` would collide with an existing artifact row or file."""
+
+
+class LabelConflictError(SimkitError):
+    """``pvt label`` would overwrite a non-null label without ``--force``."""
+
+
+class SliceNotFoundError(SimkitError):
+    """``pvt diff`` could not resolve a slice argument to a unique run."""
+
+
+class AmbiguousSliceError(SimkitError):
+    """``pvt diff`` slice argument matched more than one run."""

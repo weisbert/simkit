@@ -16,13 +16,24 @@ from simkit.project import (
 )
 
 from simkit.errors import (
+    AmbiguousSliceError,
+    DuplicateArtifactError,
     DuplicateRunError,
     IngestError,
+    InvalidArtifactTypeError,
+    LabelConflictError,
     MalformedDumpError,
     MissingDumpError,
+    RunNotFoundError,
     SchemaVersionError,
     SimkitError,
+    SliceNotFoundError,
     ValidationError,
+)
+
+from simkit.attach import (
+    AttachResult,
+    attach_artifact,
 )
 
 from simkit.db import (
@@ -55,12 +66,18 @@ __all__ = [
     "find_pvtproject",
     "load_pvtproject",
     # errors
+    "AmbiguousSliceError",
+    "DuplicateArtifactError",
     "DuplicateRunError",
     "IngestError",
+    "InvalidArtifactTypeError",
+    "LabelConflictError",
     "MalformedDumpError",
     "MissingDumpError",
+    "RunNotFoundError",
     "SchemaVersionError",
     "SimkitError",
+    "SliceNotFoundError",
     "ValidationError",
     # db
     "bootstrap",
@@ -70,6 +87,9 @@ __all__ = [
     "IngestResult",
     "ingest_dump_dir",
     "ingest_run_json",
+    # attach
+    "AttachResult",
+    "attach_artifact",
     # validate
     "Violation",
     "validate_dump",
