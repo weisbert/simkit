@@ -46,6 +46,10 @@ from simkit.list_runs import (
     list_runs,
 )
 
+from simkit.from_db import (
+    load_dump_from_db,
+)
+
 from simkit.db import (
     bootstrap,
     connect,
@@ -106,6 +110,8 @@ __all__ = [
     # list
     "RunRow",
     "list_runs",
+    # from_db
+    "load_dump_from_db",
     # validate
     "Violation",
     "validate_dump",

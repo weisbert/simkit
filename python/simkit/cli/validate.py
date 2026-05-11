@@ -1,14 +1,17 @@
 """``pvt validate`` subcommand.
 
-Audits a run.json (or, in a future extension, a row set already in the DB)
-against the I1–I24 / W1, W2 invariants. Pure-JSON for now; the
-``--from-db`` seam is reserved for §5 work.
+Audits a run dump against the I1–I24 / W1, W2 invariants. Two input
+modes:
+
+* file mode (default): ``pvt validate <path-to-run.json>``
+* DB mode: ``pvt validate --from-db <run_id> [--db PATH]`` — rebuild
+  the JSON dump shape from rows already in DuckDB, then validate.
 
 Exit codes:
     0  clean — no violations
     1  warnings only
     2  any error-severity violation
-    3  IO error / file not found
+    3  IO error / file not found / run_id not in DB
 """
 
 from __future__ import annotations
@@ -18,9 +21,13 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from simkit.db import bootstrap, connect
+from simkit.errors import RunNotFoundError
+from simkit.from_db import load_dump_from_db
+from simkit.project import PvtProjectError, load_pvtproject
 from simkit.validate import (
-    Violation,
     _format_violations,
+    validate_dump,
     validate_dump_file,
 )
 
@@ -30,23 +37,32 @@ def add_subparser(sub) -> None:
         "validate",
         help="Audit a run.json against simkit's schema invariants.",
         description=(
-            "Run the I1-I24 / W1, W2 invariant checks against a single "
-            "run.json file. Returns 0 (clean), 1 (warnings only), or "
-            "2 (any error)."
+            "Run the I1-I24 / W1, W2 invariant checks. By default reads "
+            "a run.json file. With --from-db, loads the run by run_id "
+            "from <dbRoot>/simkit.duckdb. Exit: 0 clean, 1 warnings, "
+            "2 errors, 3 IO."
         ),
     )
     p.add_argument(
-        "path", type=Path,
-        help="Path to a run.json file.",
-    )
-    # Reserved for §5; accepted but not yet implemented.
-    p.add_argument(
-        "--from-db", type=Path, default=None,
-        help=argparse.SUPPRESS,
+        "target", nargs="?", default=None,
+        help=(
+            "Path to a run.json file (default mode), or a run_id when "
+            "--from-db is set."
+        ),
     )
     p.add_argument(
-        "--run-id", default=None,
-        help=argparse.SUPPRESS,
+        "--from-db", action="store_true",
+        help=(
+            "Treat <target> as a run_id and load the dump from the DB. "
+            "DB path resolved via --db, PVT_PROJECT, or the cwd-walker."
+        ),
+    )
+    p.add_argument(
+        "--db", type=Path, default=None,
+        help=(
+            "Override DB path for --from-db. Default: "
+            "<dbRoot>/simkit.duckdb."
+        ),
     )
     p.add_argument(
         "-v", "--verbose", action="count", default=0,
@@ -55,19 +71,71 @@ def add_subparser(sub) -> None:
     p.set_defaults(func=run)
 
 
+def _resolve_db_path(args) -> Path:
+    if args.db is not None:
+        return Path(args.db).expanduser().resolve()
+    proj = load_pvtproject()
+    return Path(proj.db_root) / "simkit.duckdb"
+
+
 def run(args) -> int:
-    if args.from_db is not None or args.run_id is not None:
+    if args.target is None:
         print(
-            "pvt validate: --from-db / --run-id are reserved for §5 and "
-            "not yet implemented.",
+            "pvt validate: a target is required "
+            "(<run.json> in file mode, <run_id> with --from-db).",
             file=sys.stderr,
         )
-        return 3
-    path = Path(args.path).expanduser().resolve()
+        return 2
+
+    if args.from_db:
+        return _run_from_db(args)
+    return _run_from_file(args)
+
+
+def _run_from_file(args) -> int:
+    path = Path(args.target).expanduser().resolve()
     if not path.is_file():
         print(f"pvt validate: not a file: {path}", file=sys.stderr)
         return 3
     violations = validate_dump_file(path)
+    print(_format_violations(violations))
+    return _exit_code_for(violations)
+
+
+def _run_from_db(args) -> int:
+    run_id = args.target
+    try:
+        db_path = _resolve_db_path(args)
+    except PvtProjectError as exc:
+        print(f"pvt validate: {exc}", file=sys.stderr)
+        return 3
+
+    if not db_path.is_file():
+        print(
+            f"pvt validate: DB not found: {db_path} "
+            "(run `pvt ingest` first)",
+            file=sys.stderr,
+        )
+        return 3
+
+    try:
+        con = connect(db_path, read_only=True)
+    except Exception as exc:  # pragma: no cover - duckdb wraps OSError
+        print(
+            f"pvt validate: cannot open DB {db_path}: {exc}",
+            file=sys.stderr,
+        )
+        return 3
+    try:
+        try:
+            dump = load_dump_from_db(con, run_id)
+        except RunNotFoundError as exc:
+            print(f"pvt validate: {exc}", file=sys.stderr)
+            return 3
+    finally:
+        con.close()
+
+    violations = validate_dump(dump)
     print(_format_violations(violations))
     return _exit_code_for(violations)
 
