@@ -32,6 +32,9 @@
 ;;     │     ├── _pvtCollParseCornerParams (ported from POC)
 ;;     │     ├── _pvtCollAssocToTable
 ;;     │     └── _pvtCollMakeRow
+;;     │   (refactor in progress per docs/plans/§3_messy_data.md §1:
+;;     │    _pvtCollWalkRdb is added alongside in Step 1; pure shaper
+;;     │    _pvtCollRowsFromTuples + caller swap land in Steps 2 + 3.)
 ;;     ├── _pvtCollMakeRunDir
 ;;     ├── _pvtCollCopyNetlist
 ;;     ├── _pvtCollCaptureScreenshot
@@ -529,6 +532,194 @@
       ((and r (listp r)) (return (car r)))
       (t                 (return nil))))
 )
+
+
+;; ============================================================================
+;; Helper: _pvtCollWalkRdb(sess histName hsdb)
+;;   Step 1 of the Plan-B §3 refactor (docs/plans/§3_messy_data.md §1).
+;;
+;; Live-side walker. Opens the result DB, enumerates points / tests / outputs /
+;; corner params / test notes, and packages everything as raw tuples + caches
+;; in a `walkData` makeTable. Does NO row shaping, NO sentinel decisions, NO
+;; "" → nil flattening — that work belongs to _pvtCollRowsFromTuples (Step 2).
+;;
+;; Returns (pvtOk walkData) where walkData carries these keys:
+;;
+;;   "outputs"          : list of (pid cornerName testName outputName outputValue)
+;;                        — raw per-output tuples. cornerName / testName /
+;;                        outputName are strings; outputValue is whatever
+;;                        pt->outputs emitted (number, string, "wave", nil for
+;;                        failed-to-evaluate, etc).
+;;   "tests"            : list of (pid cornerName testName statusSym).
+;;                        statusSym stays a symbol (or nil / non-symbol) so the
+;;                        shaper can exercise the _pvtSymToStr fallback path.
+;;   "pidSweepCache"    : alist ((pid sweepAssoc) ...). sweepAssoc is the raw
+;;                        result of (maeGetParamConditions pid), pre-
+;;                        _pvtCollAssocToTable.
+;;   "cornerParamCache" : alist ((cornerName paramsList) ...). paramsList is the
+;;                        raw (funcall cornerObj->params) output, pre-
+;;                        _pvtCollParseCornerParams. nil entry means cornerObj
+;;                        was not resolvable from this row's path.
+;;   "testNoteCache"    : alist ((testName noteOrNil) ...). The raw axlGetNote
+;;                        result. nil = no note registered; "" preserved
+;;                        verbatim for the shaper to flatten.
+;;   "totalPoints"      : int.
+;;
+;; All caches are "raw" so Tier-1 tests of _pvtCollRowsFromTuples can exercise
+;; _pvtCollAssocToTable / _pvtCollParseCornerParams / note flattening from
+;; synthetic inputs. Alists use 2-element list entries — NOT dotted pairs —
+;; because classic SKILL `cons` requires its 2nd arg to be a list (DECISIONS
+;; #14 trap #6); lookups should use `(cadr (assoc key alist))`.
+;;
+;; Returns pvtErr 'pvt_collect_iter (same category as _pvtCollIterateResults)
+;; when maeReadResDB cannot locate the history. Live throws inside the walk
+;; are swallowed-to-nil via _pvtCollEvalThunk — matching existing behaviour and
+;; the rationale in DECISIONS #16 (the wrapper is what *masks* funobj-rule
+;; bugs; fixes belong at the call site, not in the wrapper).
+;;
+;; NOT YET WIRED — _pvtCollIterateResults still owns its own live walk. The
+;; swap is Step 3 of the refactor and requires Tier-2 verification via
+;; skillbridge against the simkit_verify history. Adding this function
+;; alongside the existing path is a zero-behaviour-change extraction so the
+;; diff stays reviewable per piece.
+;; ============================================================================
+
+(procedure (_pvtCollWalkRdb sess histName hsdb)
+  (prog (rdbR rdb totalPoints pid pt
+         outputs tests
+         pidSweepCache cornerParamCache testNoteCache
+         cname tname outName outVal
+         tstStatus testObj cornerObj
+         paramR noteR
+         tstPid
+         walkData)
+    ;; --- 1. open the result DB
+    (setq rdbR (errset (maeReadResDB ?historyName histName ?session sess) nil))
+    (setq rdb (cond ((and rdbR (listp rdbR)) (car rdbR)) (t nil)))
+    (cond
+      ((null rdb)
+        (return (pvtErr 'pvt_collect_iter
+                        (sprintf nil "history %L not found in session %L"
+                                 histName sess)
+                        nil))))
+    ;; --- 2. count points (same walk shape as _pvtCollIterateResults today;
+    ;;        Plan-B Bug B fix lands separately as part of Step 4).
+    (setq totalPoints 0)
+    (setq pid 1)
+    (while (_pvtCollEvalThunk (lambda () (funcall (rdb->point) pid)))
+      (setq totalPoints (plus totalPoints 1))
+      (setq pid (plus pid 1)))
+    ;; --- 3. walk state — alists, head-first; reversed at return for stable order.
+    (setq outputs          nil)
+    (setq tests            nil)
+    (setq pidSweepCache    nil)
+    (setq cornerParamCache nil)
+    (setq testNoteCache    nil)
+    ;; --- 4. open results for parameter introspection
+    (errset (maeOpenResults ?history histName ?session sess) nil)
+    (unwindProtect
+      (progn
+        ;; --- 5. per-point: stage sweep + outputs + lazily populate corner /
+        ;;       test-note caches
+        (setq pid 1)
+        (while (leqp pid totalPoints)
+          (setq pt (_pvtCollEvalThunk (lambda () (funcall (rdb->point) pid))))
+          (cond
+            (pt
+              (cond
+                ((null (assoc pid pidSweepCache))
+                  (setq paramR
+                        (_pvtCollEvalThunk
+                          (lambda () (maeGetParamConditions pid))))
+                  (setq pidSweepCache
+                        (cons (list pid paramR) pidSweepCache))))
+              (foreach out
+                       (or (_pvtCollEvalThunk
+                             (lambda () (funcall (pt->outputs) ?type 'expr)))
+                           nil)
+                (setq cname   (_pvtCollEvalThunk (lambda () out->cornerName)))
+                (setq tname   (_pvtCollEvalThunk (lambda () out->testName)))
+                (setq outName (_pvtCollEvalThunk (lambda () out->name)))
+                (setq outVal  (_pvtCollEvalThunk (lambda () out->value)))
+                (setq outputs
+                      (cons (list pid cname tname outName outVal) outputs))
+                (cond
+                  ((and cname (null (assoc cname cornerParamCache)))
+                    (setq testObj
+                          (_pvtCollEvalThunk (lambda () (funcall out->test))))
+                    (setq cornerObj
+                          (cond
+                            (testObj
+                              (_pvtCollEvalThunk
+                                (lambda () (funcall testObj->corner))))
+                            (t nil)))
+                    (setq cornerParamCache
+                          (cons
+                            (list cname
+                                  (cond
+                                    (cornerObj
+                                      (_pvtCollEvalThunk
+                                        (lambda () (funcall cornerObj->params))))
+                                    (t nil)))
+                            cornerParamCache))))
+                (cond
+                  ((and tname (null (assoc tname testNoteCache)))
+                    (setq noteR
+                          (_pvtCollEvalThunk
+                            (lambda () (axlGetNote hsdb "test" tname))))
+                    (setq testNoteCache
+                          (cons (list tname noteR) testNoteCache)))))))
+          (setq pid (plus pid 1)))
+        ;; --- 6. per-test: tuples + back-fill caches for tests that had no
+        ;;       outputs (running / failed tests). Matches the existing
+        ;;       _pvtCollIterateResults pass-2 cache-population paths.
+        (foreach tst
+                 (or (_pvtCollEvalThunk (lambda () (funcall (rdb->tests)))) nil)
+          (setq tstStatus (_pvtCollEvalThunk (lambda () tst->status)))
+          (setq tstPid    (_pvtCollEvalThunk (lambda () tst->pointID)))
+          (setq cname     (_pvtCollEvalThunk (lambda () tst->cornerName)))
+          (setq tname     (_pvtCollEvalThunk (lambda () tst->name)))
+          (setq tests (cons (list tstPid cname tname tstStatus) tests))
+          (cond
+            ((and tstPid (null (assoc tstPid pidSweepCache)))
+              (setq paramR
+                    (_pvtCollEvalThunk
+                      (lambda () (maeGetParamConditions tstPid))))
+              (setq pidSweepCache
+                    (cons (list tstPid paramR) pidSweepCache))))
+          (cond
+            ((and cname (null (assoc cname cornerParamCache)))
+              (setq cornerObj
+                    (_pvtCollEvalThunk (lambda () (funcall tst->corner))))
+              (setq cornerParamCache
+                    (cons
+                      (list cname
+                            (cond
+                              (cornerObj
+                                (_pvtCollEvalThunk
+                                  (lambda () (funcall cornerObj->params))))
+                              (t nil)))
+                      cornerParamCache))))
+          (cond
+            ((and tname (null (assoc tname testNoteCache)))
+              (setq noteR
+                    (_pvtCollEvalThunk
+                      (lambda () (axlGetNote hsdb "test" tname))))
+              (setq testNoteCache
+                    (cons (list tname noteR) testNoteCache))))))
+      ;; cleanup
+      (errset (maeCloseResults) nil))
+    ;; --- 7. package walkData (insertion-ordered: reverse the head-first lists)
+    (setq walkData (makeTable 'pvtCollectWalk nil))
+    (setarray walkData "outputs"          (reverse outputs))
+    (setarray walkData "tests"            (reverse tests))
+    (setarray walkData "pidSweepCache"    (reverse pidSweepCache))
+    (setarray walkData "cornerParamCache" (reverse cornerParamCache))
+    (setarray walkData "testNoteCache"    (reverse testNoteCache))
+    (setarray walkData "totalPoints"      totalPoints)
+    (return (pvtOk walkData)))
+)
+
 
 (procedure (_pvtCollIterateResults sess histName hsdb)
   (prog (rdbR rdb totalPoints pid pt
