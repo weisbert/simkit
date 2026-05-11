@@ -50,6 +50,16 @@ from simkit.from_db import (
     load_dump_from_db,
 )
 
+from simkit.diff import (
+    DiffResult,
+    DiffRow,
+    NetlistDiff,
+    compute_diff,
+    compute_netlist_diff,
+    compute_results_diff,
+    resolve_slice,
+)
+
 from simkit.db import (
     bootstrap,
     connect,
@@ -112,6 +122,14 @@ __all__ = [
     "list_runs",
     # from_db
     "load_dump_from_db",
+    # diff
+    "DiffResult",
+    "DiffRow",
+    "NetlistDiff",
+    "compute_diff",
+    "compute_netlist_diff",
+    "compute_results_diff",
+    "resolve_slice",
     # validate
     "Violation",
     "validate_dump",
