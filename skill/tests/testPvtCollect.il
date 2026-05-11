@@ -736,4 +736,130 @@
         (pvtAssert (and rv (listp rv)) t "second reload OK")))))
 
 
+;; ============================================================================
+;; _pvtCollBuildPidListFromTests — Bug B harness (DECISIONS #23 follow-up).
+;;
+;; The walker's pidList build was refactored out into a pure helper so Tier-1
+;; can exercise the gappy/dup/nil cases directly. The helper reads
+;; `tst->pointID` via _pvtCollEvalThunk, so any object exposing that slot
+;; (defstruct or otherwise) works as a mock test. The live walker is still
+;; covered only by Tier-2 byte-identical regression on `simkit_verify` —
+;; reason: maeReadResDB is write-protected in classic SKILL (skillbridge
+;; `putd` refuses to override it), so a live-side mock-rdb is not feasible.
+;; ============================================================================
+
+;; Define the mock-tst struct exactly once (defstruct re-emit warns + may
+;; reset slot values; doing it inside each test thunk would warn every run).
+(defstruct pvtMockTst pointID)
+
+(procedure (_pvtTestMakeMockTst pid)
+  "Construct a mock-tst whose `tst->pointID` slot returns `pid`."
+  (let ((m (make_pvtMockTst)))
+    (setf m->pointID pid)
+    m))
+
+(pvtTestRegister "collect/buildPidList-empty-input"
+  (lambda ()
+    (pvtAssert (_pvtCollBuildPidListFromTests nil) nil
+               "empty input → nil pidList")))
+
+(pvtTestRegister "collect/buildPidList-single-pid"
+  (lambda ()
+    (pvtAssert
+      (_pvtCollBuildPidListFromTests (list (_pvtTestMakeMockTst 7)))
+      '(7)
+      "single mock-tst → singleton pidList")))
+
+(pvtTestRegister "collect/buildPidList-contiguous-pids-sorted"
+  (lambda ()
+    (pvtAssert
+      (_pvtCollBuildPidListFromTests
+        (list (_pvtTestMakeMockTst 1)
+              (_pvtTestMakeMockTst 2)
+              (_pvtTestMakeMockTst 3)))
+      '(1 2 3)
+      "contiguous 1..3 → [1,2,3]")))
+
+(pvtTestRegister "collect/buildPidList-gappy-pids-preserved"
+  (lambda ()
+    ;; THIS IS THE BUG B WITNESS. The pre-fix walker would stop at the
+    ;; first nil from `(rdb->point pid)` and never visit pid=4. The new
+    ;; helper iterates `tst->pointID` across the tst list, so pid=4 is
+    ;; included whether or not pid=3 ever existed in the rdb.
+    (pvtAssert
+      (_pvtCollBuildPidListFromTests
+        (list (_pvtTestMakeMockTst 1)
+              (_pvtTestMakeMockTst 2)
+              (_pvtTestMakeMockTst 4)
+              (_pvtTestMakeMockTst 5)))
+      '(1 2 4 5)
+      "gap at pid=3 → [1,2,4,5] (Bug B fix)")))
+
+(pvtTestRegister "collect/buildPidList-unsorted-input-emits-sorted"
+  (lambda ()
+    (pvtAssert
+      (_pvtCollBuildPidListFromTests
+        (list (_pvtTestMakeMockTst 5)
+              (_pvtTestMakeMockTst 1)
+              (_pvtTestMakeMockTst 3)
+              (_pvtTestMakeMockTst 2)))
+      '(1 2 3 5)
+      "input order doesn't matter — output ascending")))
+
+(pvtTestRegister "collect/buildPidList-duplicates-deduped"
+  (lambda ()
+    ;; Multiple tests share a pid (one pid per corner is the usual shape
+    ;; — same point swept across N corners means N tst rows with the same
+    ;; pointID).
+    (pvtAssert
+      (_pvtCollBuildPidListFromTests
+        (list (_pvtTestMakeMockTst 1)
+              (_pvtTestMakeMockTst 2)
+              (_pvtTestMakeMockTst 1)
+              (_pvtTestMakeMockTst 2)
+              (_pvtTestMakeMockTst 3)))
+      '(1 2 3)
+      "duplicate pids deduped")))
+
+(pvtTestRegister "collect/buildPidList-nil-pointID-skipped"
+  (lambda ()
+    ;; A tst with nil pointID (slot unset, or live SKILL returned nil) must
+    ;; not pollute pidList — and must not poison sort/length.
+    (let ((bad (make_pvtMockTst)))
+      ;; bad->pointID stays unset / nil
+      (pvtAssert
+        (_pvtCollBuildPidListFromTests
+          (list (_pvtTestMakeMockTst 1)
+                bad
+                (_pvtTestMakeMockTst 2)))
+        '(1 2)
+        "tst with nil pointID skipped"))))
+
+(pvtTestRegister "collect/buildPidList-all-nil-pointIDs"
+  (lambda ()
+    (let ((b1 (make_pvtMockTst)) (b2 (make_pvtMockTst)))
+      (pvtAssert
+        (_pvtCollBuildPidListFromTests (list b1 b2))
+        nil
+        "all-nil-pointID list → nil pidList"))))
+
+(pvtTestRegister "collect/buildPidList-large-gappy-set"
+  (lambda ()
+    ;; 10 pids with two gaps, randomly ordered. Covers sort+dedup+nil-skip
+    ;; in one shot.
+    (let ((bad (make_pvtMockTst)))
+      (pvtAssert
+        (_pvtCollBuildPidListFromTests
+          (list (_pvtTestMakeMockTst 11)
+                (_pvtTestMakeMockTst 3)
+                (_pvtTestMakeMockTst 7)
+                bad
+                (_pvtTestMakeMockTst 11)  ; duplicate
+                (_pvtTestMakeMockTst 1)
+                (_pvtTestMakeMockTst 9)
+                (_pvtTestMakeMockTst 3))) ; duplicate
+        '(1 3 7 9 11)
+        "11-pid scrambled+gappy+dup+nil → [1,3,7,9,11]"))))
+
+
 t  ; load-time return

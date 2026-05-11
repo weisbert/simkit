@@ -336,12 +336,18 @@ _Date: 2026-05-11_
 
 ---
 
-## #23 — Walker-level Tier-1 testing of `_pvtCollWalkRdb` deferred
-_Date: 2026-05-11_
+## #23 — Walker-level Tier-1 testing of `_pvtCollWalkRdb` deferred (partially closed 2026-05-12)
+_Date: 2026-05-11; updated 2026-05-12_
 
 **Decision:** `_pvtCollWalkRdb` does not have direct Tier-1 unit tests covering its live-rdb iteration paths (Section 2 pidList construction, Section 5 per-point walk). The pure `_pvtCollRowsFromTuples` shaper has full Tier-1 coverage (215+ tests). Bug B (walker pid set from `tst->pointID`) is verified solely by Tier-2 byte-identical regression on `simkit_verify` (a converged, contiguous-pid run) plus the shaper's existing gappy-pid Scenario E1 test which proves the shaper survives gap inputs.
 
+**Update 2026-05-12 — partial closure via helper extraction.** The pidList build (Section 2) has been factored out of the walker into a pure helper, `_pvtCollBuildPidListFromTests(tstsForPids)`. The helper reads `tst->pointID` via `_pvtCollEvalThunk`, so a defstruct mock-tst (`pvtMockTst` in `testPvtCollect.il`) drives it directly without needing a live `rdb`. Nine new Tier-1 tests cover empty input, single pid, contiguous, **gappy (the Bug B witness)**, unsorted, duplicates, nil-pointID skip, all-nil, and a scrambled+gappy+dup+nil large case. SKILL Tier-1 grew 215 → 224.
+
+What remains deferred: the **live-walker integration** test (driving `_pvtCollWalkRdb` end-to-end against synthetic data) is still blocked. The skillbridge probing run on 2026-05-12 confirmed `maeReadResDB` is write-protected in this Virtuoso build (`putd: function is write protected and cannot be redefined`), so a `putd` shadow of the live data-access APIs is not possible. `flet` is also unavailable in classic SKILL scope (it requires SCHEME). The remaining paths to full walker coverage are: (1) build a synthetic-rdb defstruct mock and refactor the walker to take the rdb as a parameter (medium-cost API change), or (2) wait for a real gappy-pid sim and pin it as a Tier-2 fixture.
+
 **Why:** Surfaced during §3 Step 4 Bug B implementation. The walker calls slot-accessor funobjs (`rdb->point`, `rdb->tests`, `tst->pointID`, etc.) — see Decision #16. Constructing a SKILL mock-rdb whose accessors are funobj-bearing slots and behave identically to live axlrdb objects is non-trivial: it touches every classic-SKILL trap in #14 (struct/array discipline, funobj construction, `defstruct` access semantics). The estimated cost is 0.5–1 session of pure infrastructure work that buys exactly one test surface; the alternative is a real sim with gappy pids (zero infra cost, low probability of one being produced organically).
+
+The 2026-05-12 helper extraction (above) buys the pidList-build coverage at the unit-test level without touching the live-walker mocking problem — at the cost of also not catching a future regression where the caller iterates the wrong data shape (since the helper itself is correct by test, and the call site is correct by Tier-2). The trade is judged acceptable; the bug surface "we iterate the wrong thing" is small (one line in the walker) and Tier-2 byte-equality catches it.
 
 **Implications:**
 - Bug B fix is verified by zero-regression on the happy path (Tier-2) plus inspection of the new pidList construction logic — NOT by direct exercise of the gappy-pid path. A future real sim with non-contiguous pids will validate the fix empirically; until then, the path is correct-by-reasoning, not correct-by-test.

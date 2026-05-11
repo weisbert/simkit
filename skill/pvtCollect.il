@@ -535,6 +535,45 @@
 
 
 ;; ============================================================================
+;; Helper: _pvtCollBuildPidListFromTests(tstsForPids)
+;;
+;; Pure helper extracted from _pvtCollWalkRdb section 2 (Bug B fix). Takes a
+;; list of tst-like objects exposing the `pointID` slot via `tst->pointID`
+;; and returns the sorted, de-duplicated list of valid pids.
+;;
+;; Why a separate helper:
+;;   The Bug B fix (DECISIONS #23) changed the walker from counting points
+;;   via `(while (rdb->point pid) ...)` count-up from pid=1 — which stopped
+;;   on the first nil and so under-counted gappy-pid simulations — to
+;;   iterating `(rdb->tests)` and reading `tst->pointID`. Direct Tier-1
+;;   testing of the live walker is blocked by maeReadResDB being write-
+;;   protected (skillbridge putd refuses to override it), so this helper
+;;   carries the gappy-pid coverage at the unit-test level. Tier-1 mock
+;;   tst objects (defstruct) drive the helper through every dedup / sort /
+;;   skip-nil path; the walker calls into this helper and is verified
+;;   end-to-end by Tier-2 byte-identical regression on `simkit_verify`.
+;;
+;; Contract:
+;;   - tstsForPids: list of objects exposing `tst->pointID`. May be nil
+;;     (returns nil). Per-test slot access is errset-wrapped via
+;;     _pvtCollEvalThunk so a tst whose slot read throws is silently
+;;     skipped (matches the live walker's classic-SKILL-trap discipline,
+;;     DECISIONS #16).
+;;   - Returns: list of pids ascending, no duplicates, nils removed.
+;; ============================================================================
+
+(procedure (_pvtCollBuildPidListFromTests tstsForPids)
+  (let (pidList tstPid)
+    (foreach tst tstsForPids
+      (setq tstPid (_pvtCollEvalThunk (lambda () tst->pointID)))
+      (cond
+        ((and tstPid (null (member tstPid pidList)))
+          (setq pidList (cons tstPid pidList)))))
+    (sort pidList 'lessp)))
+
+
+
+;; ============================================================================
 ;; Helper: _pvtCollWalkRdb(sess histName hsdb)
 ;;   Step 1 of the Plan-B §3 refactor (docs/plans/§3_messy_data.md §1).
 ;;
@@ -607,17 +646,12 @@
     ;;        first nil — so a gappy pid sequence (e.g. pid 3 missing,
     ;;        pid 4 present) under-counted totalPoints and pid 4 was
     ;;        never visited. tst->pointID gives the authoritative set
-    ;;        of pids that actually exist in the rdb. POC had the same
-    ;;        bug; see DECISIONS for the Bug B note.
+    ;;        of pids that actually exist in the rdb. Dedup+sort logic
+    ;;        lives in _pvtCollBuildPidListFromTests so Tier-1 can cover
+    ;;        the gappy/dup/nil cases directly (DECISIONS #23 update).
     (setq tstsForPids
           (or (_pvtCollEvalThunk (lambda () (funcall (rdb->tests)))) nil))
-    (setq pidList nil)
-    (foreach tst tstsForPids
-      (setq tstPid (_pvtCollEvalThunk (lambda () tst->pointID)))
-      (cond
-        ((and tstPid (null (member tstPid pidList)))
-          (setq pidList (cons tstPid pidList)))))
-    (setq pidList (sort pidList 'lessp))
+    (setq pidList (_pvtCollBuildPidListFromTests tstsForPids))
     (setq totalPoints (length pidList))
     ;; --- 3. walk state — alists, head-first; reversed at return for stable order.
     (setq outputs          nil)
