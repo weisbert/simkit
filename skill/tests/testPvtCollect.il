@@ -362,6 +362,366 @@
 
 
 ;; --------------------------------------------------------------------------
+;; _pvtCollRowsFromTuples — pure-shaper tests (Plan-B §3 Step 2)
+;;
+;; Each test builds a synthetic walkData via _pvtCollTestMakeWalk and calls
+;; the shaper directly. No live ADE-XL session needed. Tests document the
+;; *current* behaviour, including Bug A / C / D quirks called out in
+;; Plan-B §3 — those flip to "fixed" assertions in Step 4.
+;; --------------------------------------------------------------------------
+
+(procedure (_pvtCollTestMakeWalk outputs tests pidSweepCache
+                                 cornerParamCache testNoteCache totalPoints)
+  "Build a synthetic walkData makeTable matching the _pvtCollWalkRdb contract."
+  (let ((w (makeTable 'pvtCollectTestWalk nil)))
+    (setarray w "outputs"          outputs)
+    (setarray w "tests"            tests)
+    (setarray w "pidSweepCache"    pidSweepCache)
+    (setarray w "cornerParamCache" cornerParamCache)
+    (setarray w "testNoteCache"    testNoteCache)
+    (setarray w "totalPoints"      totalPoints)
+    w)
+)
+
+
+(pvtTestRegister "collect/rows-empty-walk-returns-nil-firstTest-and-empty-rows"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk nil nil nil nil nil 0))
+          (result nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (car result) nil "firstTestName is nil")
+      (pvtAssert (cdr result) nil "rows list empty"))))
+
+
+(pvtTestRegister "collect/rows-single-ok-output-emits-ok-row"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" 1.234))
+                  nil
+                  (list (list 1 nil))            ; sweep cache; nil → empty-obj
+                  (list (list "TT" nil))         ; cornerObj resolution failed
+                  nil
+                  1))
+          (result nil) (rows nil) (row nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 1 "exactly 1 row")
+      (pvtAssert (car result) "tran" "firstTestName = tran")
+      (setq row (car rows))
+      (pvtAssert (arrayref row "status") "ok" "status = ok")
+      (pvtAssert (arrayref row "value")  1.234 "value passed through")
+      (pvtAssert (arrayref row "test")   "tran" "test name")
+      (pvtAssert (arrayref row "corner") "TT" "corner name")
+      (pvtAssert (arrayref row "point")  1 "point id")
+      (pvtAssert (arrayref row "output") "vout" "output name")
+      (pvtAssert (arrayref row "test_note") PVT_JSON_NULL
+                 "no testNote → JSON null"))))
+
+
+(pvtTestRegister "collect/rows-multiple-points-multiple-corners-cross-product"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list
+                    (list 1 "TT"     "tran" "vout"  1.0)
+                    (list 1 "WC_VDD" "tran" "vout"  0.9)
+                    (list 2 "TT"     "tran" "vout"  1.1)
+                    (list 2 "WC_VDD" "tran" "vout"  0.8))
+                  nil
+                  (list (list 1 nil) (list 2 nil))
+                  (list (list "TT" nil) (list "WC_VDD" nil))
+                  nil
+                  2))
+          (result nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (length (cdr result)) 4 "2 corners × 2 points = 4 rows")
+      (pvtAssert (car result) "tran" "firstTestName is the first ok-row's test"))))
+
+
+(pvtTestRegister "collect/rows-string-value-wave-skipped"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" "wave"))
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      ;; "wave" outputs do not emit an ok row; key IS in seenSet → pass 3
+      ;; emits a no_convergence row.
+      (pvtAssert (length (cdr result)) 1 "wave skips ok, pass-3 emits 1 sentinel")
+      (pvtAssert (arrayref (car (cdr result)) "status") "no_convergence"
+                 "wave-only key becomes no_convergence sentinel")
+      (pvtAssert (car result) nil
+                 "no ok-row emitted → firstTestName stays nil"))))
+
+
+(pvtTestRegister "collect/rows-string-value-non-wave-emits-ok"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "verdict" "PASS"))
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (length (cdr result)) 1 "string value (not 'wave') emits ok")
+      (pvtAssert (arrayref (car (cdr result)) "status") "ok" "status = ok")
+      (pvtAssert (arrayref (car (cdr result)) "value") "PASS" "value passed through"))))
+
+
+;; --- Scenario A: partial-convergence corner → no_convergence sentinel
+(pvtTestRegister "collect/rows-partial-converge-emits-no-convergence"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list
+                    (list 1 "TT"     "tran" "vout"  1.234)
+                    (list 1 "TT"     "tran" "delay" 42e-12)
+                    (list 1 "WC_VDD" "tran" "vout"  "wave"))    ; corner failed
+                  (list
+                    (list 1 "TT"     "tran" 'done)
+                    (list 1 "WC_VDD" "tran" 'done))             ; test='done despite per-corner fail
+                  (list (list 1 nil))
+                  (list (list "TT" nil) (list "WC_VDD" nil))
+                  nil
+                  1))
+          (result nil) (rows nil) (sentinel nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 3 "2 ok (TT) + 1 no_convergence (WC_VDD)")
+      ;; The sentinel is the last row (pass 3 runs after pass 1; rows are
+      ;; reversed-once so insertion order is preserved).
+      (setq sentinel (nthelem 3 rows))
+      (pvtAssert (arrayref sentinel "status") "no_convergence" "WC_VDD → no_convergence")
+      (pvtAssert (arrayref sentinel "corner") "WC_VDD" "sentinel corner")
+      (pvtAssert (arrayref sentinel "output") "__sim_status__" "sentinel output"))))
+
+
+;; --- Scenario B: mid-flight PvtSave — test 'running' sentinel
+(pvtTestRegister "collect/rows-mid-flight-running-sentinel"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" 1.0))      ; tran finished
+                  (list (list 1 "TT" "tran"  'done)
+                        (list 1 "TT" "noise" 'running))       ; noise still running
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (rows nil) (sentinel nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 2 "1 ok (tran) + 1 running sentinel (noise)")
+      (setq sentinel (nthelem 2 rows))
+      (pvtAssert (arrayref sentinel "status") "running" "noise → status running")
+      (pvtAssert (arrayref sentinel "test")   "noise" "sentinel test = noise")
+      (pvtAssert (arrayref sentinel "output") "__sim_status__" "sentinel output"))))
+
+
+;; --- Scenario C: 'failed' test
+(pvtTestRegister "collect/rows-failed-test-sentinel"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" 1.0))
+                  (list (list 1 "TT" "tran"     'done)
+                        (list 1 "TT" "spectreX" 'failed))
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (rows nil) (sentinel nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 2 "1 ok + 1 failed sentinel")
+      (setq sentinel (nthelem 2 rows))
+      (pvtAssert (arrayref sentinel "status") "failed" "spectreX → failed"))))
+
+
+;; --- Scenario D1: aborted symbol passthrough via _pvtSymToStr
+(pvtTestRegister "collect/rows-aborted-symbol-passthrough"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  nil
+                  (list (list 1 "TT" "tran" 'aborted))
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (rows nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 1 "1 sentinel row")
+      (pvtAssert (arrayref (car rows) "status") "aborted"
+                 "'aborted symbol → \"aborted\" via _pvtSymToStr"))))
+
+
+;; --- Scenario D2: nil status → "running" fallback (Bug A — pre-fix behaviour)
+(pvtTestRegister "collect/rows-non-symbol-status-CURRENTLY-becomes-running"
+  (lambda ()
+    ;; Documents the existing line-679 fallback. Plan-B §3 calls this
+    ;; Bug A: a nil / non-symbol status should arguably surface as
+    ;; "unknown" so the validator flags it. Step 4 flips this to
+    ;; "unknown" + the validator's I12 hard-error catches it.
+    ;; NOTE: nil status is filtered out by the outer `(and statusSym ...)`
+    ;; guard, so use a non-symbol non-nil status (a string) to exercise
+    ;; the fallback arm specifically.
+    (let ((walk (_pvtCollTestMakeWalk
+                  nil
+                  (list (list 1 "TT" "tran" "oddball-string"))
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (rows nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 1 "1 sentinel row")
+      (pvtAssert (arrayref (car rows) "status") "running"
+                 "non-symbol status → \"running\" (Bug A pre-fix)"))))
+
+
+;; --- Scenario E1: gappy pid sequence — pure shaper is gap-tolerant
+(pvtTestRegister "collect/rows-gappy-pids-shape-correctly"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list
+                    (list 1 "TT" "tran" "v" 1.0)
+                    (list 2 "TT" "tran" "v" 2.0)
+                    (list 4 "TT" "tran" "v" 4.0))             ; pid 3 missing
+                  nil
+                  (list (list 1 nil) (list 2 nil) (list 4 nil))
+                  (list (list "TT" nil))
+                  nil
+                  4))                                          ; totalPoints uneven
+          (result nil) (rows nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 3 "3 ok rows even though pid 3 is missing")
+      (pvtAssert (arrayref (nthelem 1 rows) "point") 1 "row 1 → pid 1")
+      (pvtAssert (arrayref (nthelem 2 rows) "point") 2 "row 2 → pid 2")
+      (pvtAssert (arrayref (nthelem 3 rows) "point") 4 "row 3 → pid 4"))))
+
+
+;; --- Scenario F1: a "wave" output among converged ones suppresses pass-3
+(pvtTestRegister "collect/rows-mixed-converge-wave-suppresses-sentinel"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list
+                    (list 1 "TT" "tran" "vout"  "wave")       ; "wave" registers seenKey
+                    (list 1 "TT" "tran" "delay" 1.5))         ; numeric writes seenKey
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (rows nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 1 "1 ok row, no no_convergence sentinel")
+      (pvtAssert (arrayref (car rows) "status") "ok" "delay row is ok")
+      (pvtAssert (arrayref (car rows) "value")  1.5 "delay value"))))
+
+
+;; --- Bug C (pre-fix): pass-2 sentinel fires even when pass-1 already wrote
+(pvtTestRegister "collect/rows-pass2-CURRENTLY-emits-when-pass1-wrote"
+  (lambda ()
+    ;; Documents existing _pvtCollIterateResults behaviour: a 'running test
+    ;; whose tran already produced an ok row still emits a __sim_status__
+    ;; sentinel for the SAME (cname,pid). The validator's I1 invariant
+    ;; rejects this. Step 4 lands the writtenSet skip.
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" 1.0))     ; pass 1 writes ok
+                  (list (list 1 "TT" "tran" 'running))       ; pass 2 emits anyway
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (rows nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 2
+                 "Bug C pre-fix: ok row + running sentinel coexist (validator I1 rejects)")
+      (pvtAssert (arrayref (nthelem 1 rows) "status") "ok" "row 1 is ok")
+      (pvtAssert (arrayref (nthelem 2 rows) "status") "running" "row 2 is running sentinel"))))
+
+
+;; --- Bug D (pre-fix): pass-3 fallback marker is "_no_cache"
+(pvtTestRegister "collect/rows-pass3-CURRENTLY-uses-no-cache-marker"
+  (lambda ()
+    ;; A "wave" output triggers pass-3 for an (cname,pid) where the walker
+    ;; captured (cname nil) — cornerObj resolution failed. Existing pass-3
+    ;; uses "_no_cache" while pass 1/2 used "_parse_error" for the same
+    ;; state. Step 4 unifies on "_no_corner_vars".
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" "wave"))    ; pass 3 fires for (TT,1)
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))                       ; cornerObj failed
+                  nil
+                  1))
+          (result nil) (rows nil) (cv nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 1 "1 sentinel row from pass 3")
+      (setq cv (arrayref (car rows) "corner_vars"))
+      (pvtAssert (and cv (arrayref cv "_no_cache")) "TT"
+                 "Bug D pre-fix: pass-3 emits {_no_cache: <cname>} marker"))))
+
+
+;; --- test_note flattening: "" → JSON null
+(pvtTestRegister "collect/rows-test-note-empty-string-becomes-null"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" 1.0))
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  (list (list "tran" ""))                     ; empty-string note
+                  1))
+          (result nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (arrayref (car (cdr result)) "test_note") PVT_JSON_NULL
+                 "empty-string note → PVT_JSON_NULL"))))
+
+
+;; --- test_note passthrough: non-empty string preserved
+(pvtTestRegister "collect/rows-test-note-non-empty-passes-through"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "vout" 1.0))
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  (list (list "tran" "primary transient"))
+                  1))
+          (result nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (arrayref (car (cdr result)) "test_note") "primary transient"
+                 "non-empty note preserved verbatim"))))
+
+
+;; --- firstTestName = the FIRST ok-row's test, not the first tuple's
+(pvtTestRegister "collect/rows-firstTestName-is-first-pass1-write"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list
+                    (list 1 "TT" "tran" "vout" "wave")        ; not numeric → skipped
+                    (list 1 "TT" "dc"   "iout" 1e-3))         ; numeric → writes
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (car result) "dc"
+                 "firstTestName = first test that emitted an ok row, not 'tran'"))))
+
+
+;; --------------------------------------------------------------------------
 ;; Idempotent re-load: load pvtCollect.il twice in a row should not error.
 ;; --------------------------------------------------------------------------
 

@@ -721,6 +721,207 @@
 )
 
 
+;; ============================================================================
+;; Helper: _pvtCollRowsFromTuples(walkData)
+;;   Step 2 of the Plan-B §3 refactor (docs/plans/§3_messy_data.md §1, §7).
+;;
+;; PURE shaping function — no live calls, no errset. Takes the `walkData`
+;; produced by _pvtCollWalkRdb and runs the three result-shaping passes:
+;;
+;;   pass 1 — OK rows: every numeric / non-"wave" string output emits an
+;;            "ok" row. Builds seenSet / writtenSet / keysSeen for pass 3.
+;;   pass 2 — failed/running sentinel rows: every test whose statusSym is
+;;            non-nil and != 'done emits one __sim_status__ row with the
+;;            mapped status string ("failed", "running", `_pvtSymToStr` for
+;;            other symbols, or "running" fallback for non-symbol). NOTE:
+;;            this preserves the existing _pvtCollIterateResults behaviour
+;;            of emitting the sentinel even when pass 1 already wrote rows
+;;            for the same (cname,pid) — that is Bug C per Plan-B §3 and
+;;            the fix lands as part of Step 4.
+;;   pass 3 — no_convergence sentinel rows: for every (cname,pid) seen in
+;;            pass 1 but not written, emit one __sim_status__ row with
+;;            status "no_convergence".
+;;
+;; Returns (firstTestName . listOfRows) — the same shape that
+;; _pvtCollIterateResults returns wrapped in pvtOk today. firstTestName is
+;; the first test that contributed an ok row in pass 1 (used by the netlist
+;; copy), or nil if pass 1 emitted nothing.
+;;
+;; Lookups against walkData caches use 2-list assoc entries:
+;;   (cadr (assoc key alist)) — value (could be nil)
+;;   (assoc key alist)        — the pair itself (nil iff key absent)
+;; This lets the shaper distinguish "key absent" (e.g. unreachable corner)
+;; from "key present with nil value" (e.g. cornerObj resolution failed).
+;; Behaviour parity with _pvtCollIterateResults:
+;;   pass 1 / pass 2 fallback marker: "_parse_error"  (cornerObj failed)
+;;   pass 3 fallback marker         : "_no_cache"     (cornerVars unknown)
+;; Unifying these is Plan-B Bug D, landing in Step 4.
+;;
+;; Bug A (line-679 non-symbol-status → "running" fallback) is also preserved
+;; here; Step 4 will switch it to "unknown" together with a schema.md edit.
+;;
+;; NOT YET WIRED — see _pvtCollWalkRdb header.
+;; ============================================================================
+
+(procedure (_pvtCollRowsFromTuples walkData)
+  (prog (outputs tests pidSweepCache cornerParamCache testNoteCache
+         pid cname tname outName outVal statusSym
+         sweepRaw noteRaw cornerParamsAssoc
+         sweepObj cornerVarsObj cornerVarsAlist noteForRow
+         seenSet writtenSet seenKey keysSeen
+         rows firstTestName statusStr
+         tstPid tstCname tstTname)
+    ;; --- 1. extract walkData fields
+    (setq outputs          (arrayref walkData "outputs"))
+    (setq tests            (arrayref walkData "tests"))
+    (setq pidSweepCache    (arrayref walkData "pidSweepCache"))
+    (setq cornerParamCache (arrayref walkData "cornerParamCache"))
+    (setq testNoteCache    (arrayref walkData "testNoteCache"))
+    ;; --- 2. shape state
+    (setq seenSet       (makeTable 'pvtSeen    nil))
+    (setq writtenSet    (makeTable 'pvtWritten nil))
+    (setq keysSeen      nil)
+    (setq rows          nil)
+    (setq firstTestName nil)
+    ;; ===== PASS 1: OK rows ====================================================
+    (foreach outTuple outputs
+      (setq pid     (nthelem 1 outTuple))
+      (setq cname   (nthelem 2 outTuple))
+      (setq tname   (nthelem 3 outTuple))
+      (setq outName (nthelem 4 outTuple))
+      (setq outVal  (nthelem 5 outTuple))
+      (cond
+        ((and cname tname)
+          (setq seenKey (sprintf nil "%s|%d" cname pid))
+          (cond
+            ((null (arrayref seenSet seenKey))
+              (setq sweepRaw (cadr (assoc pid pidSweepCache)))
+              (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
+              (setarray seenSet seenKey (list tname cname pid sweepObj))
+              (setq keysSeen (cons seenKey keysSeen))))
+          (cond
+            ((or (numberp outVal)
+                 (and (stringp outVal) (not (equal outVal "wave"))))
+              ;; corner_vars
+              (setq cornerParamsAssoc (assoc cname cornerParamCache))
+              (setq cornerVarsAlist
+                    (cond
+                      ((null cornerParamsAssoc)
+                        ;; unreachable in normal walker output (walker
+                        ;; populates cache for every cname seen in outputs);
+                        ;; defensive — mirror pass 3's "_no_cache" marker.
+                        (list (list "_no_cache" cname)))
+                      ((null (cadr cornerParamsAssoc))
+                        ;; cornerObj resolution failed — matches existing
+                        ;; pass-1 fallback marker (pvtCollect.il pre-refactor).
+                        (list (list "_parse_error" cname)))
+                      (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
+              (setq cornerVarsObj
+                    (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))
+              ;; sweep — re-resolve from cache (the seenSet entry holds an
+              ;; isomorphic copy; using the cache makes the lookup uniform
+              ;; across passes).
+              (setq sweepRaw (cadr (assoc pid pidSweepCache)))
+              (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
+              ;; test_note — flatten "" → PVT_JSON_NULL (existing pattern).
+              (setq noteRaw (cadr (assoc tname testNoteCache)))
+              (setq noteForRow
+                    (cond
+                      ((and (stringp noteRaw) (greaterp (strlen noteRaw) 0))
+                        noteRaw)
+                      (t PVT_JSON_NULL)))
+              (setq rows
+                    (cons
+                      (_pvtCollMakeRow
+                        pid cname tname outName outVal "ok"
+                        sweepObj cornerVarsObj noteForRow)
+                      rows))
+              (setarray writtenSet seenKey t)
+              (cond
+                ((null firstTestName) (setq firstTestName tname))))))))
+    ;; ===== PASS 2: failed / running sentinel rows ============================
+    (foreach tstTuple tests
+      (setq tstPid    (nthelem 1 tstTuple))
+      (setq tstCname  (nthelem 2 tstTuple))
+      (setq tstTname  (nthelem 3 tstTuple))
+      (setq statusSym (nthelem 4 tstTuple))
+      (cond
+        ((and statusSym (not (equal statusSym 'done)))
+          (cond
+            ((and tstPid tstCname tstTname)
+              (setq statusStr
+                    (cond
+                      ((equal statusSym 'failed)  "failed")
+                      ((equal statusSym 'running) "running")
+                      ((symbolp statusSym)        (_pvtSymToStr statusSym))
+                      (t                          "running")))
+              ;; Bug C preserved: emit even if pass 1 already wrote (cname,pid).
+              (setq sweepRaw (cadr (assoc tstPid pidSweepCache)))
+              (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
+              (setq cornerParamsAssoc (assoc tstCname cornerParamCache))
+              (setq cornerVarsAlist
+                    (cond
+                      ((null cornerParamsAssoc)
+                        (list (list "_no_cache" tstCname)))
+                      ((null (cadr cornerParamsAssoc))
+                        (list (list "_parse_error" tstCname)))
+                      (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
+              (setq cornerVarsObj
+                    (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))
+              (setq noteRaw (cadr (assoc tstTname testNoteCache)))
+              (setq noteForRow
+                    (cond
+                      ((and (stringp noteRaw) (greaterp (strlen noteRaw) 0))
+                        noteRaw)
+                      (t PVT_JSON_NULL)))
+              (setq rows
+                    (cons
+                      (_pvtCollMakeRow
+                        tstPid tstCname tstTname "__sim_status__"
+                        PVT_JSON_NULL statusStr
+                        sweepObj cornerVarsObj noteForRow)
+                      rows)))))))
+    ;; ===== PASS 3: no_convergence sentinel rows ==============================
+    (foreach key (reverse keysSeen)
+      (cond
+        ((null (arrayref writtenSet key))
+          (let ((entry (arrayref seenSet key)))
+            (cond
+              ((and entry (listp entry))
+                (let ((ttn   (nthelem 1 entry))
+                      (cnm   (nthelem 2 entry))
+                      (pidn  (nthelem 3 entry))
+                      (sweep (nthelem 4 entry)))
+                  (setq cornerParamsAssoc (assoc cnm cornerParamCache))
+                  (setq cornerVarsAlist
+                        (cond
+                          ((null cornerParamsAssoc)
+                            (list (list "_no_cache" cnm)))
+                          ((null (cadr cornerParamsAssoc))
+                            ;; Bug D preserved — pass-3 uses "_no_cache" today
+                            ;; even when walker has a (cname nil) entry that
+                            ;; pass 1/2 would have flagged "_parse_error".
+                            (list (list "_no_cache" cnm)))
+                          (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
+                  (setq cornerVarsObj
+                        (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))
+                  (setq noteRaw (cadr (assoc ttn testNoteCache)))
+                  (setq noteForRow
+                        (cond
+                          ((and (stringp noteRaw) (greaterp (strlen noteRaw) 0))
+                            noteRaw)
+                          (t PVT_JSON_NULL)))
+                  (setq rows
+                        (cons
+                          (_pvtCollMakeRow
+                            pidn cnm ttn "__sim_status__"
+                            PVT_JSON_NULL "no_convergence"
+                            sweep cornerVarsObj noteForRow)
+                          rows)))))))))
+    (return (cons firstTestName (reverse rows))))
+)
+
+
 (procedure (_pvtCollIterateResults sess histName hsdb)
   (prog (rdbR rdb totalPoints pid pt
          cornerVarCache testNoteCache sweepPerPidCache
