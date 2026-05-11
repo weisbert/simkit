@@ -591,8 +591,7 @@
          cname tname outName outVal
          tstStatus testObj cornerObj
          paramR noteR
-         tstPid
-         walkData)
+         tstPid pidList tstsForPids)
     ;; --- 1. open the result DB
     (setq rdbR (errset (maeReadResDB ?historyName histName ?session sess) nil))
     (setq rdb (cond ((and rdbR (listp rdbR)) (car rdbR)) (t nil)))
@@ -602,13 +601,24 @@
                         (sprintf nil "history %L not found in session %L"
                                  histName sess)
                         nil))))
-    ;; --- 2. count points (same walk shape as _pvtCollIterateResults today;
-    ;;        Plan-B Bug B fix lands separately as part of Step 4).
-    (setq totalPoints 0)
-    (setq pid 1)
-    (while (_pvtCollEvalThunk (lambda () (funcall (rdb->point) pid)))
-      (setq totalPoints (plus totalPoints 1))
-      (setq pid (plus pid 1)))
+    ;; --- 2. build pid list from (rdb->tests)→tst->pointID. Bug B fix
+    ;;        (Step 4): the pre-fix walker counted points by `(while
+    ;;        (rdb->point pid) ...)` from pid=1, which stopped at the
+    ;;        first nil — so a gappy pid sequence (e.g. pid 3 missing,
+    ;;        pid 4 present) under-counted totalPoints and pid 4 was
+    ;;        never visited. tst->pointID gives the authoritative set
+    ;;        of pids that actually exist in the rdb. POC had the same
+    ;;        bug; see DECISIONS for the Bug B note.
+    (setq tstsForPids
+          (or (_pvtCollEvalThunk (lambda () (funcall (rdb->tests)))) nil))
+    (setq pidList nil)
+    (foreach tst tstsForPids
+      (setq tstPid (_pvtCollEvalThunk (lambda () tst->pointID)))
+      (cond
+        ((and tstPid (null (member tstPid pidList)))
+          (setq pidList (cons tstPid pidList)))))
+    (setq pidList (sort pidList 'lessp))
+    (setq totalPoints (length pidList))
     ;; --- 3. walk state — alists, head-first; reversed at return for stable order.
     (setq outputs          nil)
     (setq tests            nil)
@@ -620,9 +630,9 @@
     (unwindProtect
       (progn
         ;; --- 5. per-point: stage sweep + outputs + lazily populate corner /
-        ;;       test-note caches
-        (setq pid 1)
-        (while (leqp pid totalPoints)
+        ;;       test-note caches. Iterate the gap-tolerant pidList built in
+        ;;       section 2 (Bug B fix).
+        (foreach pid pidList
           (setq pt (_pvtCollEvalThunk (lambda () (funcall (rdb->point) pid))))
           (cond
             (pt
@@ -668,8 +678,7 @@
                           (_pvtCollEvalThunk
                             (lambda () (axlGetNote hsdb "test" tname))))
                     (setq testNoteCache
-                          (cons (list tname noteR) testNoteCache)))))))
-          (setq pid (plus pid 1)))
+                          (cons (list tname noteR) testNoteCache))))))))
         ;; --- 6. per-test: tuples + back-fill caches for tests that had no
         ;;       outputs (running / failed tests). Matches the existing
         ;;       _pvtCollIterateResults pass-2 cache-population paths.
