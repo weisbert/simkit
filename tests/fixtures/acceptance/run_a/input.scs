@@ -1,0 +1,65 @@
+// Generated for: spectre
+// Generated on: May 10 22:16:46 2026
+// Design library name: sim_yusheng
+// Design cell name: Test
+// Design view name: config
+simulator lang=spectre
+global 0
+parameters DVDD=0.9 EN=1 ENB=0 INN=1 INP=0 N_ctrl=3 P_ctrl=3 flo=5G VDD=3
+include "/home/yusheng/IC/Cadence_Process_Library/TSMC18RF_PDK_v13d_OA/tsmc18rf/../models/spectre/rf018.scs" section=tt
+
+// Library name: sim_yusheng
+// Cell name: Test_cell
+// View name: schematic
+// Inherited view list: spectre cmos_sch cmos.sch schematic veriloga ahdl
+//pspice dspf
+subckt Test_cell EN ENB INN INP N_ctrl\<3\> N_ctrl\<2\> N_ctrl\<1\> \
+        N_ctrl\<0\> OUTN OUTP P_ctrl\<3\> P_ctrl\<2\> P_ctrl\<1\> \
+        P_ctrl\<0\> VDD VPP VSS
+ends Test_cell
+// End of subcircuit definition.
+
+// Library name: sim_yusheng
+// Cell name: Test
+// View name: schematic
+// Inherited view list: spectre cmos_sch cmos.sch schematic veriloga ahdl
+// pspice dspf
+I25 (N_ctrl\<3\> N_ctrl\<2\> N_ctrl\<1\> N_ctrl\<0\> P_ctrl\<3\> \
+        P_ctrl\<2\> P_ctrl\<1\> P_ctrl\<0\> ENB EN INN INP) dreg_Test_cell
+V0 (Vin 0) vsource type=pulse val0=0 val1=VDD period=1/flo rise=20p \
+        fall=20p width=1/flo/2-20p
+V2 (AVDD 0) vsource dc=VDD type=dc
+V1 (AGND 0) vsource dc=0 type=dc
+M1 (Vout Vin AVDD AVDD) pch l=180.0n w=2u m=4 ad=5.4e-13 as=7.5e-13 \
+        pd=2.54u ps=3.75u nrd=0.135 nrs=0.135
+C0 (Vout AGND) capacitor c=10f
+M0 (Vout Vin AGND AGND) nch l=180.0n w=2u m=2 ad=5.4e-13 as=9.6e-13 \
+        pd=2.54u ps=4.96u nrd=0.135 nrs=0.135
+I7 (EN ENB INN INP N_ctrl\<3\> N_ctrl\<2\> N_ctrl\<1\> N_ctrl\<0\> OUTN \
+        OUTP P_ctrl\<3\> P_ctrl\<2\> P_ctrl\<1\> P_ctrl\<0\> VDD VPP VSS) \
+        Test_cell
+simulatorOptions options psfversion="1.1.0" reltol=1e-3 vabstol=1e-6 \
+    iabstol=1e-12 temp=55 tnom=27 scalem=1.0 scale=1.0 gmin=1e-12 rforce=1 \
+    maxnotes=5 maxwarns=5 digits=5 cols=80 pivrel=1e-3 \
+    sensfile="../psf/sens.output" checklimitdest=psf 
+tran tran stop=5n errpreset=moderate write="spectre.ic" \
+    writefinal="spectre.fc" annotate=status maxiters=5 
+finalTimeOP info what=oppoint where=rawfile
+dcOp dc write="spectre.dc" maxiters=150 maxsteps=10000 annotate=status
+dcOpInfo info what=oppoint where=rawfile
+pss  pss  fund=flo  harms=12  errpreset=moderate  autotstab=yes
++    annotate=status
+pnoise pnoise start=1M stop=100M dec=1 values=[3M 50M] maxsideband=7 \
+    noisetype=sampled measurement=[pm0] annotate=status
+ pm0 jitterevent trigger=[Vout AGND] triggerthresh=(VDD/2) triggerdir=rise \
+    target=[Vout AGND]
+
+modelParameter info what=models where=rawfile
+element info what=inst where=rawfile
+outputParameter info what=output where=rawfile
+designParamVals info what=parameters where=rawfile
+primitives info what=primitives where=rawfile
+subckts info what=subckts where=rawfile
+save Vout AVDD AGND 
+saveOptions options save=allpub
+ahdl_include "/home/yusheng/cadence_work/Test/workarea/sim_yusheng/dreg_Test_cell/veriloga/veriloga.va"

@@ -79,10 +79,12 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 
 ### 6. End-to-end validation
 
-- [ ] Run one real Maestro PVT sim → `PvtSave` → `pvt ingest` → query from Python
-- [ ] Validate: TT worst-case query across corners
-- [ ] Validate: netlist diff between two slices with a known manual change
-- [ ] Validate: attach a screenshot post-hoc and retrieve it
+Fixtures live at `tests/fixtures/acceptance/` (captured from live `simkit_verify` 2026-05-12; run_b synthesised from run_a with a documented manual netlist edit + per-row +1% value delta). Driven by `tests/test_acceptance.py` (12 tests, no live Maestro needed).
+
+- [x] Run one real Maestro PVT sim → `PvtSave` → `pvt ingest` → query from Python — `GateOne_SaveIngestQuery` (3 tests; live capture used as `run_a`).
+- [x] Validate: TT worst-case query across corners — `GateTwo_WorstCaseAcrossCorners` (4 tests, including the "compliance-table-shaped" per-corner GROUP BY).
+- [x] Validate: netlist diff between two slices with a known manual change — `GateThree_NetlistDiffBetweenSlices` (3 tests; the documented edit is C0 capacitor `c=10f → c=12f` plus a `// edited` comment in `run_b/input.scs`).
+- [x] Validate: attach a screenshot post-hoc and retrieve it — `GateFour_PostHocAttachAndRetrieve` (2 tests; uses a 69-byte dummy PNG fixture).
 
 ### 7. Maintenance (do these as part of the work, not at the end)
 

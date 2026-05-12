@@ -1,0 +1,648 @@
+{
+  "schema_version": 1,
+  "run": {
+    "run_id": "ace00000-0000-4000-8000-000000000002",
+    "project_id": "netlist_fix_smoke",
+    "testbench_id": "sim_yusheng/Test/maestro",
+    "testbench_alias": null,
+    "timestamp": "2026-05-12T09:30:00+08:00",
+    "author": "yusheng",
+    "label": null,
+    "note": "acceptance fixture run_b \u2014 manual C0 cap edit",
+    "netlist_path": "input.scs",
+    "history_name": "simkit_verify"
+  },
+  "results": [
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "Test",
+      "output": "Rtime_clkout",
+      "value": 2.1558652e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "Test",
+      "output": "PN_1M",
+      "value": -168.67404,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "Test",
+      "output": "PN_3M",
+      "value": -172.23429,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "Test",
+      "output": "PN_10M",
+      "value": -174.54517,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "Test",
+      "output": "PN_50M",
+      "value": -175.63597,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT",
+      "test": "Test",
+      "output": "PN_100M",
+      "value": -175.78242,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_0",
+      "test": "Test",
+      "output": "Rtime_clkout",
+      "value": 2.1558652e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_0",
+      "test": "Test",
+      "output": "PN_1M",
+      "value": -168.67404,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_0",
+      "test": "Test",
+      "output": "PN_3M",
+      "value": -172.23429,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_0",
+      "test": "Test",
+      "output": "PN_10M",
+      "value": -174.54517,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_0",
+      "test": "Test",
+      "output": "PN_50M",
+      "value": -175.63597,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_0",
+      "test": "Test",
+      "output": "PN_100M",
+      "value": -175.78242,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_1",
+      "test": "Test",
+      "output": "Rtime_clkout",
+      "value": 2.2060117000000002e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_1",
+      "test": "Test",
+      "output": "PN_1M",
+      "value": -167.94381,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_1",
+      "test": "Test",
+      "output": "PN_3M",
+      "value": -171.39094,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_1",
+      "test": "Test",
+      "output": "PN_10M",
+      "value": -173.56244,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_1",
+      "test": "Test",
+      "output": "PN_50M",
+      "value": -174.5583,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_1",
+      "test": "Test",
+      "output": "PN_100M",
+      "value": -174.6896,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "tt",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_2",
+      "test": "Test",
+      "output": "Rtime_clkout",
+      "value": 2.4182531e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_2",
+      "test": "Test",
+      "output": "PN_1M",
+      "value": -167.37518,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_2",
+      "test": "Test",
+      "output": "PN_3M",
+      "value": -170.84655,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_2",
+      "test": "Test",
+      "output": "PN_10M",
+      "value": -173.04431,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_2",
+      "test": "Test",
+      "output": "PN_50M",
+      "value": -174.05633,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_2",
+      "test": "Test",
+      "output": "PN_100M",
+      "value": -174.19066,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_3",
+      "test": "Test",
+      "output": "Rtime_clkout",
+      "value": 2.4536536e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_3",
+      "test": "Test",
+      "output": "PN_1M",
+      "value": -166.92169,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_3",
+      "test": "Test",
+      "output": "PN_3M",
+      "value": -170.27388,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_3",
+      "test": "Test",
+      "output": "PN_10M",
+      "value": -172.33427999999998,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_3",
+      "test": "Test",
+      "output": "PN_50M",
+      "value": -173.25843,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_3",
+      "test": "Test",
+      "output": "PN_100M",
+      "value": -173.37963000000002,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ss",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_4",
+      "test": "Test",
+      "output": "Rtime_clkout",
+      "value": 1.9331097e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_4",
+      "test": "Test",
+      "output": "PN_1M",
+      "value": -169.175,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_4",
+      "test": "Test",
+      "output": "PN_3M",
+      "value": -172.83322,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_4",
+      "test": "Test",
+      "output": "PN_10M",
+      "value": -175.28752,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_4",
+      "test": "Test",
+      "output": "PN_50M",
+      "value": -176.49144,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_4",
+      "test": "Test",
+      "output": "PN_100M",
+      "value": -176.65607,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "3"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_5",
+      "test": "Test",
+      "output": "Rtime_clkout",
+      "value": 1.9558246e-11,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_5",
+      "test": "Test",
+      "output": "PN_1M",
+      "value": -168.99017,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_5",
+      "test": "Test",
+      "output": "PN_3M",
+      "value": -172.54234,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_5",
+      "test": "Test",
+      "output": "PN_10M",
+      "value": -174.85423,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_5",
+      "test": "Test",
+      "output": "PN_50M",
+      "value": -175.95109,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    },
+    {
+      "point": 1,
+      "corner": "TT_pvt_5",
+      "test": "Test",
+      "output": "PN_100M",
+      "value": -176.09855,
+      "status": "ok",
+      "sweep": {},
+      "corner_vars": {
+        "temperature": "55",
+        "model": "ff",
+        "VDD": "2.8"
+      },
+      "test_note": null
+    }
+  ],
+  "artifacts": []
+}

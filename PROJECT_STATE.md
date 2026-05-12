@@ -1,10 +1,10 @@
 # Project State
 
-_Last updated: 2026-05-12 (morning — netlist Spectre detection fixed)_
+_Last updated: 2026-05-12 (morning — §6 acceptance gates landed)_
 
 ## Current phase
 
-**Phase 1: Data Pillar MVP** — §1, §2 done; §3 collector core lit end-to-end on real Maestro; §3(d) Python validator + §4 ingester landed and committed; §3 messy-data refactor (a) complete through Step 4 with all four bug fixes; §5 `pvt` CLI fill-out (attach / label / list / diff / validate --from-db) landed and committed; **§3 netlist Spectre detection landed 2026-05-12.** Phase 1 functional surface is **complete**; the only remaining track is §6 end-to-end acceptance, which is now fully unblocked.
+**Phase 1: Data Pillar MVP — COMPLETE.** All six sections of the Phase 1 plan are done: spec (§1), `.pvtproject` loaders (§2 items 1 & 2), collector SKILL with all four messy-data bugs fixed plus working netlist Spectre detection (§3), Python ingester + inline validator (§3(d), §4), full `pvt` CLI surface (`ingest`/`validate`/`attach`/`label`/`list`/`diff`, §5), and the four §6 end-to-end acceptance gates pinned as a regression suite. Open items remaining (§2.2 SKILL dialog, screenshot v1.1, full walker mock-rdb harness) are all explicitly deferred per their DECISIONS entries and don't block Phase 2 from starting.
 
 ## Goal of Phase 1 (one sentence)
 
@@ -25,6 +25,7 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - **2026-05-11 (overnight)**: §3 messy-data Step 4 landed — all four bugs fixed in separate commits, Tier-1 215/1/0 maintained, Tier-2 byte-identical regression on `simkit_verify` (42/42 data rows match 2026-05-10 reference). Pre-fix `CURRENTLY-…` tests flipped to assert post-fix behaviour. Two scope notes captured in DECISIONS #22 (corner_vars marker unified across all three passes, not just pass-3) and #23 (walker-level Tier-1 testing deferred — Bug B verified by Tier-2 happy-path regression + correct-by-reasoning, awaits real gappy-pid sim or future synthetic-rdb harness).
 - **2026-05-12 (overnight)**: §5 `pvt` CLI fill-out landed in five commits — `pvt attach`, `pvt label`, `pvt list`, `pvt validate --from-db`, `pvt diff`. Pure-Python; full Tier-1 138 → 242 / 0 (104 new tests across 8 new test files). Surfaced three design decisions: #24 (diff slice resolution = exact-label-then-prefix), #25 (label re-policy = error w/o `--force`, `--clear` unconditional), #26 (DuckDB TIMESTAMPTZ ↔ Python via `CAST AS VARCHAR` + ISO normalisation, to avoid the stdlib-pytz dependency the offline-deploy constraint forbids). All §5 commands open the DB read-only when they only read.
 - **2026-05-12 (morning)**: §3 netlist Spectre detection fixed (DECISIONS #27). Pre-fix probe used `asiGetAnalogSimulator` — wrong API for Maestro / ADE-XL contexts — and returned nil on every spectre run. Replaced with a path-presence test: `<netlistDir>/input.scs` exists iff the simulator is Spectre. Tier-2 verified on the live `simkit_verify` session: `netlist_path="input.scs"`, 2938-byte `input.scs` copied into the run dir, `pvt validate` clean (no W2), `pvt ingest` populates `runs.netlist_path` non-null. 42-row count + first-row value match the 2026-05-10 reference, so no other behaviour shifted. SKILL Tier-1: 224/1 unchanged.
+- **2026-05-12 (morning)**: §6 end-to-end acceptance gates pinned. `tests/fixtures/acceptance/` carries the live-captured `run_a` (full simkit_verify dump from earlier today) plus a synthesised `run_b` (manual C0 capacitor edit + per-row +1% value delta) and a 69-byte dummy PNG. `tests/test_acceptance.py` exercises all four §6 gates — save→ingest→query, TT worst-case across the 7 corners, netlist diff between two slices, post-hoc attach + retrieve — as 12 unit tests that don't need live Maestro at test time. Phase 1 Python suite: 242 → 254 / 0.
 
 ## What's DONE
 
@@ -39,17 +40,18 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - §4 Python ingester — scan dump dir → DuckDB; idempotent on `run_id`; `schema_version` dispatch; inline-by-default validator. CLI: `pvt ingest` and `pvt validate`. 108 new tests, 138 total green.
 - §3(d) Python validator — 24 invariants + 2 warnings (`W1` corner_vars magic markers, `W2` null netlist_path). Independently invocable (`pvt validate <path>`) and inlined in `ingest_run_json` by default. `pvt validate --from-db <run_id>` audits a DB-resident run by reconstructing the JSON-dump shape (DECISIONS #26).
 - §5 `pvt` CLI surface — `attach`, `label` (set / `--force` / `--clear`), `list` (table or `--json`, `--slice-only`, `--project`, `--limit`), `diff` (results table + unified netlist diff, `--threshold`, `--include-status`, `--json`). Tier-1 grew 138 → 242 / 0; 8 new test modules. Slice resolution rule per DECISIONS #24.
+- §6 end-to-end acceptance — 4 gates pinned as 12 tests in `tests/test_acceptance.py` against `tests/fixtures/acceptance/` (live `simkit_verify` dump + synthesised variant with documented manual netlist edit + dummy PNG). Demonstrates the full save→ingest→query→diff→attach loop without needing live Maestro at test time.
 
 ## What's IN PROGRESS
 
-_(nothing — §3 netlist fix just landed. All §3 / §4 / §5 functional surface is complete and Tier-2 verified. Next stop: §6 end-to-end acceptance, which can now be exercised fully.)_
+_(nothing — Phase 1 just wrapped. All four §6 acceptance gates pinned as regression tests. Ready for Phase 2 kickoff or for the explicitly-deferred Phase 1 backlog below.)_
 
 ## What's NEXT (next 1–2 sessions)
 
-1. **§6 end-to-end validation.** All four acceptance gates are now reachable: Maestro sim → save → ingest → query; TT worst-case query; netlist diff between two slices (now that `pvt diff` has real netlists to diff); post-hoc attach + retrieve. Recommend running each against the live `simkit_verify` session as a single sweep and pinning a real end-to-end fixture suite (`tests/fixtures/acceptance/`) so future regressions surface fast.
-2. **Walker Tier-1 coverage (Bug B follow-up — partially closed 2026-05-12).** `_pvtCollWalkRdb` pidList build was extracted to a pure helper `_pvtCollBuildPidListFromTests`, with 9 new Tier-1 tests including the gappy-pid Bug B witness. SKILL Tier-1: 215 → 224 / 1 (the 1 baseline FAIL is the no-session test when Maestro is open). Live-walker end-to-end via mock-rdb still deferred — DECISIONS #23 records why (`maeReadResDB` is write-protected; classic SKILL has no `flet`).
-3. **Screenshot v1.1 deferral.** Current behaviour is one-shot warn + return nil. Tracked in S3_DESIGN §3.5; not a §6 blocker.
-4. **§2.2 SKILL first-save dialog** — Plan-D in `docs/plans/§2.2_dialog.md`. Needs `virtuoso-skill` PDF lookup for `hi*` form construction + live Virtuoso UI testing. A clean cloned-workarea testbed under `/home/yusheng/cadence_work/` will be prepared when this starts.
+1. **Phase 2 kickoff.** With the data pillar done, the next planned pillar is one isolated authoring helper (per DECISIONS #1 build order). `PHASE_PLAN.md` carries the corner-var-shape candidate from the overnight VCO PVT-union case; that's the natural starting point unless something newer has surfaced.
+2. **§2.2 SKILL first-save dialog (deferred Phase 1 backlog).** Plan-D in `docs/plans/§2.2_dialog.md`. Needs `virtuoso-skill` PDF lookup for `hi*` form construction + live Virtuoso UI testing. A clean cloned-workarea testbed under `/home/yusheng/cadence_work/` will be prepared when this starts. Not strictly Phase 1 — batch/scripted callers don't need it.
+3. **Walker mock-rdb harness (deferred — DECISIONS #23).** `_pvtCollBuildPidListFromTests` covers the Bug B surface at Tier-1; live-walker end-to-end via mock-rdb remains deferred (write-protected `maeReadResDB`, no `flet` in classic SKILL). Waiting on either a real gappy-pid sim or a budget for the medium-cost walker API refactor.
+4. **Screenshot v1.1 (deferred — S3_DESIGN §3.5).** Current behaviour is one-shot warn + return nil. Pick up when a use case shows up.
 
 ### Two smaller items still owed from §2 (independent of §3, can interleave)
 
