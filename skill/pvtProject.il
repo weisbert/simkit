@@ -328,13 +328,15 @@
     (cond
       (found (return (pvtParsePvtProject found))))
     ;; --- step 3: optional first-save dialog (SKILL only) ------------------
-    ;; The dialog file is intentionally NOT shipped this task, so the boundp
-    ;; gate makes this a no-op until that file is added later. Per plan
-    ;; risk #4: getShellEnvVar("DISPLAY") is the headless detector because
-    ;; hiInBatchMode is not always defined on this Cadence version.
+    ;; The dialog file is loaded by simkit's startup; the getd probe makes
+    ;; this a no-op until that file is loaded. Classic SKILL `boundp` only
+    ;; sees value-cell bindings, not procedure definitions — DECISIONS #28
+    ;; trap #15. `getd` returns the function object or nil, which is the
+    ;; correct presence check. Per plan risk #4: getShellEnvVar("DISPLAY")
+    ;; is the headless detector because hiInBatchMode is not always defined.
     (cond
       ((and allowDialog
-            (boundp 'pvtProjectFirstSaveDialog)
+            (getd 'pvtProjectFirstSaveDialog)
             (getShellEnvVar "DISPLAY"))
         (setq dlgPath (pvtProjectFirstSaveDialog))
         (cond
