@@ -1,12 +1,18 @@
 # Project State
 
-_Last updated: 2026-05-12 (afternoon — §2 item 3 first-save dialog landed, Tier-1 green; Tier-2 manual scenarios pending)_
+_Last updated: 2026-05-12 (evening — Phase 2 kicked off; §1 spec landed; §2 Python loader queued; PM-mode w/ verification gate)_
 
 ## Current phase
 
-**Phase 1: Data Pillar MVP — COMPLETE.** All six sections of the Phase 1 plan are done: spec (§1), `.pvtproject` loaders (§2 items 1 & 2), collector SKILL with all four messy-data bugs fixed plus working netlist Spectre detection (§3), Python ingester + inline validator (§3(d), §4), full `pvt` CLI surface (`ingest`/`validate`/`attach`/`label`/`list`/`diff`, §5), and the four §6 end-to-end acceptance gates pinned as a regression suite. Open items remaining (§2.2 SKILL dialog, screenshot v1.1, full walker mock-rdb harness) are all explicitly deferred per their DECISIONS entries and don't block Phase 2 from starting.
+**Phase 2: PVT-Union Builder — §1 spec drafted (this commit), §2 next.** Spec at `docs/phase2_pvt_union_spec.md` (~290 lines), worked example at `config/pvt_union.example.json` matching the live `simkit_verify` corner table. DECISIONS #29-31 capture the data-model recovery via skillbridge (dual-axis vars + models), the explode-order rule (alphabetic key + lex-sorted values), and the v1 scope freeze (no templating, no `axlSetParameter`, no MTS). Six open decisions (8.1-8.6) flagged; resolved during §2 implementation as defaults from §8 unless domain feedback intervenes.
 
-## Goal of Phase 1 (one sentence)
+**Phase 1: Data Pillar MVP — COMPLETE.** Six sections shipped: spec, `.pvtproject` loaders (Python + SKILL + first-save dialog), collector SKILL with messy-data refactor + Bug A/B/C/D fixes + netlist Spectre fix, Python ingester + inline validator, full `pvt` CLI surface (`ingest`/`validate`/`attach`/`label`/`list`/`diff`), 4 acceptance gates pinned as regression. Open items (§2.2 dialog Tier-2 manual, screenshot v1.1, walker mock-rdb) all deferred per their DECISIONS entries.
+
+## Goal of Phase 2 (one sentence)
+
+End-to-end loop: "describe one semantic PVT in a sidecar" → "tool emits the exploded Maestro corner table" → "round-trip is bit-identical against the live session."
+
+## Goal of Phase 1 (one sentence — historical reference)
 
 End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python can query it and diff two slices."
 
@@ -27,6 +33,7 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - **2026-05-12 (morning)**: §3 netlist Spectre detection fixed (DECISIONS #27). Pre-fix probe used `asiGetAnalogSimulator` — wrong API for Maestro / ADE-XL contexts — and returned nil on every spectre run. Replaced with a path-presence test: `<netlistDir>/input.scs` exists iff the simulator is Spectre. Tier-2 verified on the live `simkit_verify` session: `netlist_path="input.scs"`, 2938-byte `input.scs` copied into the run dir, `pvt validate` clean (no W2), `pvt ingest` populates `runs.netlist_path` non-null. 42-row count + first-row value match the 2026-05-10 reference, so no other behaviour shifted. SKILL Tier-1: 224/1 unchanged.
 - **2026-05-12 (morning)**: §6 end-to-end acceptance gates pinned. `tests/fixtures/acceptance/` carries the live-captured `run_a` (full simkit_verify dump from earlier today) plus a synthesised `run_b` (manual C0 capacitor edit + per-row +1% value delta) and a 69-byte dummy PNG. `tests/test_acceptance.py` exercises all four §6 gates — save→ingest→query, TT worst-case across the 7 corners, netlist diff between two slices, post-hoc attach + retrieve — as 12 unit tests that don't need live Maestro at test time. Phase 1 Python suite: 242 → 254 / 0.
 - **2026-05-12 (afternoon)**: §2 item 3 — SKILL first-save dialog landed (`skill/pvtProjectDialog.il`, 482 lines). v1 scope per DECISIONS #28 is four fields: Project name (required), DB root / Author / Save path (optional with defaults). Validation-fail UX uses `?unmapAfterCB t` + `hiSetCallbackStatus` to keep the form open. Tier-1 +23 tests via skillbridge → cumulative 256 / 1 / 0 (the 1 fail is the unchanged Maestro-open no-session baseline). Three new classic-SKILL traps surfaced and added to DECISIONS #14's idiom list (now reaches #15): (13) `(procedure (name ()) ...)` is wrong for zero-arg; (14) `?okButtonText` is not a real `hiCreateAppForm` keyword; (15) `boundp` is false for procedures — caught during Tier-2 smoke when the step-3 gate in `pvtProject.il` never flipped despite the dialog file being loaded. Fixed in `pvtProject.il:337` (`boundp` → `getd`); pre-existing bug that no test had exercised. Tier-2 happy path visually confirmed on live Virtuoso: form rendered, OK click wrote a clean 190-byte `.pvtproject` (project from Maestro session lib name `sim_yusheng`, blank dbRoot defaulted, blank author got `$USER`, schema_version emitted as bare int). Smoke test (`/tmp/dialog_smoke.py`) also covers programmatic happy / validation-fail / `?allowDialog nil` paths — 11/11 checks pass.
+- **2026-05-12 (evening)**: Phase 2 kicked off. §1 spec frozen at `docs/phase2_pvt_union_spec.md` + `config/pvt_union.example.json`. Data model recovered live via skillbridge against `fnxSession0` — discovered Maestro stores corner sweeps on two parallel axes (vars + models), each using the same space-separated-string sweep encoding. Initial single-axis draft was wrong; revised to vars + models.section (model file/block/test stay at defaults for v1). Explode order rule reverse-engineered from the live TT_pvt 6-sub-corner expansion: alphabetic key + lex-sorted values (DECISIONS #30). Six open decisions (8.1-8.6) flagged for resolution during §2; only 8.4 (axlSetParameter device-level overrides) is potentially scope-shifting. PM mode + verification gate granted by user: SKILL code must be skillbridge-verified non-blocking; Python must be runtime-verified.
 
 ## What's DONE
 
@@ -46,14 +53,19 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 
 ## What's IN PROGRESS
 
-- **§2.2 dialog Tier-2 verification.** All Tier-1 layers green; UI wrapper (hiCreateAppForm/hiDisplayForm/callback orchestration) is not unit-testable headless. Five scenarios in `skill/tests/tier2/scenarios.md`: Happy / Cancel / Validation feedback / Re-entrancy / Headless suppression. Once those pass, Phase 1 is fully closed.
+- **Phase 2 §2 — Python loader + validator.** Spec frozen; implementation queued. Module path: `python/simkit/union.py`. Verification gate per PM-mode rule: pytest 100% + `python -m simkit.union explode config/pvt_union.example.json` must reproduce the 7-row table in spec §9 verbatim.
 
-## What's NEXT (next 1–2 sessions)
+## What's NEXT (Phase 2 sequencing — locked dependencies)
 
-1. **Tier-2 verification of the first-save dialog** (as above) — half-session of GUI work, then §2.2 is done.
-2. **Phase 2 kickoff.** With the data pillar done, the next planned pillar is one isolated authoring helper (per DECISIONS #1 build order). `PHASE_PLAN.md` carries the corner-var-shape candidate from the overnight VCO PVT-union case; that's the natural starting point unless something newer has surfaced.
-3. **Walker mock-rdb harness (deferred — DECISIONS #23).** `_pvtCollBuildPidListFromTests` covers the Bug B surface at Tier-1; live-walker end-to-end via mock-rdb remains deferred (write-protected `maeReadResDB`, no `flet` in classic SKILL). Waiting on either a real gappy-pid sim or a budget for the medium-cost walker API refactor.
-4. **Screenshot v1.1 (deferred — S3_DESIGN §3.5).** Current behaviour is one-shot warn + return nil. Pick up when a use case shows up.
+1. **§2 Python loader** (current). Subagent candidate (mechanical, well-spec'd, easy to verify).
+2. **§3 SKILL bridge** — pull side first (produces inspectable JSON), then push side. Mine (skillbridge verification needs careful non-blocking probing).
+3. **§5 CLI surface** — `pvt corners build/explode/list/diff/push/pull`. Subagent-friendly for the offline subcommands; push/pull wraps §3 SKILL functions.
+4. **§6 Acceptance gates** — Gates U1, U3, U4 pin-able once §5 lands; U2 (VCO LO) waits until the VCO LO setup is loaded in Maestro.
+
+**Backlog (deferred from Phase 1, do alongside if convenient):**
+- §2.2 dialog Tier-2 manual UI verification (5 scenarios in `skill/tests/tier2/scenarios.md`).
+- §3 walker mock-rdb harness (DECISIONS #23).
+- §3 screenshot v1.1 (S3_DESIGN §3.5).
 
 ## Open questions / blockers
 

@@ -6,15 +6,12 @@ This file is a **scratch pad for ideas that are NOT Phase 1**. When an idea pops
 
 ---
 
-## Phase 2 (tentative): one TB-authoring helper
+## Phase 2: PVT-Union Builder — PROMOTED to active phase 2026-05-12
 
-Pick **one** isolated pain point from Pillar 1 and solve it end-to-end. Candidates:
+Picked from the candidate list below; see `TODO.md` for current task state and `docs/phase2_pvt_union_spec.md` for the locked §1 spec. Motivating case (VCO LO 2026-05-11, 21 columns × 3 points = 63 corners) is the §6 Gate U2 acceptance target. The 21× explosion is purely an authoring-layer problem — the tool lets the user *describe* the union once (sidecar JSON) and emit the 63 corners mechanically.
 
-- **Corner variable batch-edit / PVT-union builder** (user pains 1.d, 1.e; sharpened by VCO case 2026-05-11) — Python GUI that treats N Maestro corner columns as **one logical PVT union**, supports search/filter/bulk-edit of corner vars, CSV round-trip, export back to Maestro columns.
-  - *Motivating case (VCO LO, 2026-05-11)*: a single semantic PVT had to be split into **21 columns × 3 points = 63 corners** because:
-    - **(a) Per-temperature ind `.s2p`** — VCO inductor s-parameter file is binned hot/RT/cold; one column can't carry one ind file across temps, so ≥3 columns per process.
-    - **(b) Per-process CT tuning** — different process corners need different CT bits to all land on 5 GHz; so one column per (process, ind-temp) pair.
-  - Compare a normal LO PVT: 1 column, 45 points, fully covered. The 21× explosion is purely an authoring-layer problem, not a sim-correctness one — the tool should let the user *describe* the union once and emit the 21 columns mechanically.
+**Candidates NOT picked this phase** (kept here for the next phase boundary):
+
 - **Formula templates** (pains 1.b, 1.c) — library of reusable measurement formulas (rise time, dutyCycle, etc.), apply across many signals at once.
 - **Design-ref bulk update** (pain 1.f) — when bumping Maestro copy/version, update all tests' `design` pointers in one shot.
 

@@ -458,3 +458,69 @@ _Date: 2026-05-12_
 - Full plan B scope (4 fields + alias checkbox + alias name). Rejected as v1: extra widget, conditional rendering on session probe success, second-keyed `testbench_aliases` table in the JSON-write step. None of it changes whether the main path works; all of it grows the surface to maintain.
 - `?unmapAfterCB nil` (default) + show validation error via a sub-dialog (`hiDisplayAppDBox`). Rejected: nests a modal inside a modal, easy to get re-entrancy wrong, and forces the user to redo all four fields on each correction.
 
+---
+
+## #29 — Phase 2 data model recovered via skillbridge: corners have two parallel sweepable axes (vars + models)
+_Date: 2026-05-12_
+
+**Decision:** The Phase 2 PVT-union sidecar mirrors Maestro's native corner-table model rather than inventing one. The native model has two parallel axes per corner row:
+1. **vars axis** — corner-scoped design variables; accessed via `axlGetVars(cornerHandle)` → `axlGetVar(corner, name)` → `axlGetVarValue(handle)`; written via `axlPutVar(corner, name, valueOrSweep)`.
+2. **models axis** — corner-scoped model selections (file/section/block/test); accessed via `axlGetModels(corner)` → `axlGetModel(corner, fileBasename)` → `axlGetModelFile / axlGetModelSection / axlGetModelBlock / axlGetModelTest`; written via `axlPutModel(corner, fileBasename)` + `axlSetModelSection / axlSetModelBlock / axlSetModelTest`.
+
+Sweep encoding is identical on both axes: a space-separated string. Model-section sweeps additionally wrap each section in `"..."` (Maestro convention; observed as `'"tt" "ss" "ff"'` on the live TT_pvt corner-group).
+
+**Why:** Initial spec draft tried to express all sweeps via the vars axis alone — discovered during live skillbridge probe of `simkit_verify` (fnxSession0) that `axlGetVars(TT_pvt)` returns only `[temperature, VDD]` whereas the exploded TT_pvt_0..5 sub-corners each have a distinct model section (`ff`/`ss`/`tt`). Followed the trail through `axlGetModels` → `axlGetModelSection` and found the section sweep stored as `'"tt" "ss" "ff"'` on the model handle, not as a corner var. Without this distinction Phase 2 cannot express the process-corner axis of any PVT union — which is half of the motivating VCO LO case.
+
+The "mirror Maestro" decision (don't invent) is load-bearing: it lets push/pull be a near-trivial walk of the SDB, makes the round-trip fidelity contract realistic, and avoids a translation layer between "our model" and "Maestro's model" that would inevitably leak.
+
+**Implications:**
+- The sidecar JSON has `vars: {name: scalar|array}` and `models: [{file, block, test, section}]` per row; section is the sweepable model field for v1, block/test default to `"Global"`/`"All"` (MTS-mode out of scope).
+- Section names are stored *unquoted* in JSON (`"tt"`); the loader handles Maestro's `"..."` wrap/unwrap on push/pull.
+- Sub-corner explode count is the product of sweep lengths across BOTH axes (e.g. simkit_verify TT_pvt: 2 VDD × 3 sections = 6 sub-corners).
+
+**Alternatives considered:**
+- Single-axis (vars-only) sidecar. Rejected after probe: cannot express process-corner axis.
+- Synthetic `corModelSpec` field in the sidecar mirroring `axlGetCornersForATest` output. Rejected: that field is Maestro's *output* (a merged view per-test); we should write the *inputs* (vars + models entries), not the merged outputs.
+
+---
+
+## #30 — Phase 2 explode-order rule: alphabetic-by-field-key, lex-sorted-values; sub-corner names `<row>_<i>`
+_Date: 2026-05-12_
+
+**Decision:** When a union row explodes into sub-corners, the field-ordering for index assignment is **alphabetic by field key**, where the key is the var name for vars-axis fields and `model[k].section` (with `k` being the model entry index) for models-axis fields. The alphabetically-first key is the innermost (fastest-changing) loop. Values within a sweep are **lexicographically sorted ascending** before index assignment — the JSON array order is *not* load-bearing for sub-corner indexing (it round-trips through Maestro's storage but Maestro re-sorts on explode). Sub-corner naming is `<row_name>_<i>` (0-indexed), inheriting `row_name` directly when the row has zero sweep fields (no `_0` suffix).
+
+**Why:** Observed empirically on `simkit_verify` TT_pvt: VDD was declared as `"3 2.8"` but the exploded TT_pvt_0..5 sub-corners assigned VDD=2.8 to even indices and VDD=3 to odd indices — i.e. Maestro sorted `[2.8, 3]` before indexing. Section likewise sorted `[ff, ss, tt]` for the outer loop. VDD-inner vs section-outer also follows alphabetic-by-name (`V` < `m` in ASCII, treating `model[0].section` as a composite key). Phase 2 adopts this rule as a hard contract so the round-trip works.
+
+**Implications:**
+- Numeric-string sweeps (`["3", "10", "12"]`) sort lexicographically: `["10", "12", "3"]`. Author-side mitigation: consistent leading-zero formatting (`["03", "10", "12"]`). Flagged as a caveat in spec §3.4 — does not block v1 but may surface in domain feedback once `pvt corners explode` is in daily use.
+- Sub-corner names are deterministic given the union content — round-trip pull will reproduce the same names Maestro shows in the panel.
+- Open Decision 8.6 in the spec hedges this against the VCO LO case: more complex sweep sets (process × ind-temp × CT) may reveal that Maestro's rule diverges at scale. Mitigation: Gate U1 (round-trip on simkit_verify) plus a focused Tier-2 probe on VCO LO before Phase 2 §2 lands.
+
+**Alternatives considered:**
+- Preserve declaration order through explode. Rejected: Maestro re-sorts at explode time; we cannot force a different sub-corner numbering without monkey-patching Maestro.
+- Custom user-supplied ordering via a `sweep_order` field. Rejected for v1: adds surface area for the single observed case where it might matter (numeric strings), and the leading-zero workaround is good enough.
+
+---
+
+## #31 — Phase 2 v1 scope freeze: no templating, no `axlSetParameter`, no MTS-mode model fields
+_Date: 2026-05-12_
+
+**Decision:** Phase 2 v1 spec is intentionally narrow. Excluded from the sidecar:
+- **Inheritance / templating between rows** (no `extends`, no "fill from parent"). Each row is self-contained.
+- **Device-parameter overrides via `axlSetParameter`** (paths like `Library/Cell/View/Instance/Property`). The VCO LO case may need these for per-corner instance overrides — flagged as Open Decision 8.4, blocking Phase 2 §2 only if confirmed required.
+- **Per-corner model `block` / `test` fields** (MTS-mode — multi-test setup). Stay at defaults `"Global"` / `"All"`.
+- **Reliability / Monte Carlo configuration.**
+- **Sweep direction declaration** (Maestro's "from-low / from-high" is a sim-time choice).
+
+**Why:** Phase 1 §1 was deliberately narrow ("five things" list at top of `docs/schema.md`) and stayed shippable. Phase 2 v1 keeps the same discipline. The vars + models.section pair covers the observed simkit_verify shape and is enough to verify the round-trip pipeline end-to-end on a real Maestro session. Once that loop is in daily use, v1.1 / v2 expansions can stack on top with concrete user pain pulling them in.
+
+**Implications:**
+- Open Decision 8.4 must be answered (probably "no" for v1, but contingent on inspecting the real VCO LO setup) before §2 loader lands. If "yes", that bumps v1 scope by one more axis.
+- Templating is genuinely useful for the 21-col VCO LO case (most rows share temperature, differ in process+CT); we accept the verbosity cost in v1 in exchange for a simpler loader. If repetition becomes painful, v1.1 introduces a `defaults` block at the union level.
+- Forward-compat: the unknown-key policy from Phase 1 (warn, don't error) applies to Phase 2 sidecars too. Newer templates carrying v1.1 fields won't crash a v1 loader.
+
+**Alternatives considered:**
+- Ship everything from VCO LO in v1: includes templating + `axlSetParameter`. Rejected as scope creep; first-deploy needs to fit in a few weeks.
+- Defer Phase 2 §1 freeze until VCO LO probed. Rejected: simkit_verify is rich enough to land §1, and the VCO LO case is the §6 acceptance target — we'd be blocking ourselves on the test before writing the code.
+
+

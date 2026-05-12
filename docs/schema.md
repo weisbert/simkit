@@ -24,6 +24,7 @@ A project is declared by a single JSON file, conventionally placed at the root o
 | `dbRoot` | path | yes | — | Root directory for the DuckDB file and all run dumps. If relative, resolved from the `.pvtproject` file's own directory. If absolute, used as-is. (#2) |
 | `author` | str | no | value of `$USER` at dump time | Recorded into each run. Captured at dump time and stored; never looked up live at query time. (#10) |
 | `testbench_aliases` | object[str → str] | no | `{}` | Maps `lib/cell/view` → human-readable alias. Alias values must be unique within the project; duplicate aliases = load error. (#7) |
+| `unionsDir` | path | no | `./unions` | Directory holding PVT-union sidecar files (`<name>.union.json`). Relative paths resolved from the `.pvtproject` file's own directory. Phase 2 addition; see `docs/phase2_pvt_union_spec.md`. Additive — no `schema_version` bump (per the unknown-key policy below). |
 | `schema_version` | int | no | `1` | Pins the `.pvtproject` file format version. Separate from the JSON-dump `schema_version`. |
 | `_doc` | str \| object | no | — | Reserved for free-form human documentation (JSON has no comments). Loader ignores it; never validated. |
 
