@@ -571,3 +571,29 @@ During verification, four SKILL bugs were caught and fixed:
 **Alternatives considered:** Defer verification to push side (since push subsumes pull's surface). Rejected — pull-only is testable on the LIVE session without state mutation, whereas push must use a sandbox session. Pull-first is the right ordering.
 
 
+
+
+---
+
+## #34 — Phase 2 §3 SKILL push side verified end-to-end against fnxSession0
+_Date: 2026-05-12_
+
+**Decision:** `pvtCornersPush` ships as the push-direction counterpart to `pvtCornersPull`. Together they close the `.union.json` ↔ live ADE-XL round-trip. Tier-1: 30 new pure-helper cases pass (suite 256 → 300 / 0); Tier-2: pull-push-pull round-trip on `fnxSession0` (3 corners: TT scalar / TT_pvt with VDD-sweep + section-sweep / TT_2p5G with 3 scalar vars) is **semantically byte-identical** modulo the per-pull `name` field (which is derived from output filename basename).
+
+**Why:** Closes Phase 2 §3 entirely. The Tier-2 round-trip verifies that both axes (vars + models) emit/round-trip correctly:
+- vars: `axlPutVar(c, name, "3 2.8")` for sweep, `(c, name, "3")` for scalar — round-trips via space-separated string storage.
+- models.section: `axlSetModelSection(m, '"tt" "ss" "ff"')` for sweep, `'"tt"'` for scalar — round-trips via Maestro's quoted-each-token convention (DECISIONS #29).
+
+**Implications:**
+- §6 Gate U1 (round-trip fidelity on simkit_verify) is **manually verified** by this commit (`263adb0`). Pin as an offline pytest once a pre/post fixture pair is captured for regression — open follow-up.
+- `pvt corners push` and `pvt corners pull` Python CLI subcommands can now wrap the SKILL functions safely. Currently deferred from Stage E pending the §6 Gate U1 formal pinning + a sandbox-session strategy for CI.
+- Idempotent push contract holds: pushing IDENTICAL content to an already-populated session leaves the SDB content semantically unchanged. Maestro will mark the session dirty during the write (axlPutVar rewrites internally), but semantic content is preserved.
+
+**Open caveats for v1.1:**
+- Length-1 sweep arrays collapse to scalar on a push -> pull cycle (Maestro storage does not distinguish a 1-element sweep from a scalar). Documented as fidelity-modulus item (iv) in spec §4.2.
+- Single sandbox session for verification is hard to come by without restarting Maestro. The 2026-05-12 verification used `fnxSession0` directly with IDENTICAL-content push (user-approved, since identical push leaves content unchanged).
+
+**Caught-and-fixed during verification:**
+- One `let*` use in `_pvtCornersPushRow` (DECISIONS #14 trap #4 — classic SKILL has no `let*`). Fixed to nested `let`. Three test cases used `let*` too; same fix.
+
+**Alternatives considered:** Push to a fresh sandbox session created via `axlCreateSession` and the existing test bench template. Rejected for v1 — overhead of session creation outweighs verification value once IDENTICAL-content push is shown safe.

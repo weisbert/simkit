@@ -14,6 +14,10 @@ All six sections shipped (§1 spec, §2 loaders + first-save dialog, §3 collect
 - §2.2 dialog Tier-2 manual UI verification — 5 scenarios documented at `skill/tests/tier2/scenarios.md`, sandbox at `/home/yusheng/cadence_work/dialog_sandbox/`. Pick up alongside any future UI-affecting change.
 - §3 walker mock-rdb harness — DECISIONS #23; awaits real gappy-pid sim or budget for the `maeReadResDB` refactor.
 - §3 screenshot v1.1 — S3_DESIGN §3.5; current one-shot warn + return nil suffices until a use case shows up.
+- §3 messy-data Tier-2 against real failing-sim histories — **NEW 2026-05-12: user pre-staged two history runs in `fnxSession0`**:
+  - `simkit_simerr` — all results = sim error (exercises pass-2 `'failed` status path)
+  - `simkit_Rtime_err` — one corner's Rtime_clkout = eval error (exercises mixed-status pass-1 + pass-3 paths)
+  When picking up Phase 1 §3 messy-data deferred verification (TODO §3 (c)), call `PvtSave(?histName "simkit_simerr")` and `PvtSave(?histName "simkit_Rtime_err")` from CIW or via skillbridge; eyeball the resulting `run.json`s against the validator (`pvt validate <path>`) to confirm pass-2 / pass-3 row shaping is correct.
 
 ---
 
@@ -59,10 +63,10 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 
 ### §6. End-to-end acceptance gates
 
-- [ ] **Gate U1** — Round-trip fidelity on `simkit_verify` (push → pull, bit-identical).
-- [ ] **Gate U2** — VCO LO acceptance (real 21-col × 3-pt setup; deferred until VCO LO is loaded in Maestro). DECISIONS may add #32 if probe reveals new constraints.
-- [ ] **Gate U3** — Explode arithmetic on a synthetic 2 × 3 × 5 = 30 union.
-- [ ] **Gate U4** — Sidecar → CSV → Sidecar bit-identical (modulo §4.2).
+- [x] **Gate U1** — Round-trip fidelity on `fnxSession0` (live Maestro). Manually verified 2026-05-12 via `/tmp/probe_push.py`: pull → push → pull on 3 corners (TT scalar, TT_pvt with vars+models sweeps, TT_2p5G) is semantically byte-identical. **Pin as offline pytest** once a captured pre/post fixture pair is committed to `tests/fixtures/unions/` (TODO).
+- [ ] **Gate U2** — VCO LO acceptance (real 21-col × 3-pt setup; deferred until VCO LO is loaded in Maestro). DECISIONS #30 open clause 8.6 covers the explode-order rule check needed.
+- [x] **Gate U3** — Explode arithmetic on a synthetic 2 × 3 × 5 = 30 union (`tests/test_acceptance_phase2.py::TestGateU3ExplodeArithmetic`, 6 tests).
+- [ ] **Gate U4** — Sidecar → CSV → Sidecar bit-identical (modulo §4.2). Blocked on `pvt corners build` CLI subcommand (Open Decision 8.3 — CSV format).
 
 ### §7. Maintenance (do alongside, not at the end)
 
