@@ -40,10 +40,10 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 
 ### §3. SKILL bridge (pull + push)
 
-- [x] `skill/pvtCorners.il` — `pvtCornersPull(?sess ?outPath ?unionName)` per spec §4.3. Vars via `axlGetVars`/`axlGetVar`/`axlGetVarValue`; models via `axlGetModels`/`axlGetModel`/`axlGetModel{File,Section,Block,Test}`. Sidecar JSON via Phase 1 `pvtJson` emitter. **VERIFICATION PENDING — see §3.V below.**
-- [ ] `pvtCornersPush(sess unionJsonPath)` — symmetric. Vars via `axlPutVar`; models via `axlPutModel` + `axlSetModel{Section,Block,Test}`. (Blocked on §3.V Tier-1 verification of pull side.)
-- [x] `skill/tests/testPvtCorners.il` — Tier-1 cases for pure helpers (28 cases, registered into the standard `runTests.il` driver). **EXECUTION PENDING — see §3.V below.**
-- [ ] **§3.V Verification gate (per PM-mode rule) — DEFERRED to next session after Virtuoso restart.** The current Virtuoso session's skillbridge response queue is in a stale-response state (multiple `python_server.py` processes; new calls get back queued old responses). Cannot reliably run the Tier-1 SKILL suite or do a Tier-2 live probe against `fnxSession0` until the bridge is restarted. Two paths to clear it (per 2026-05-12 chat): (a) restart Virtuoso fresh, or (b) `(load ".../sbStart.il")` in CIW to rebuild just the python_server bridge. After either: re-run `python3 /tmp/run_skill_tests.py` to confirm SKILL Tier-1 256 → 284 / 1 / 0 (28 new tests added) and run a focused `pvtCornersPull` probe against `fnxSession0`.
+- [x] `skill/pvtCorners.il` — `pvtCornersPull(?sess ?outPath ?unionName)` per spec §4.3. Vars via `axlGetVars`/`axlGetVar`/`axlGetVarValue`; models via `axlGetModels`/`axlGetModel`/`axlGetModel{File,Section,Block,Test}`. Sidecar JSON via Phase 1 `pvtJson` emitter. **VERIFIED via Tier-1 + Tier-2 live probe 2026-05-12; see DECISIONS #32 #33.**
+- [ ] `pvtCornersPush(sess unionJsonPath)` — symmetric. Vars via `axlPutVar`; models via `axlPutModel` + `axlSetModel{Section,Block,Test}`.
+- [x] `skill/tests/testPvtCorners.il` — Tier-1 cases for pure helpers (30 cases registered; suite 256 → 286 / 1 / 0).
+- [x] **§3.V Verification gate** — CLEARED 2026-05-12 after user reloaded sbStart.il. SKILL Tier-1 256 → 286 / 1 / 0 (1 baseline FAIL is Maestro-open no-session test, unchanged). Tier-2 live pull from `fnxSession0` reproduces spec §9 7-sub-corner table; Python `load_union` + `explode` round-trip is byte-clean. Four SKILL bugs caught during verification (1 arg-order, 4 operator-shorthand) and fixed; DECISIONS #32 records the named-function-vs-operator-shorthand rule, #33 records the verification.
 
 ### §4. (no separate §4 — Phase 2 has no analogue of Phase 1's ingester since the data is config, not run output)
 

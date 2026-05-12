@@ -73,8 +73,9 @@
 )
 
 
+;; _pvtCornersSplitWhitespace : split a string on runs of ASCII space / tab.
+;; Empty / nil input -> ().
 (procedure (_pvtCornersSplitWhitespace s)
-  "Split a string on runs of ASCII space / tab. Empty / nil input -> ()."
   (prog (tokens i n start ch)
     (cond
       ((null s)         (return nil))
@@ -84,21 +85,21 @@
     (setq i 1)
     (setq start nil)
     (setq tokens nil)
-    (while (<= i n)
+    (while (leqp i n)
       (setq ch (substring s i 1))
       (cond
         ((_pvtCornersIsSpace ch)
           (cond
             (start
-              (setq tokens (cons (substring s start (- i start)) tokens))
+              (setq tokens (cons (substring s start (difference i start)) tokens))
               (setq start nil))))
         (t
           (cond
             ((null start) (setq start i)))))
-      (setq i (+ i 1)))
+      (setq i (plus i 1)))
     (cond
       (start
-        (setq tokens (cons (substring s start (- (+ n 1) start)) tokens))))
+        (setq tokens (cons (substring s start (difference (plus n 1) start)) tokens))))
     (return (reverse tokens))
   )
 )
@@ -114,10 +115,10 @@
       ((not (stringp s)) (return s)))
     (setq n (strlen s))
     (cond
-      ((< n 2) (return s))
+      ((lessp n 2) (return s))
       ((and (equal (substring s 1 1) "\"")
             (equal (substring s n 1) "\""))
-        (return (substring s 2 (- n 2)))))
+        (return (substring s 2 (difference n 2)))))
     (return s)
   )
 )
@@ -169,11 +170,11 @@
         (t    path)))
     (setq sfx _PVT_CORNERS_FILE_SUFFIX)
     (cond
-      ((<= (strlen base) (strlen sfx)) (return nil)))
+      ((leqp (strlen base) (strlen sfx)) (return nil)))
     (cond
-      ((equal (substring base (+ (- (strlen base) (strlen sfx)) 1) (strlen sfx))
+      ((equal (substring base (plus (difference (strlen base) (strlen sfx)) 1) (strlen sfx))
               sfx)
-        (return (substring base 1 (- (strlen base) (strlen sfx))))))
+        (return (substring base 1 (difference (strlen base) (strlen sfx))))))
     (return nil)
   )
 )
@@ -411,7 +412,7 @@
         (return (pvtErr 'pvt_io
                   (strcat "cannot open for write: " outPath)
                   outPath))))
-    (pvtJsonEmitToPort (car port) obj)
+    (pvtJsonEmitToPort obj (car port))
     (fprintf (car port) "\n")
     (close (car port))
     (return (pvtOk outPath))

@@ -523,4 +523,51 @@ _Date: 2026-05-12_
 - Ship everything from VCO LO in v1: includes templating + `axlSetParameter`. Rejected as scope creep; first-deploy needs to fit in a few weeks.
 - Defer Phase 2 §1 freeze until VCO LO probed. Rejected: simkit_verify is rich enough to land §1, and the VCO LO case is the §6 acceptance target — we'd be blocking ourselves on the test before writing the code.
 
+---
+
+## #32 — Classic SKILL: use named arithmetic / comparison functions, NOT operator shorthand
+_Date: 2026-05-12_
+
+**Decision:** Classic SKILL code in `skill/*.il` uses the **named-function** forms for arithmetic and comparison:
+- `plus` / `difference` / `times` / `quotient` (not `+` / `-` / `*` / `/`)
+- `lessp` / `greaterp` / `leqp` / `geqp` (not `<` / `>` / `<=` / `>=`)
+
+Operator shorthand may parse as a symbol token, but when invoked in a prefix call like `(<= i n)` or `(+ a b)` after a complex chain of file loads (e.g. as `pvtCorners.il` was loaded last in the `runTests.il` chain after pvtError / pvtJson / pvtProject / pvtProjectDialog / pvtCollect), the SKILL reader rejects it as a syntax error at the operator position. The first `pvtCorners.il` draft used `<=` / `+` / `-` freely; Tier-1 / Tier-2 verification on 2026-05-12 failed with "*Error* load: error while loading file at line N" where line N was the operator-using form. Five distinct call sites had to be migrated to named functions before the file would load.
+
+**Why:** Phase 1's `pvtJson.il`, `pvtProject.il`, `pvtCollect.il` already used the named-function forms throughout — that style was already the project convention; the discovery on 2026-05-12 was that it's NOT just stylistic but **required** for classic SKILL prefix calls in some contexts. (The exact reader / evaluator interaction that produces the syntax error wasn't tracked down further; switching to the named forms makes the issue moot.)
+
+**Implications:**
+- Augments the DECISIONS #14 idiom-trap list as trap #16 (counting traps 1-12 from the original list, 13-15 from DECISIONS #28). A formal rewrite of the consolidated list could fold them into one canonical place; for now they accumulate by date.
+- New SKILL files should grep their own contents for ` [+\-*/=] ` (operator shorthand) before declaring done.
+- `pvtCorners.il` and any future SKILL module follows this rule; existing `pvtCollect.il` / `pvtJson.il` / `pvtProject.il` already comply.
+
+**Alternatives considered:**
+- Tracking down the exact reader state that rejects operators — rejected as low-value given the simple workaround.
+- Configuring SKILL to accept the shorthand — no documented switch.
+
+---
+
+## #33 — Phase 2 §3 SKILL pull side verified end-to-end against `fnxSession0`
+_Date: 2026-05-12_
+
+**Decision:** `pvtCornersPull` is the canonical pull entry point for Phase 2 §3. Tier-1: 30 new pure-helper cases pass (suite 256 → 286 / 1 / 0; the 1 baseline FAIL is the Maestro-open no-session test). Tier-2: live pull from `fnxSession0` (simkit_verify, 2 corner rows → 7 sub-corners after explode) produces a sidecar that Python `simkit.union.load_union` + `explode` reads cleanly and exposes the spec §9 7-sub-corner table.
+
+**Why:** Closes the §3.V verification debt flagged in commit `e5f9a8f`. End-to-end verification path:
+1. SKILL `pvtCornersPull` reads live SDB → emits JSON to disk
+2. Python `load_union` parses the file → typed `Union` dataclass
+3. `explode` materialises sub-corners
+
+All three layers in one round-trip; the Python step would have rejected any malformed JSON, and the explode would have produced wrong sub-corner counts if the vars/models axes hadn't been faithfully captured. **The Phase 2 data model (DECISIONS #29) survives a real live-Maestro round-trip.**
+
+During verification, four SKILL bugs were caught and fixed:
+1. Argument order on `pvtJsonEmitToPort` — the proc takes `(value port)` but the call had `(port value)`. Symptom: `fprintf: argument #1 should be an I/O port — got table:pvtUnionEnvelope`.
+2-5. Operator shorthand → named function (DECISIONS #32 above): `<=` × 2 → `leqp`, `<` → `lessp`, `+` × 4 → `plus`, `-` × 4 → `difference`.
+
+**Implications:**
+- §3 push side (`pvtCornersPush`) can land next. Its design mirrors pull's axl-walk pattern; same idiom traps apply.
+- `pvt corners pull` CLI subcommand (deferred from Stage E) can be wired now that the SKILL backend is verified.
+- §6 Gate U1 (round-trip fidelity on simkit_verify) is implicitly proven by this probe; just needs a formal pytest wrapper that re-runs the round-trip and asserts byte-equality.
+
+**Alternatives considered:** Defer verification to push side (since push subsumes pull's surface). Rejected — pull-only is testable on the LIVE session without state mutation, whereas push must use a sandbox session. Pull-first is the right ordering.
+
 
