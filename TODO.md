@@ -21,7 +21,7 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
 
 - [x] Python: walker + JSON parser + fallback order (env → file → error). Pure-Python module; unit-testable. — `python/simkit/project.py`, 30 tests passing.
 - [x] SKILL: equivalent walker + minimal strict-JSON parser, reading the same file. — `skill/pvtError.il` + `pvtJson.il` + `pvtProject.il`, 76 tests passing via skillbridge (commit `a3c8651`).
-- [ ] SKILL-only first-save dialog (`skill/pvtProjectDialog.il`) — separable from §3, can interleave.
+- [x] SKILL-only first-save dialog (`skill/pvtProjectDialog.il`) — landed 2026-05-12 with v1 four-field scope per DECISIONS #28. Tier-1 +23 tests (cumulative 256 / 1 / 0; the 1 fail is the unchanged Maestro-open baseline). Tier-2 five-scenario doc at `skill/tests/tier2/scenarios.md`; manual UI verification still owed (sandbox at `/home/yusheng/cadence_work/dialog_sandbox/`).
 
 ### 3. Collector SKILL (new, from scratch — do NOT extend POC)
 

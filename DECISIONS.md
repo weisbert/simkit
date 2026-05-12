@@ -431,3 +431,30 @@ Rather than wrestle with an absent API, the fix flips the gate: `input.scs` is *
 - Keep the explicit probe but find the correct Maestro API. Rejected after the namespace probe came up empty; the cost (further probing across Cadence release-specific APIs) outweighs the marginal benefit of having a second confirmation alongside file presence.
 - Parameterise by simulator (look for `input.scs`, fall back to `input.cir`, etc.). Rejected for v1 — non-Spectre simulators are out of scope per `docs/schema.md` §2.1 (`netlist_path` doc strings refer specifically to Spectre's `input.scs`). When a non-Spectre use case arrives we can extend the file list and bump `schema_version`.
 
+---
+
+## #28 — First-save dialog v1 scope; `?unmapAfterCB t` + `hiSetCallbackStatus` pattern
+_Date: 2026-05-12_
+
+**Decision:** §2.2 first-save dialog (`skill/pvtProjectDialog.il`) ships in two parts. (1) v1 scope is **four fields, all in one modal `hiCreateAppForm`**: Project name (required), DB root (optional, blank → `./simkit_data`), Author (optional, blank omits the JSON key entirely), Save target path (optional+editable, blank → `<cwd>/.pvtproject`). The testbench-alias checkbox in the original plan mockup is deferred to v1.1 — it required an additional `axl*` session probe + conditional widget on top of the four primary fields, none of which is load-bearing for the "no `.pvtproject` → one click, file written" main path. (2) Validation-fail UX = form stays open: `hiCreateAppForm ?unmapAfterCB t` combined with `(hiSetCallbackStatus form nil)` inside the OK callback whenever any validator rejects. CIW `warn` carries the per-field error message; default callback status (`t`) is preserved on success so the form unmaps normally.
+
+**Why:**
+- IC user pushed for minimum-viable v1: "if I can hand-edit `.pvtproject` to add an alias later, the dialog can stay simple now." Pre-empting alias UI in v1 saves one widget, one conditional, one validation arm — directly proportional to the bug surface.
+- The `?unmapAfterCB t` pattern is documented at skuiref.pdf p.506 (`hiCreateAppForm`) and p.801 (`hiSetCallbackStatus`). Default `?unmapAfterCB nil` would close the form before the callback ran, forcing a re-spawn on every validation failure (user retypes everything). The chosen pattern keeps the user's partially-correct input on screen and is the canonical Cadence idiom for "form with content validation."
+- Tier-1 covers all pure layers (defaults, validators, JSON build/write, round-trip). Tier-2 (`skill/tests/tier2/scenarios.md`) covers the 5 UI-only scenarios: Happy / Cancel / Validation feedback / Re-entrancy / Headless suppression. The sandbox lives at `/home/yusheng/cadence_work/dialog_sandbox/` — outside any `.pvtproject` walking-up chain.
+
+**Implications:**
+- `pvtLoadPvtProject` (existing) automatically picks up the dialog the moment `pvtProjectDialog.il` is loaded — the `boundp` gate flips and the `?allowDialog t` default fires the dialog when the walker comes up empty. Batch / scripted callers still pass `?allowDialog nil` to opt out.
+- Failure modes: round-trip self-check (`_pvtDlgWriteFile` calls `pvtParsePvtProject` after write) means a corrupt `.pvtproject` is auto-deleted; the loader's hard-fail path sees "no file found" rather than a confusing "your just-written file is invalid".
+- `_pvtTestProbeSession` is impure and can't be Tier-1-tested, but `_pvtDlgDeriveDefaults` takes the session tuple as a parameter, so the entire defaults logic is exercised in Tier-1 with synthetic `("LIB" "cell" "view")` inputs.
+
+**Idiom traps caught while implementing — additions to #14's list:**
+
+13. **`(procedure (name ()) ...)` and `(procedure (name (arg)) ...)` are wrong.** Classic SKILL reads the inner parens as an arg-name list. Zero-arg procedures use `(procedure (name) ...)` and one-arg procedures use `(procedure (name arg) ...)`. The `(procedure (name (arg "r")) ...)` form is valid but means "arg with type-spec", not a workaround for plain args. Skuiref p.703's `procedure ( myCB ( form "r" ) ...)` example is the canonical "with type" shape.
+14. **`?okButtonText` does not exist on `hiCreateAppForm`.** The signature on skuiref.pdf p.502 has no such keyword. The button labels for the `?buttonLayout 'OKCancel` set are fixed at "OK" / "Cancel" / etc. Renaming OK to "Save" requires custom buttons via the `'(s_buttonLayout (s_customButtonText s_customButtonCB) ...)` shape (p.508), which is more work than v1 needed.
+15. **`(boundp 'sym)` is false for procedures.** Classic SKILL's `boundp` only inspects the value cell; `(procedure (foo) ...)` writes to the function cell, which `boundp` cannot see. Loading a file full of procedures does NOT flip `(boundp 'someProcInside)` to t. The right presence check for an optionally-loaded entry point is `(getd 'sym)` — returns the function object (truthy) or nil. **This was a live pre-existing bug** in `pvtProject.il`'s step-3 dialog gate: the boundp check meant the gate never fired even after `pvtProjectDialog.il` was loaded. Caught during Tier-2 smoke (the gate flipped to `yes` after switching to `getd`, and the form then actually popped).
+
+**Alternatives considered:**
+- Full plan B scope (4 fields + alias checkbox + alias name). Rejected as v1: extra widget, conditional rendering on session probe success, second-keyed `testbench_aliases` table in the JSON-write step. None of it changes whether the main path works; all of it grows the surface to maintain.
+- `?unmapAfterCB nil` (default) + show validation error via a sub-dialog (`hiDisplayAppDBox`). Rejected: nests a modal inside a modal, easy to get re-entrancy wrong, and forces the user to redo all four fields on each correction.
+

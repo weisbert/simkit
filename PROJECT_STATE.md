@@ -1,6 +1,6 @@
 # Project State
 
-_Last updated: 2026-05-12 (morning — §6 acceptance gates landed)_
+_Last updated: 2026-05-12 (afternoon — §2 item 3 first-save dialog landed, Tier-1 green; Tier-2 manual scenarios pending)_
 
 ## Current phase
 
@@ -26,6 +26,7 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - **2026-05-12 (overnight)**: §5 `pvt` CLI fill-out landed in five commits — `pvt attach`, `pvt label`, `pvt list`, `pvt validate --from-db`, `pvt diff`. Pure-Python; full Tier-1 138 → 242 / 0 (104 new tests across 8 new test files). Surfaced three design decisions: #24 (diff slice resolution = exact-label-then-prefix), #25 (label re-policy = error w/o `--force`, `--clear` unconditional), #26 (DuckDB TIMESTAMPTZ ↔ Python via `CAST AS VARCHAR` + ISO normalisation, to avoid the stdlib-pytz dependency the offline-deploy constraint forbids). All §5 commands open the DB read-only when they only read.
 - **2026-05-12 (morning)**: §3 netlist Spectre detection fixed (DECISIONS #27). Pre-fix probe used `asiGetAnalogSimulator` — wrong API for Maestro / ADE-XL contexts — and returned nil on every spectre run. Replaced with a path-presence test: `<netlistDir>/input.scs` exists iff the simulator is Spectre. Tier-2 verified on the live `simkit_verify` session: `netlist_path="input.scs"`, 2938-byte `input.scs` copied into the run dir, `pvt validate` clean (no W2), `pvt ingest` populates `runs.netlist_path` non-null. 42-row count + first-row value match the 2026-05-10 reference, so no other behaviour shifted. SKILL Tier-1: 224/1 unchanged.
 - **2026-05-12 (morning)**: §6 end-to-end acceptance gates pinned. `tests/fixtures/acceptance/` carries the live-captured `run_a` (full simkit_verify dump from earlier today) plus a synthesised `run_b` (manual C0 capacitor edit + per-row +1% value delta) and a 69-byte dummy PNG. `tests/test_acceptance.py` exercises all four §6 gates — save→ingest→query, TT worst-case across the 7 corners, netlist diff between two slices, post-hoc attach + retrieve — as 12 unit tests that don't need live Maestro at test time. Phase 1 Python suite: 242 → 254 / 0.
+- **2026-05-12 (afternoon)**: §2 item 3 — SKILL first-save dialog landed (`skill/pvtProjectDialog.il`, 482 lines). v1 scope per DECISIONS #28 is four fields: Project name (required), DB root / Author / Save path (optional with defaults). Validation-fail UX uses `?unmapAfterCB t` + `hiSetCallbackStatus` to keep the form open. Tier-1 +23 tests via skillbridge → cumulative 256 / 1 / 0 (the 1 fail is the unchanged Maestro-open no-session baseline). Three new classic-SKILL traps surfaced and added to DECISIONS #14's idiom list (now reaches #15): (13) `(procedure (name ()) ...)` is wrong for zero-arg; (14) `?okButtonText` is not a real `hiCreateAppForm` keyword; (15) `boundp` is false for procedures — caught during Tier-2 smoke when the step-3 gate in `pvtProject.il` never flipped despite the dialog file being loaded. Fixed in `pvtProject.il:337` (`boundp` → `getd`); pre-existing bug that no test had exercised. Tier-2 happy path visually confirmed on live Virtuoso: form rendered, OK click wrote a clean 190-byte `.pvtproject` (project from Maestro session lib name `sim_yusheng`, blank dbRoot defaulted, blank author got `$USER`, schema_version emitted as bare int). Smoke test (`/tmp/dialog_smoke.py`) also covers programmatic happy / validation-fail / `?allowDialog nil` paths — 11/11 checks pass.
 
 ## What's DONE
 
@@ -41,22 +42,18 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - §3(d) Python validator — 24 invariants + 2 warnings (`W1` corner_vars magic markers, `W2` null netlist_path). Independently invocable (`pvt validate <path>`) and inlined in `ingest_run_json` by default. `pvt validate --from-db <run_id>` audits a DB-resident run by reconstructing the JSON-dump shape (DECISIONS #26).
 - §5 `pvt` CLI surface — `attach`, `label` (set / `--force` / `--clear`), `list` (table or `--json`, `--slice-only`, `--project`, `--limit`), `diff` (results table + unified netlist diff, `--threshold`, `--include-status`, `--json`). Tier-1 grew 138 → 242 / 0; 8 new test modules. Slice resolution rule per DECISIONS #24.
 - §6 end-to-end acceptance — 4 gates pinned as 12 tests in `tests/test_acceptance.py` against `tests/fixtures/acceptance/` (live `simkit_verify` dump + synthesised variant with documented manual netlist edit + dummy PNG). Demonstrates the full save→ingest→query→diff→attach loop without needing live Maestro at test time.
+- §2 item 3 — SKILL first-save dialog (`skill/pvtProjectDialog.il` + `skill/tests/testPvtProjectDialog.il`). v1 four-field scope per DECISIONS #28. Tier-1 256 / 1 / 0 (the 1 baseline FAIL unchanged). Production-side classic-SKILL idioms validated against `virtuoso-skill` PDF index for every `hi*`/`axl*` call. **Tier-2 manual UI verification still owed** — 5 scenarios in `skill/tests/tier2/scenarios.md`, sandbox at `/home/yusheng/cadence_work/dialog_sandbox/`.
 
 ## What's IN PROGRESS
 
-_(nothing — Phase 1 just wrapped. All four §6 acceptance gates pinned as regression tests. Ready for Phase 2 kickoff or for the explicitly-deferred Phase 1 backlog below.)_
+- **§2.2 dialog Tier-2 verification.** All Tier-1 layers green; UI wrapper (hiCreateAppForm/hiDisplayForm/callback orchestration) is not unit-testable headless. Five scenarios in `skill/tests/tier2/scenarios.md`: Happy / Cancel / Validation feedback / Re-entrancy / Headless suppression. Once those pass, Phase 1 is fully closed.
 
 ## What's NEXT (next 1–2 sessions)
 
-1. **Phase 2 kickoff.** With the data pillar done, the next planned pillar is one isolated authoring helper (per DECISIONS #1 build order). `PHASE_PLAN.md` carries the corner-var-shape candidate from the overnight VCO PVT-union case; that's the natural starting point unless something newer has surfaced.
-2. **§2.2 SKILL first-save dialog (deferred Phase 1 backlog).** Plan-D in `docs/plans/§2.2_dialog.md`. Needs `virtuoso-skill` PDF lookup for `hi*` form construction + live Virtuoso UI testing. A clean cloned-workarea testbed under `/home/yusheng/cadence_work/` will be prepared when this starts. Not strictly Phase 1 — batch/scripted callers don't need it.
+1. **Tier-2 verification of the first-save dialog** (as above) — half-session of GUI work, then §2.2 is done.
+2. **Phase 2 kickoff.** With the data pillar done, the next planned pillar is one isolated authoring helper (per DECISIONS #1 build order). `PHASE_PLAN.md` carries the corner-var-shape candidate from the overnight VCO PVT-union case; that's the natural starting point unless something newer has surfaced.
 3. **Walker mock-rdb harness (deferred — DECISIONS #23).** `_pvtCollBuildPidListFromTests` covers the Bug B surface at Tier-1; live-walker end-to-end via mock-rdb remains deferred (write-protected `maeReadResDB`, no `flet` in classic SKILL). Waiting on either a real gappy-pid sim or a budget for the medium-cost walker API refactor.
 4. **Screenshot v1.1 (deferred — S3_DESIGN §3.5).** Current behaviour is one-shot warn + return nil. Pick up when a use case shows up.
-
-### Two smaller items still owed from §2 (independent of §3, can interleave)
-
-- **§2.2 dialog** — SKILL-only first-save fallback (`skill/pvtProjectDialog.il`). Plan in conversation history; deferred from §2.2 main land. Not a blocker for §3 because batch / scripted callers don't need it.
-- **README/fixtures README rewrite of "pvt:foo" doc strings** — done in commit `a3c8651`. (Just noting so a future grep doesn't surprise anyone.)
 
 ## Open questions / blockers
 
