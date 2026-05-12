@@ -1,6 +1,6 @@
 # Project State
 
-_Last updated: 2026-05-12 (overnight — Phase 2 §2 + §5-offline landed; §3 SKILL code landed, verification pending bridge restart)_
+_Last updated: 2026-05-12 (overnight — Phase 2 §1-§4 + §5-offline + §6-U1/U3 all done; SKILL pull+push verified end-to-end against fnxSession0)_
 
 ## Current phase
 
@@ -34,7 +34,10 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - **2026-05-12 (morning)**: §6 end-to-end acceptance gates pinned. `tests/fixtures/acceptance/` carries the live-captured `run_a` (full simkit_verify dump from earlier today) plus a synthesised `run_b` (manual C0 capacitor edit + per-row +1% value delta) and a 69-byte dummy PNG. `tests/test_acceptance.py` exercises all four §6 gates — save→ingest→query, TT worst-case across the 7 corners, netlist diff between two slices, post-hoc attach + retrieve — as 12 unit tests that don't need live Maestro at test time. Phase 1 Python suite: 242 → 254 / 0.
 - **2026-05-12 (afternoon)**: §2 item 3 — SKILL first-save dialog landed (`skill/pvtProjectDialog.il`, 482 lines). v1 scope per DECISIONS #28 is four fields: Project name (required), DB root / Author / Save path (optional with defaults). Validation-fail UX uses `?unmapAfterCB t` + `hiSetCallbackStatus` to keep the form open. Tier-1 +23 tests via skillbridge → cumulative 256 / 1 / 0 (the 1 fail is the unchanged Maestro-open no-session baseline). Three new classic-SKILL traps surfaced and added to DECISIONS #14's idiom list (now reaches #15): (13) `(procedure (name ()) ...)` is wrong for zero-arg; (14) `?okButtonText` is not a real `hiCreateAppForm` keyword; (15) `boundp` is false for procedures — caught during Tier-2 smoke when the step-3 gate in `pvtProject.il` never flipped despite the dialog file being loaded. Fixed in `pvtProject.il:337` (`boundp` → `getd`); pre-existing bug that no test had exercised. Tier-2 happy path visually confirmed on live Virtuoso: form rendered, OK click wrote a clean 190-byte `.pvtproject` (project from Maestro session lib name `sim_yusheng`, blank dbRoot defaulted, blank author got `$USER`, schema_version emitted as bare int). Smoke test (`/tmp/dialog_smoke.py`) also covers programmatic happy / validation-fail / `?allowDialog nil` paths — 11/11 checks pass.
 - **2026-05-12 (evening)**: Phase 2 kicked off. §1 spec frozen at `docs/phase2_pvt_union_spec.md` + `config/pvt_union_example.union.json`. Data model recovered live via skillbridge against `fnxSession0` — discovered Maestro stores corner sweeps on two parallel axes (vars + models), each using the same space-separated-string sweep encoding. Initial single-axis draft was wrong; revised to vars + models.section (model file/block/test stay at defaults for v1). Explode order rule reverse-engineered from the live TT_pvt 6-sub-corner expansion: alphabetic key + lex-sorted values (DECISIONS #30). Six open decisions (8.1-8.6) flagged for resolution during §2; only 8.4 (axlSetParameter device-level overrides) is potentially scope-shifting. PM mode + verification gate granted by user: SKILL code must be skillbridge-verified non-blocking; Python must be runtime-verified.
-- **2026-05-12 (overnight)**: Phase 2 §2 + §5 (offline subset) + §3 (code only) landed end-to-end in four commits. `d4d4ac0` §1 spec + DECISIONS #29-31 + housekeeping; `9d4ee6d` §2 Python loader + 41 tests (example file renamed to `pvt_union_example.union.json` to conform to spec §3.1 two-part extension); `e5f9a8f` §3 SKILL `pvtCornersPull` + 28 Tier-1 cases — **code committed, verification pending** (see §3.V in TODO.md); `9179fdf` §5 `pvt corners explode`/`list`/`diff` offline subcommands + 30 tests. Python suite: 254 → 325 (+71). `pvt corners explode config/pvt_union_example.union.json` reproduces the spec §9 7-sub-corner table verbatim. Still pending: §3 push side (blocked on §3.V), §5 `build` (CSV format pending real Maestro corners-CSV sample, Open Decision 8.3), §5 `push`/`pull` (delegate to §3 SKILL bridge, blocked on §3.V), §6 Gates U1/U2 (need live Maestro), U4 (needs `corners build`). U3 (explode arithmetic on synthetic 2×3×5 = 30) is implicitly satisfied by `tests/test_union.py::ExplodeArithmeticTests`. **§3.V verification debt**: skillbridge response queue on the working Virtuoso session entered a stale-response state mid-session and cannot be cleared without restarting either Virtuoso or the embedded `python_server.py` bridge. User flagged plan to restart Virtuoso at home; remaining work resumes then.
+- **2026-05-12 (overnight)**: Phase 2 §2 + §5 (offline subset) + §3 (code only) landed end-to-end in four commits. `d4d4ac0` §1 spec + DECISIONS #29-31 + housekeeping; `9d4ee6d` §2 Python loader + 41 tests (example file renamed to `pvt_union_example.union.json` to conform to spec §3.1 two-part extension); `e5f9a8f` §3 SKILL `pvtCornersPull` + 28 Tier-1 cases — code committed, verification pending; `9179fdf` §5 `pvt corners explode`/`list`/`diff` offline subcommands + 30 tests. Python suite: 254 → 325 (+71).
+- **2026-05-12 (late evening — after user reload of sbStart.il)**: §3.V verification cleared. `a98b9e5` fixes 5 bugs caught during Tier-1 + Tier-2: 4 operator-shorthand uses (`<=` / `<` / `+` / `-` → `leqp` / `lessp` / `plus` / `difference`; DECISIONS #32) and 1 `pvtJsonEmitToPort` arg-order bug. SKILL Tier-1 256 → 286 / 1 (baseline FAIL unchanged); Tier-2 live `pvtCornersPull` against `fnxSession0` reproduces spec §9 verbatim. DECISIONS #33 records the verification.
+- **2026-05-12 (late evening — after user restarted Cadence)**: Phase 2 §3 push side landed and verified. `263adb0` adds `pvtCornersPush` + 13 push-helper Tier-1 cases (cumulative SKILL 256 → 300 / 0 fail — 1 baseline FAIL flipped to PASS in the fresh VM; net +30 corner tests). Tier-2 pull→push→pull round-trip on `fnxSession0` (3 corners: TT scalar / TT_pvt with vars+models sweeps / TT_2p5G with 3 scalar vars) is **semantically byte-identical** modulo per-pull `name` field. DECISIONS #34 captures the verification.
+- **2026-05-12 (closing)**: §6 Gate U3 pinned as 6-test pytest module (`tests/test_acceptance_phase2.py`); Python suite 325 → 331 / 0. U1 manually verified live (the Tier-2 round-trip in `263adb0`) but not yet offline-pinned (awaits captured fixture pair). U2 (VCO LO) and U4 (CSV round-trip) remain deferred — U2 needs VCO LO loaded, U4 needs `pvt corners build` to lock the CSV format (Open Decision 8.3). User pre-staged two history runs in `fnxSession0` for the Phase 1 §3 messy-data deferred Tier-2 verification: `simkit_simerr` (all-sim-err) and `simkit_Rtime_err` (one corner Rtime_clkout eval-err). Cataloged in TODO §1 Backlog.
 
 ## What's DONE
 
@@ -54,16 +57,22 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 
 ## What's IN PROGRESS
 
-- **§3.V verification debt** — SKILL Tier-1 (28 new cases registered into the standard `runTests.il` chain) + a focused Tier-2 `pvtCornersPull` live probe. Blocked on bridge restart: either restart Virtuoso, or `(load "/home/yusheng/cadence_work/Test/workarea/skill_tools/skillbridge/sbStart.il")` in CIW. User flagged plan to restart at home next session.
+_Nothing in progress — Phase 2 core landed. Three follow-ups on the deferred-work shelf below._
 
-## What's NEXT (after §3.V clears)
+## What's NEXT (the deferred-work shelf)
 
-1. **§3.V verification** — re-run SKILL Tier-1 (expect 256 → 284 / 1 / 0) + focused Tier-2 `pvtCornersPull` round-trip against `fnxSession0`. ~10 min.
-2. **Stage D — §3 SKILL push side** (`pvtCornersPush`). Mirrors pull. Verify with sandbox-session round-trip (NOT against live working setup).
-3. **§5 `build` / `push` / `pull`** — `build` needs a real Maestro corners-CSV export to lock the format (Open Decision 8.3). `push`/`pull` are thin wrappers around §3 SKILL.
-4. **§6 Gates U1 (round-trip simkit_verify) + U4 (sidecar↔CSV bit-identical)** — pin once §3 push and §5 build land.
-5. **§6 Gate U2 (VCO LO acceptance)** — waits until the VCO LO setup is loaded in Maestro. Not loaded this session.
-6. **§6 Gate U3 (explode arithmetic)** — already implicitly satisfied by `tests/test_union.py::ExplodeArithmeticTests`. Just needs a "Gate U3" pytest wrapper.
+1. **§5 `pvt corners pull` / `push` CLI wrappers** — thin Python CLI subcommands around the now-verified SKILL `pvtCornersPull` / `pvtCornersPush`. Mostly mechanical: skillbridge invocation + arg parsing. Couple-hour subagent task once §6 Gate U1 has a sandbox session strategy for CI.
+2. **§5 `pvt corners build`** — needs a real Maestro corners-CSV export sample to reverse-engineer (Open Decision 8.3). User can drop a sample at `tests/fixtures/unions/maestro_corners_export.csv` next time they're in Maestro; until then this stays deferred.
+3. **§6 Gate U1 pin as offline regression** — capture a pre/post fixture pair from the live `fnxSession0` round-trip, commit them, then wire `tests/test_acceptance_phase2.py::TestGateU1RoundTrip` to diff them. Maybe a half-session of fixture work + 4-5 tests.
+4. **§6 Gate U2 VCO LO acceptance** — needs the VCO LO setup loaded in Maestro. User flag when ready; ~half-session to probe and run the 21-col case + write the gate.
+5. **§6 Gate U4 sidecar↔CSV round-trip** — chained behind `pvt corners build`.
+
+## Phase 1 backlog (continues)
+
+- §2.2 dialog Tier-2 manual UI verification (5 scenarios at `skill/tests/tier2/scenarios.md`).
+- §3 walker mock-rdb harness (DECISIONS #23).
+- §3 screenshot v1.1 (S3_DESIGN §3.5).
+- **§3 messy-data Tier-2 against the new histories** — `simkit_simerr` (all-sim-err) and `simkit_Rtime_err` (one-corner eval-err) are live in `fnxSession0`. When picking up Phase 1 §3 (c), call `PvtSave(?histName "simkit_simerr")` and `PvtSave(?histName "simkit_Rtime_err")` from CIW or skillbridge; eyeball the resulting `run.json`s with `pvt validate <path>` to confirm pass-2 / pass-3 row shaping.
 
 **Backlog (deferred from Phase 1, do alongside if convenient):**
 - §2.2 dialog Tier-2 manual UI verification (5 scenarios in `skill/tests/tier2/scenarios.md`).
