@@ -40,10 +40,10 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 
 ### §3. SKILL bridge (pull + push)
 
-- [ ] `skill/pvtCorners.il` — `pvtCornersPull(sess outPath)` per spec §4.3. Vars via `axlGetVars`/`axlGetVar`/`axlGetVarValue`; models via `axlGetModels`/`axlGetModel`/`axlGetModel{File,Section,Block,Test}`. Sidecar JSON via Phase 1 `pvtJson` emitter.
-- [ ] `pvtCornersPush(sess unionJsonPath)` — symmetric. Vars via `axlPutVar`; models via `axlPutModel` + `axlSetModel{Section,Block,Test}`.
-- [ ] `skill/tests/testPvtCorners.il` — Tier-1 (pure helpers; no live session).
-- [ ] **Verification gate (per PM-mode rule):** Tier-2 short non-blocking skillbridge probe — pull from live `fnxSession0` produces a sidecar that diffs cleanly against `config/pvt_union_example.union.json` (modulo §4.2). Push must NOT run against the live working session; use a sandbox session.
+- [x] `skill/pvtCorners.il` — `pvtCornersPull(?sess ?outPath ?unionName)` per spec §4.3. Vars via `axlGetVars`/`axlGetVar`/`axlGetVarValue`; models via `axlGetModels`/`axlGetModel`/`axlGetModel{File,Section,Block,Test}`. Sidecar JSON via Phase 1 `pvtJson` emitter. **VERIFICATION PENDING — see §3.V below.**
+- [ ] `pvtCornersPush(sess unionJsonPath)` — symmetric. Vars via `axlPutVar`; models via `axlPutModel` + `axlSetModel{Section,Block,Test}`. (Blocked on §3.V Tier-1 verification of pull side.)
+- [x] `skill/tests/testPvtCorners.il` — Tier-1 cases for pure helpers (28 cases, registered into the standard `runTests.il` driver). **EXECUTION PENDING — see §3.V below.**
+- [ ] **§3.V Verification gate (per PM-mode rule) — DEFERRED to next session after Virtuoso restart.** The current Virtuoso session's skillbridge response queue is in a stale-response state (multiple `python_server.py` processes; new calls get back queued old responses). Cannot reliably run the Tier-1 SKILL suite or do a Tier-2 live probe against `fnxSession0` until the bridge is restarted. Two paths to clear it (per 2026-05-12 chat): (a) restart Virtuoso fresh, or (b) `(load ".../sbStart.il")` in CIW to rebuild just the python_server bridge. After either: re-run `python3 /tmp/run_skill_tests.py` to confirm SKILL Tier-1 256 → 284 / 1 / 0 (28 new tests added) and run a focused `pvtCornersPull` probe against `fnxSession0`.
 
 ### §4. (no separate §4 — Phase 2 has no analogue of Phase 1's ingester since the data is config, not run output)
 
