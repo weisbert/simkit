@@ -2,7 +2,7 @@
   "_doc": "Sidecar describing one PVT union. Drop this (or a renamed copy ending in '.union.json') under <unionsDir>/ — by default '<project_root>/unions/'. The 'name' field must equal the filename basename (sans '.union.json'). See docs/phase2_pvt_union_spec.md for the full reference. Keys starting with '_' are ignored by the loader.\n\nThis example mirrors the live simkit_verify corner-table as observed via skillbridge on 2026-05-12 (DECISIONS #29). It has two rows: 'TT' (single nominal corner) and 'TT_pvt' (corner-group that explodes to 6 sub-corners via 2-value VDD sweep x 3-section model sweep).",
 
   "union_schema_version": 1,
-  "name": "pvt_union.example",
+  "name": "pvt_union_example",
   "project": "my_ldo",
   "testbench_id": "sim_yusheng/Test/maestro",
 

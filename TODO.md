@@ -26,7 +26,7 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 ### §1. Specification (no code yet — pure documentation)
 
 - [x] `docs/phase2_pvt_union_spec.md` — pain, data model (vars + models axes), sidecar format, round-trip surface, CLI preview, acceptance gates, versioning, open decisions (8.1-8.6).
-- [x] `config/pvt_union.example.json` — worked example matching the live `simkit_verify` corner-table (2 rows → 7 sub-corners).
+- [x] `config/pvt_union_example.union.json` — worked example matching the live `simkit_verify` corner-table (2 rows → 7 sub-corners).
 - [x] `docs/schema.md` §1 additive update — `unionsDir` field added (no version bump, additive per unknown-key policy).
 
 ### §2. Python loader + validator
@@ -34,7 +34,7 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 - [ ] `python/simkit/union.py` — JSON → typed union object; validate every §3.2 / §3.3 invariant.
 - [ ] `python/simkit/union.py:explode()` — return sub-corner list per §3.4 (alphabetic key + lex-sorted values).
 - [ ] `tests/test_union.py` — every load-error invariant; the simkit_verify example must explode to the exact 7-row table from spec §9; length-1 array round-trips without collapse.
-- [ ] **Verification gate (per PM-mode rule):** `pytest tests/test_union.py` 100% green; `python -m simkit.union explode config/pvt_union.example.json` prints the spec §9 table verbatim.
+- [ ] **Verification gate (per PM-mode rule):** `pytest tests/test_union.py` 100% green; `python -m simkit.union explode config/pvt_union_example.union.json` prints the spec §9 table verbatim.
 
 **Open decisions blocking §2 start:** 8.1 (multiple unions per bench), 8.2 (unionsDir default), 8.4 (axlSetParameter in v1?), 8.6 (explode order on VCO LO). Pick defaults from spec §8 unless a domain reason surfaces.
 
@@ -43,7 +43,7 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 - [ ] `skill/pvtCorners.il` — `pvtCornersPull(sess outPath)` per spec §4.3. Vars via `axlGetVars`/`axlGetVar`/`axlGetVarValue`; models via `axlGetModels`/`axlGetModel`/`axlGetModel{File,Section,Block,Test}`. Sidecar JSON via Phase 1 `pvtJson` emitter.
 - [ ] `pvtCornersPush(sess unionJsonPath)` — symmetric. Vars via `axlPutVar`; models via `axlPutModel` + `axlSetModel{Section,Block,Test}`.
 - [ ] `skill/tests/testPvtCorners.il` — Tier-1 (pure helpers; no live session).
-- [ ] **Verification gate (per PM-mode rule):** Tier-2 short non-blocking skillbridge probe — pull from live `fnxSession0` produces a sidecar that diffs cleanly against `config/pvt_union.example.json` (modulo §4.2). Push must NOT run against the live working session; use a sandbox session.
+- [ ] **Verification gate (per PM-mode rule):** Tier-2 short non-blocking skillbridge probe — pull from live `fnxSession0` produces a sidecar that diffs cleanly against `config/pvt_union_example.union.json` (modulo §4.2). Push must NOT run against the live working session; use a sandbox session.
 
 ### §4. (no separate §4 — Phase 2 has no analogue of Phase 1's ingester since the data is config, not run output)
 
@@ -55,7 +55,7 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 - [ ] `pvt corners diff <a> <b>` — row-by-row axis-by-axis comparison.
 - [ ] `pvt corners push <union>.union.json` — delegate to skillbridge.
 - [ ] `pvt corners pull <output>.union.json` — delegate to skillbridge.
-- [ ] **Verification gate (per PM-mode rule):** pytest covers each subcommand against the example file; manual smoke on `pvt corners explode config/pvt_union.example.json` matches spec §9.
+- [ ] **Verification gate (per PM-mode rule):** pytest covers each subcommand against the example file; manual smoke on `pvt corners explode config/pvt_union_example.union.json` matches spec §9.
 
 ### §6. End-to-end acceptance gates
 

@@ -244,10 +244,10 @@ These do **not** need to be answered to lock this spec, but Phase 2 §2 (Python 
 
 ## 9. Worked example: simkit_verify (the live probe)
 
-`config/pvt_union.example.json` provides a minimal sidecar matching the live `simkit_verify` corner table as observed on 2026-05-12 via skillbridge (DECISIONS #29). Reproduce by:
+`config/pvt_union_example.union.json` provides a minimal sidecar matching the live `simkit_verify` corner table as observed on 2026-05-12 via skillbridge (DECISIONS #29). Reproduce by:
 
 ```sh
-pvt corners explode config/pvt_union.example.json
+pvt corners explode config/pvt_union_example.union.json
 ```
 
 Expected output (7 sub-corners — 1 from `TT`, 6 from `TT_pvt`):
