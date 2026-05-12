@@ -14,10 +14,9 @@ All six sections shipped (§1 spec, §2 loaders + first-save dialog, §3 collect
 - §2.2 dialog Tier-2 manual UI verification — 5 scenarios documented at `skill/tests/tier2/scenarios.md`, sandbox at `/home/yusheng/cadence_work/dialog_sandbox/`. Pick up alongside any future UI-affecting change.
 - §3 walker mock-rdb harness — DECISIONS #23; awaits real gappy-pid sim or budget for the `maeReadResDB` refactor.
 - §3 screenshot v1.1 — S3_DESIGN §3.5; current one-shot warn + return nil suffices until a use case shows up.
-- §3 messy-data Tier-2 against real failing-sim histories — **NEW 2026-05-12: user pre-staged two history runs in `fnxSession0`**:
-  - `simkit_simerr` — all results = sim error (exercises pass-2 `'failed` status path)
-  - `simkit_Rtime_err` — one corner's Rtime_clkout = eval error (exercises mixed-status pass-1 + pass-3 paths)
-  When picking up Phase 1 §3 messy-data deferred verification (TODO §3 (c)), call `PvtSave(?histName "simkit_simerr")` and `PvtSave(?histName "simkit_Rtime_err")` from CIW or via skillbridge; eyeball the resulting `run.json`s against the validator (`pvt validate <path>`) to confirm pass-2 / pass-3 row shaping is correct.
+- §3 messy-data Tier-2 against real failing-sim histories — **DONE 2026-05-12 via user-pre-staged histories**:
+  - `simkit_simerr` (all sim err) — pass-2 produces 7 `failed`-status `__sim_status__` sentinels, one per active sub-corner. Clean.
+  - `simkit_Rtime_err` (one corner's Rtime_clkout eval err) — pre-fix the row was silently dropped; **DECISIONS #35 introduced per-output `eval_err` sentinel** as the fix. Post-fix: 42 rows = 41 ok + 1 eval_err for `(TT_2p5G, Rtime_clkout)`. Both histories serve as standing Tier-2 references for the messy-data paths.
 
 ---
 

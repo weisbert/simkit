@@ -473,6 +473,79 @@
       (pvtAssert (arrayref (car (cdr result)) "value") "PASS" "value passed through"))))
 
 
+;; --- eval_err: per-output sentinel for outputs whose rdb value is a list /
+;;     nil / other non-shapable type. Pass-1 emits an eval_err row preserving
+;;     the output name; pass-3 stays out of the way (writtenSet IS marked).
+;;     Mirrors the simkit_Rtime_err case where Rtime_clkout's rdb value comes
+;;     back as a list while other outputs in the same triple succeed.
+
+(pvtTestRegister "collect/rows-list-value-emits-eval-err"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "Rtime_clkout" '(eval_err "bad")))
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (row nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (length (cdr result)) 1 "list value emits exactly 1 row")
+      (setq row (car (cdr result)))
+      (pvtAssert (arrayref row "status") "eval_err" "status = eval_err")
+      (pvtAssert (arrayref row "output") "Rtime_clkout"
+                 "output name preserved (NOT __sim_status__)")
+      (pvtAssert (arrayref row "value") PVT_JSON_NULL "value = null")
+      (pvtAssert (arrayref row "test")   "tran" "test name carried")
+      (pvtAssert (arrayref row "corner") "TT" "corner carried")
+      (pvtAssert (arrayref row "point")  1 "point carried"))))
+
+
+(pvtTestRegister "collect/rows-nil-value-emits-eval-err"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  (list (list 1 "TT" "tran" "weird_out" nil))
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (row nil))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (pvtAssert (length (cdr result)) 1 "nil value emits 1 eval_err row")
+      (setq row (car (cdr result)))
+      (pvtAssert (arrayref row "status") "eval_err" "status = eval_err")
+      (pvtAssert (arrayref row "output") "weird_out" "output preserved"))))
+
+
+(pvtTestRegister "collect/rows-eval-err-coexists-with-ok-in-same-triple"
+  (lambda ()
+    (let ((walk (_pvtCollTestMakeWalk
+                  ;; Same (point=1, corner=TT, test=tran). 2 ok + 1 eval_err.
+                  (list
+                    (list 1 "TT" "tran" "PN_1M"        -200.0)
+                    (list 1 "TT" "tran" "PN_3M"        -210.0)
+                    (list 1 "TT" "tran" "Rtime_clkout" '(eval_err "bad")))
+                  nil
+                  (list (list 1 nil))
+                  (list (list "TT" nil))
+                  nil
+                  1))
+          (result nil) (rows nil)
+          (n_ok 0) (n_eval 0) (n_sent 0))
+      (setq result (_pvtCollRowsFromTuples walk))
+      (setq rows (cdr result))
+      (pvtAssert (length rows) 3 "2 ok + 1 eval_err = 3 rows total")
+      (foreach r rows
+        (cond
+          ((equal (arrayref r "status") "ok")             (setq n_ok   (plus n_ok 1)))
+          ((equal (arrayref r "status") "eval_err")       (setq n_eval (plus n_eval 1)))
+          ((equal (arrayref r "output") "__sim_status__") (setq n_sent (plus n_sent 1)))))
+      (pvtAssert n_ok 2 "2 ok rows (the converged outputs)")
+      (pvtAssert n_eval 1 "1 eval_err row")
+      (pvtAssert n_sent 0 "no triple-level sentinel (writtenSet IS marked)"))))
+
+
 ;; --- Scenario A: partial-convergence corner → no_convergence sentinel
 (pvtTestRegister "collect/rows-partial-converge-emits-no-convergence"
   (lambda ()

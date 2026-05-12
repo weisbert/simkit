@@ -597,3 +597,35 @@ _Date: 2026-05-12_
 - One `let*` use in `_pvtCornersPushRow` (DECISIONS #14 trap #4 — classic SKILL has no `let*`). Fixed to nested `let`. Three test cases used `let*` too; same fix.
 
 **Alternatives considered:** Push to a fresh sandbox session created via `axlCreateSession` and the existing test bench template. Rejected for v1 — overhead of session creation outweighs verification value once IDENTICAL-content push is shown safe.
+
+
+---
+
+## #35 — `eval_err` per-output sentinel: pass-1 emits a row when the rdb value is unshapable
+_Date: 2026-05-12_
+
+**Decision:** When `_pvtCollRowsFromTuples` pass-1 enumerates an output whose rdb-side value is neither a number nor a non-`"wave"` string (typically a list like `(eval_err "Rtime_clkout: error")` when the measurement expression failed eval on a specific corner), the collector now emits a row with the **real output name preserved**, `value=null`, and `status="eval_err"`. The row also marks `writtenSet`/`writtenByTest` so the triple-level pass-3 (`no_convergence`) and pass-2 (`failed`/`running`) sentinels do not double-fire.
+
+`VALID_STATUSES` grows to `{ok, failed, running, no_convergence, eval_err}`. The validator treats `eval_err` as a **data row** for triple-coverage purposes (I1) alongside `ok`; it shares the "value must be null" rule with the triple-level sentinels (I14) and additionally enforces "output must not be `__sim_status__`" (since eval_err is per-output, not triple-level).
+
+**Why:** Discovered by probing the user-pre-staged `simkit_Rtime_err` history on 2026-05-12 (one corner's `Rtime_clkout` expression errored on eval; rest of the test's outputs computed normally). The pre-fix collector silently dropped that output's row — pass-1 rejected it (value was a list, not numberp/stringp), pass-2 didn't fire (`tst->status='done`), and pass-3's `(cname,pid)` key was already marked written by the other ok rows in the same triple. The validator didn't catch it either: I1 only checks `(point, corner, test)` triple-coverage, and the triple had ok rows → satisfied.
+
+This was the exact "per-output convergence inside a converged test" scenario flagged in TODO §3 (last bullet of the messy-data list) as "**Untested**". The new histories made it testable; the bug was real.
+
+**Why the fix is per-output, not via a coverage-set oracle:**
+- The walker already enumerates the eval-err output (it's in `pt->outputs`, with value=list). Pass-1 was *seeing* it; the bug was in the shape-then-drop logic.
+- Emitting a per-output `eval_err` row preserves the output name, lets I1 see per-output coverage without a separate "expected output set" oracle, and avoids a schema-level concept of "expected outputs per (test, corner)" that Maestro doesn't reify.
+- Triple-level sentinels (`__sim_status__` with `failed`/`running`/`no_convergence`) are unchanged. Pass-2 / pass-3 still own the "entire test/triple is broken" path.
+
+**Implications:**
+- Schema v1 contract grows by one status value but no field. Forward-compat: ingester / DB / CLI handle the new status automatically because status is a string column (no enum constraint at the DuckDB layer).
+- Tier-1 SKILL: +3 cases (`collect/rows-list-value-emits-eval-err`, `collect/rows-nil-value-emits-eval-err`, `collect/rows-eval-err-coexists-with-ok-in-same-triple`). Cumulative 300 → 313 / 1 baseline FAIL.
+- Tier-1 Python: +7 cases in `EvalErrTests` (status enum acceptance, I14 value-null + output-not-sentinel, I1 data-row treatment, I1 mutual-exclusion with triple sentinels). Cumulative 331 → 338 / 0.
+- Tier-2: `simkit_Rtime_err` PvtSave now yields 42 rows (was 41) — 41 ok + 1 eval_err for `(test='Test', corner='TT_2p5G', point=1, output='Rtime_clkout', status='eval_err')`. Validator: 0 errors, 0 warnings. simkit_simerr is unchanged (pass-2 territory only).
+
+**Alternatives considered:**
+- Adding a coverage-set invariant ("every (test, corner) must cover the same output set"). Rejected — the user can intentionally vary outputs per corner (different bench wiring); a hard invariant would over-constrain.
+- Mapping the eval-err row to a triple-level `__sim_status__` sentinel with a synthetic encoded output name. Rejected as clunky and violates the I1 contract that says one sentinel per triple.
+- Surfacing the raw eval-err message (the list payload often carries diagnostic text). Rejected for v1: the value field is null; the diagnostic stays in Maestro's results log. Future v1.1 could add a `error_message` optional field to eval_err rows if there's demand.
+
+**Open: column constraint at the DB layer.** DuckDB `results.status` is currently a free string per DECISIONS #21. If a future schema bump introduces a constraint, it must include `eval_err`. Not blocking v1.

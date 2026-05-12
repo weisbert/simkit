@@ -79,7 +79,15 @@ _TIMESTAMP_RE = re.compile(
 # Closed sets
 # ----------------------------------------------------------------------
 
-VALID_STATUSES = frozenset({"ok", "failed", "running", "no_convergence"})
+VALID_STATUSES = frozenset({"ok", "failed", "running", "no_convergence", "eval_err"})
+
+# Statuses that record per-output measurement outcomes (vs. whole-test or
+# whole-triple sentinels). `eval_err` is a per-output sentinel: a single
+# output that came back from the rdb with an unshapable value (typically a
+# (eval_err "...") list when the expression errored on this corner) but the
+# surrounding test/corner is otherwise alive.
+_DATA_ROW_STATUSES = frozenset({"ok", "eval_err"})
+_SENTINEL_ROW_STATUSES = frozenset({"failed", "running", "no_convergence"})
 VALID_ARTIFACT_TYPES = frozenset({
     "waveform", "results_table", "sim_log", "schematic",
     "netlist_diff", "image", "pdf", "other",
@@ -409,8 +417,27 @@ def _check_results(results: list, violations: List[Violation]) -> None:
                         f"value must be number or string when status='ok', "
                         f"got {type(value).__name__}",
                     ))
+            elif status == "eval_err":
+                # Per-output eval-err sentinel: must NOT use the
+                # __sim_status__ output name (that name is reserved for
+                # triple-level sentinels with status failed/running/
+                # no_convergence). Value must be null.
+                if output == _SENTINEL_OUTPUT:
+                    violations.append(Violation(
+                        "I14", "error", f"{path}.output",
+                        f"status='eval_err' is per-output and must preserve "
+                        f"the real output name, not the triple-level "
+                        f"sentinel {_SENTINEL_OUTPUT!r}",
+                    ))
+                if value is not None:
+                    violations.append(Violation(
+                        "I14", "error", f"{path}.value",
+                        f"value must be null when status='eval_err', "
+                        f"got {type(value).__name__}: {value!r}",
+                    ))
             elif status in VALID_STATUSES:
-                # Non-ok rows: value must be null.
+                # Non-ok / non-eval_err rows are triple-level sentinels;
+                # value must be null.
                 if value is not None:
                     violations.append(Violation(
                         "I14", "error", f"{path}.value",
@@ -481,10 +508,15 @@ def _check_triple_coverage(results: list, violations: List[Violation]) -> None:
 
     For each (point, corner, test) triple within this run:
 
-    * Either >= 1 row with status='ok' and output != '__sim_status__', OR
-    * Exactly one row with output == '__sim_status__' and status in
-      {failed, running, no_convergence}.
+    * Either >= 1 data row (status in {ok, eval_err}, output != '__sim_status__'), OR
+    * Exactly one triple-level sentinel row (output == '__sim_status__',
+      status in {failed, running, no_convergence}).
     * Never both, never neither.
+
+    `eval_err` is per-output: it records that ONE output's expression
+    failed on this corner while the test/corner is otherwise alive. From
+    I1's perspective, an eval_err row is a measurement attempt (not a
+    silent drop), so it counts as a data row for triple-coverage.
 
     Skips rows that aren't dicts or that lack the keys we'd partition on
     (those are flagged separately by I24 / per-field checks).
@@ -505,37 +537,38 @@ def _check_triple_coverage(results: list, violations: List[Violation]) -> None:
         triples.setdefault(key, []).append((idx, row))
 
     for key, rows in triples.items():
-        ok_rows = [
+        data_rows = [
             (i, r) for (i, r) in rows
-            if r.get("status") == "ok" and r.get("output") != _SENTINEL_OUTPUT
+            if r.get("status") in _DATA_ROW_STATUSES
+               and r.get("output") != _SENTINEL_OUTPUT
         ]
         sentinels = [
             (i, r) for (i, r) in rows
             if r.get("output") == _SENTINEL_OUTPUT
         ]
 
-        if ok_rows and sentinels:
-            sample_ok = ok_rows[0][0]
+        if data_rows and sentinels:
+            sample_data = data_rows[0][0]
             sample_sent = sentinels[0][0]
             point, corner, test = key
             violations.append(Violation(
                 "I1", "error",
                 f"results[{sample_sent}]",
                 f"triple (point={point}, corner={corner!r}, test={test!r}) "
-                f"has both ok rows (e.g. results[{sample_ok}]) and a "
+                f"has both data rows (e.g. results[{sample_data}]) and a "
                 f"sentinel row at results[{sample_sent}]; expected one or "
                 f"the other, not both",
             ))
             continue
 
-        if not ok_rows and not sentinels:
+        if not data_rows and not sentinels:
             sample = rows[0][0]
             point, corner, test = key
             violations.append(Violation(
                 "I1", "error",
                 f"results[{sample}]",
                 f"triple (point={point}, corner={corner!r}, test={test!r}) "
-                f"has neither an ok row nor a sentinel row",
+                f"has neither a data row nor a sentinel row",
             ))
             continue
 

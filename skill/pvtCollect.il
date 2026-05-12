@@ -844,34 +844,31 @@
               (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
               (setarray seenSet seenKey (list tname cname pid sweepObj))
               (setq keysSeen (cons seenKey keysSeen))))
+          ;; --- shape corner_vars / sweep / note once; used by ok and eval_err
+          (setq cornerParamsAssoc (assoc cname cornerParamCache))
+          (setq cornerVarsAlist
+                (cond
+                  ;; Unified Step 4 / Bug D marker for either failure
+                  ;; mode (cache miss or cornerObj parse failure).
+                  ((null cornerParamsAssoc)
+                    (list (list "_no_corner_vars" cname)))
+                  ((null (cadr cornerParamsAssoc))
+                    (list (list "_no_corner_vars" cname)))
+                  (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
+          (setq cornerVarsObj
+                (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))
+          (setq sweepRaw (cadr (assoc pid pidSweepCache)))
+          (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
+          (setq noteRaw (cadr (assoc tname testNoteCache)))
+          (setq noteForRow
+                (cond
+                  ((and (stringp noteRaw) (greaterp (strlen noteRaw) 0))
+                    noteRaw)
+                  (t PVT_JSON_NULL)))
           (cond
             ((or (numberp outVal)
                  (and (stringp outVal) (not (equal outVal "wave"))))
-              ;; corner_vars
-              (setq cornerParamsAssoc (assoc cname cornerParamCache))
-              (setq cornerVarsAlist
-                    (cond
-                      ;; Unified Step 4 / Bug D marker for either failure
-                      ;; mode (cache miss or cornerObj parse failure).
-                      ((null cornerParamsAssoc)
-                        (list (list "_no_corner_vars" cname)))
-                      ((null (cadr cornerParamsAssoc))
-                        (list (list "_no_corner_vars" cname)))
-                      (t (_pvtCollParseCornerParams (cadr cornerParamsAssoc)))))
-              (setq cornerVarsObj
-                    (_pvtCollAssocToTable cornerVarsAlist 'pvtCornerVars))
-              ;; sweep — re-resolve from cache (the seenSet entry holds an
-              ;; isomorphic copy; using the cache makes the lookup uniform
-              ;; across passes).
-              (setq sweepRaw (cadr (assoc pid pidSweepCache)))
-              (setq sweepObj (_pvtCollAssocToTable sweepRaw 'pvtSweep))
-              ;; test_note — flatten "" → PVT_JSON_NULL (existing pattern).
-              (setq noteRaw (cadr (assoc tname testNoteCache)))
-              (setq noteForRow
-                    (cond
-                      ((and (stringp noteRaw) (greaterp (strlen noteRaw) 0))
-                        noteRaw)
-                      (t PVT_JSON_NULL)))
+              ;; --- ok row: numeric value or non-"wave" string
               (setq rows
                     (cons
                       (_pvtCollMakeRow
@@ -882,7 +879,29 @@
               (setarray writtenByTest
                         (sprintf nil "%s|%d|%s" cname pid tname) t)
               (cond
-                ((null firstTestName) (setq firstTestName tname))))))))
+                ((null firstTestName) (setq firstTestName tname))))
+            ((and (stringp outVal) (equal outVal "wave"))
+              ;; --- waveform marker: intentional skip per S3_DESIGN
+              nil)
+            (t
+              ;; --- eval_err row: per-output sentinel for outputs that
+              ;; came back from the rdb with an unshapable value (typically
+              ;; a list like (eval_err "Rtime_clkout: ...") when the
+              ;; measurement expression errored on this corner). Preserves
+              ;; the output name so I1 sees per-output coverage; status
+              ;; "eval_err" distinguishes from no_convergence (whole-triple)
+              ;; and failed/running (whole-test). Marks writtenByTest so
+              ;; pass-2 sentinels remain suppressed for the broader (cname,
+              ;; pid, tname).
+              (setq rows
+                    (cons
+                      (_pvtCollMakeRow
+                        pid cname tname outName PVT_JSON_NULL "eval_err"
+                        sweepObj cornerVarsObj noteForRow)
+                      rows))
+              (setarray writtenSet seenKey t)
+              (setarray writtenByTest
+                        (sprintf nil "%s|%d|%s" cname pid tname) t))))))
     ;; ===== PASS 2: failed / running sentinel rows ============================
     (foreach tstTuple tests
       (setq tstPid    (nthelem 1 tstTuple))

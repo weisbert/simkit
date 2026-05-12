@@ -175,6 +175,94 @@ class TripleCoverageI1Tests(unittest.TestCase):
         self.assertIn("I1", codes)
 
 
+class EvalErrTests(unittest.TestCase):
+    """eval_err — per-output sentinel added in DECISIONS #35.
+
+    A row with status='eval_err' records that one specific output's
+    expression failed on this corner while the surrounding test/corner
+    is otherwise alive. value must be null; output must be the real
+    output name (not __sim_status__). For I1 it counts as a data row.
+    """
+
+    def setUp(self):
+        self.dump = _good_dump()
+
+    def _add_eval_err_row(self, **overrides):
+        row = {
+            "point": 1, "corner": "TT", "test": "Test",
+            "output": "Rtime_clkout",
+            "value": None,
+            "status": "eval_err",
+            "sweep": {},
+            "corner_vars": {"temperature": "27"},
+            "test_note": None,
+        }
+        row.update(overrides)
+        self.dump["results"].append(row)
+        return row
+
+    def test_eval_err_accepted_in_status_enum(self):
+        self._add_eval_err_row()
+        codes = _codes(_errors(validate_dump(self.dump)))
+        self.assertNotIn("I12", codes)
+
+    def test_eval_err_with_null_value_clean(self):
+        self._add_eval_err_row()
+        errs = _errors(validate_dump(self.dump))
+        self.assertEqual(errs, [])
+
+    def test_eval_err_with_non_null_value_rejected_i14(self):
+        self._add_eval_err_row(value=1.234)
+        codes = _codes(_errors(validate_dump(self.dump)))
+        self.assertIn("I14", codes)
+
+    def test_eval_err_with_sentinel_output_rejected_i14(self):
+        self._add_eval_err_row(output="__sim_status__")
+        codes = _codes(_errors(validate_dump(self.dump)))
+        self.assertIn("I14", codes)
+
+    def test_eval_err_coexists_with_ok_in_same_triple_clean(self):
+        # Same (point, corner, test) as the existing ok row — different output.
+        self._add_eval_err_row()
+        errs = _errors(validate_dump(self.dump))
+        self.assertEqual(errs, [])
+
+    def test_eval_err_alone_in_triple_satisfies_i1(self):
+        # Replace ALL results with a single eval_err row. No ok rows.
+        # I1 must accept eval_err as a data row.
+        self.dump["results"] = [
+            {
+                "point": 1, "corner": "TT", "test": "Test",
+                "output": "Rtime_clkout", "value": None,
+                "status": "eval_err", "sweep": {},
+                "corner_vars": {"temperature": "27"}, "test_note": None,
+            }
+        ]
+        errs = _errors(validate_dump(self.dump))
+        self.assertEqual([v.code for v in errs], [])
+
+    def test_eval_err_plus_triple_sentinel_rejected_i1(self):
+        # Adding a __sim_status__ sentinel to the same (point, corner, test)
+        # that already has an eval_err row violates the mutual-exclusion
+        # rule (data row + sentinel for the same triple).
+        self.dump["results"] = [
+            {
+                "point": 1, "corner": "TT", "test": "Test",
+                "output": "Rtime_clkout", "value": None,
+                "status": "eval_err", "sweep": {},
+                "corner_vars": {"temperature": "27"}, "test_note": None,
+            },
+            {
+                "point": 1, "corner": "TT", "test": "Test",
+                "output": "__sim_status__", "value": None,
+                "status": "failed", "sweep": {},
+                "corner_vars": {"temperature": "27"}, "test_note": None,
+            },
+        ]
+        codes = _codes(_errors(validate_dump(self.dump)))
+        self.assertIn("I1", codes)
+
+
 class RunMetaTests(unittest.TestCase):
     """I2–I11 negative tests."""
 
