@@ -41,7 +41,7 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 ### §3. SKILL bridge (pull + push)
 
 - [x] `skill/pvtCorners.il` — `pvtCornersPull(?sess ?outPath ?unionName)` per spec §4.3. Vars via `axlGetVars`/`axlGetVar`/`axlGetVarValue`; models via `axlGetModels`/`axlGetModel`/`axlGetModel{File,Section,Block,Test}`. Sidecar JSON via Phase 1 `pvtJson` emitter. **VERIFIED via Tier-1 + Tier-2 live probe 2026-05-12; see DECISIONS #32 #33.**
-- [ ] `pvtCornersPush(sess unionJsonPath)` — symmetric. Vars via `axlPutVar`; models via `axlPutModel` + `axlSetModel{Section,Block,Test}`.
+- [x] `pvtCornersPush(?sess ?unionJsonPath ?dryRun)` — vars via `axlPutVar`; models via `axlPutModel` + `axlSetModel{Section,Block,Test}`. **VERIFIED 2026-05-12 against fnxSession0** (3 corners incl. vars+models sweeps): pull → push → pull round-trip is byte-identical modulo per-call `name` field. Tier-1: 256 → 300 / 0 (1 baseline FAIL flipped to PASS after Cadence restart; +13 push-side helper cases).
 - [x] `skill/tests/testPvtCorners.il` — Tier-1 cases for pure helpers (30 cases registered; suite 256 → 286 / 1 / 0).
 - [x] **§3.V Verification gate** — CLEARED 2026-05-12 after user reloaded sbStart.il. SKILL Tier-1 256 → 286 / 1 / 0 (1 baseline FAIL is Maestro-open no-session test, unchanged). Tier-2 live pull from `fnxSession0` reproduces spec §9 7-sub-corner table; Python `load_union` + `explode` round-trip is byte-clean. Four SKILL bugs caught during verification (1 arg-order, 4 operator-shorthand) and fixed; DECISIONS #32 records the named-function-vs-operator-shorthand rule, #33 records the verification.
 

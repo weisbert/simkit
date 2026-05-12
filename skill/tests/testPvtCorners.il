@@ -119,3 +119,68 @@
 (pvtTestRegister "corners/basename/exactly-suffix"
   (lambda () (pvtAssert (_pvtCornersUnionBasename ".union.json") nil
                         "suffix-only filename rejected (no basename)")))
+
+
+;; ---------- _pvtCornersJoinWithSpace -------------------------------------
+
+(pvtTestRegister "corners/join/empty"
+  (lambda () (pvtAssert (_pvtCornersJoinWithSpace nil) "" "empty list -> empty string")))
+
+(pvtTestRegister "corners/join/single"
+  (lambda () (pvtAssert (_pvtCornersJoinWithSpace '("55")) "55" "single token")))
+
+(pvtTestRegister "corners/join/two"
+  (lambda () (pvtAssert (_pvtCornersJoinWithSpace '("3" "2.8")) "3 2.8" "two tokens")))
+
+(pvtTestRegister "corners/join/three"
+  (lambda () (pvtAssert (_pvtCornersJoinWithSpace '("tt" "ss" "ff")) "tt ss ff" "three tokens")))
+
+
+;; ---------- _pvtCornersFormatVarValueFromJson ----------------------------
+
+(pvtTestRegister "corners/formatVar/scalar"
+  (lambda () (pvtAssert (_pvtCornersFormatVarValueFromJson "55") "55" "scalar passes through")))
+
+(pvtTestRegister "corners/formatVar/sweep"
+  (lambda () (pvtAssert (_pvtCornersFormatVarValueFromJson '("3" "2.8")) "3 2.8" "sweep -> joined")))
+
+(pvtTestRegister "corners/formatVar/nil"
+  (lambda () (pvtAssert (_pvtCornersFormatVarValueFromJson nil) nil "nil -> nil")))
+
+
+;; ---------- _pvtCornersFormatSectionValueFromJson ------------------------
+
+(pvtTestRegister "corners/formatSection/scalar-wraps"
+  (lambda () (pvtAssert (_pvtCornersFormatSectionValueFromJson "tt") "\"tt\"" "scalar -> quoted")))
+
+(pvtTestRegister "corners/formatSection/sweep-wraps-each"
+  (lambda () (pvtAssert (_pvtCornersFormatSectionValueFromJson '("tt" "ss" "ff"))
+                        "\"tt\" \"ss\" \"ff\"" "sweep -> each token quoted, space joined")))
+
+(pvtTestRegister "corners/formatSection/nil"
+  (lambda () (pvtAssert (_pvtCornersFormatSectionValueFromJson nil) nil "nil -> nil")))
+
+
+;; ---------- round-trip identity: get-form -> set-form -> get-form -------
+
+(pvtTestRegister "corners/roundtrip/var-scalar"
+  (lambda ()
+    (let ((parsed (_pvtCornersParseVarValue "55")))
+      (let ((jsonForm (_pvtCornersValueToJsonField parsed)))
+        (let ((setForm (_pvtCornersFormatVarValueFromJson jsonForm)))
+          (pvtAssert setForm "55" "scalar var: parse -> json-shape -> set is identity"))))))
+
+(pvtTestRegister "corners/roundtrip/var-sweep"
+  (lambda ()
+    (let ((parsed (_pvtCornersParseVarValue "3 2.8")))
+      (let ((jsonForm (_pvtCornersValueToJsonField parsed)))
+        (let ((setForm (_pvtCornersFormatVarValueFromJson jsonForm)))
+          (pvtAssert setForm "3 2.8" "sweep var: parse -> json-shape -> set is identity"))))))
+
+(pvtTestRegister "corners/roundtrip/section-sweep"
+  (lambda ()
+    (let ((parsed (_pvtCornersParseSectionValue "\"tt\" \"ss\" \"ff\"")))
+      (let ((jsonForm (_pvtCornersValueToJsonField parsed)))
+        (let ((setForm (_pvtCornersFormatSectionValueFromJson jsonForm)))
+          (pvtAssert setForm "\"tt\" \"ss\" \"ff\""
+                     "sweep section: parse -> json-shape -> set is identity"))))))

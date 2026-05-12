@@ -152,6 +152,55 @@
 )
 
 
+;; ---------- push-side encoders (inverse of the parsers above) -------------
+
+(procedure (_pvtCornersJoinWithSpace tokens)
+  ;; Join a list of token strings with single ASCII spaces. Used to build
+  ;; the axlPutVar value for a sweep var. ("3" "2.8") -> "3 2.8".
+  (prog (acc first)
+    (setq acc "")
+    (setq first t)
+    (foreach tok tokens
+      (cond
+        (first
+          (setq acc tok)
+          (setq first nil))
+        (t
+          (setq acc (strcat acc " " tok)))))
+    (return acc)
+  )
+)
+
+
+(procedure (_pvtCornersFormatVarValueFromJson raw)
+  ;; Inverse of _pvtCornersParseVarValue. Accepts either a SKILL string
+  ;; (scalar) or a list of strings (sweep, from JSON array). Returns the
+  ;; space-separated string that axlPutVar expects. nil -> nil (no-op
+  ;; signal for the caller).
+  (cond
+    ((null raw) nil)
+    ((stringp raw) raw)
+    ((listp raw)   (_pvtCornersJoinWithSpace raw))
+    (t nil)
+  )
+)
+
+
+(procedure (_pvtCornersFormatSectionValueFromJson raw)
+  ;; Inverse of _pvtCornersParseSectionValue. Each section name is wrapped
+  ;; in `"..."` per Maestro storage convention; sweep entries separated by
+  ;; single spaces. Scalar "tt" -> '"tt"'. Sweep ("tt" "ss") -> '"tt" "ss"'.
+  (cond
+    ((null raw) nil)
+    ((stringp raw) (strcat "\"" raw "\""))
+    ((listp raw)
+      (_pvtCornersJoinWithSpace
+        (mapcar (lambda (tok) (strcat "\"" tok "\"")) raw)))
+    (t nil)
+  )
+)
+
+
 (procedure (_pvtCornersUnionBasename path)
   "Filename basename sans `.union.json`. Returns nil if `path` does not end
    in the required suffix — caller emits the spec §3.1 error."
@@ -476,5 +525,174 @@
                   nil))))
 
     (return (_pvtCornersWriteOutput unionObj outPath))
+  )
+)
+
+
+;; ============================================================================
+;; pvtCornersPush — write a parsed union JSON into the live ADE-XL setup
+;;
+;; Walks rows; per row, calls axlPutCorner then drives the vars + models axes
+;; via axlPutVar + axlPutModel + axlSetModel{Section,Block,Test}. Returns
+;; (pvtOk t_unionName) on success or a pvtErr (pvt_io / pvt_validation).
+;;
+;; NOT idempotent on session state: even pushing identical content can mark
+;; Maestro's setup dirty. Callers should use a sandbox session per spec
+;; §6 Gate U1 guidance.
+;; ============================================================================
+
+(procedure (_pvtCornersExtractJsonField tab key)
+  ;; Pull a key from a parsed JSON object table. Returns the value, or
+  ;; PVT_JSON_ABSENT when key is absent. Wrapper around arrayref that
+  ;; doesn't depend on private pvtJson internals.
+  (let ((v (arrayref tab key)))
+    (cond
+      ((equal v PVT_JSON_ABSENT) PVT_JSON_ABSENT)
+      (t v))
+  )
+)
+
+
+(procedure (_pvtCornersPushRow sdb rowObj)
+  ;; Push one parsed JSON row table into the SDB. Returns (pvtOk t) on
+  ;; success or pvtErr on failure.
+  (prog (rowName varsObj modelsList ch varKeys mh
+         mFile mBlock mTest mSection)
+    (setq rowName (_pvtCornersExtractJsonField rowObj "row_name"))
+    (cond
+      ((or (null rowName) (not (stringp rowName)))
+        (return (pvtErr 'pvt_validation
+                  "row missing 'row_name' string" nil))))
+
+    (setq ch (errset (axlPutCorner sdb rowName) nil))
+    (cond
+      ((or (null ch) (null (car ch)))
+        (return (pvtErr 'pvt_io
+                  (strcat "axlPutCorner failed for " rowName) nil))))
+    (setq ch (car ch))
+
+    ;; --- vars axis ---------------------------------------------------------
+    (setq varsObj (_pvtCornersExtractJsonField rowObj "vars"))
+    (cond
+      ((or (equal varsObj PVT_JSON_ABSENT)
+           (equal varsObj PVT_JSON_EMPTY_OBJECT)) nil)
+      ((tablep varsObj)
+        (setq varKeys (arrayref varsObj _PVT_JSON_KEYS_PROP))
+        (foreach vname varKeys
+          (let ((raw (arrayref varsObj vname)))
+            (let ((s (_pvtCornersFormatVarValueFromJson raw)))
+              (cond
+                (s (errset (axlPutVar ch vname s) nil))))))))
+
+    ;; --- models axis -------------------------------------------------------
+    (setq modelsList (_pvtCornersExtractJsonField rowObj "models"))
+    (cond
+      ((or (equal modelsList PVT_JSON_ABSENT)
+           (equal modelsList PVT_JSON_EMPTY_ARRAY)) nil)
+      ((listp modelsList)
+        (foreach mEntry modelsList
+          (cond
+            ((tablep mEntry)
+              (setq mFile    (_pvtCornersExtractJsonField mEntry "file"))
+              (setq mBlock   (_pvtCornersExtractJsonField mEntry "block"))
+              (setq mTest    (_pvtCornersExtractJsonField mEntry "test"))
+              (setq mSection (_pvtCornersExtractJsonField mEntry "section"))
+              (cond
+                ((and (stringp mFile)
+                      (not (equal mFile PVT_JSON_ABSENT)))
+                  (setq mh (errset (axlPutModel ch mFile) nil))
+                  (cond
+                    ((and mh (car mh) (not (equal (car mh) 0)))
+                      (setq mh (car mh))
+                      (cond
+                        ((and (stringp mBlock)
+                              (not (equal mBlock PVT_JSON_ABSENT)))
+                          (errset (axlSetModelBlock mh mBlock) nil)))
+                      (cond
+                        ((and (stringp mTest)
+                              (not (equal mTest PVT_JSON_ABSENT)))
+                          (errset (axlSetModelTest mh mTest) nil)))
+                      (let ((sec
+                              (_pvtCornersFormatSectionValueFromJson mSection)))
+                        (cond
+                          (sec
+                            (errset (axlSetModelSection mh sec) nil)))))))))))))
+
+    (return (pvtOk t))
+  )
+)
+
+
+(procedure (pvtCornersPush @key (sess nil) (unionJsonPath nil) (dryRun nil))
+  ;; Push a `.union.json` sidecar into the live ADE-XL setup.
+  ;;   - `sess`           : Maestro session id (string). nil => infer.
+  ;;   - `unionJsonPath`  : path to the sidecar to load and push.
+  ;;   - `dryRun`         : t means parse + validate but do not call axl*
+  ;;                        write APIs. v1 only enforces parse-stage error
+  ;;                        surfacing; write-stage validation lives in axl*.
+  ;; Returns (pvtOk t_unionName) on success or pvtErr.
+  (prog (sessResult resolvedSess sdb parsed rowsArr rowResult rowFailed
+         unionName)
+    (cond
+      ((null unionJsonPath)
+        (return (pvtErr 'pvt_validation
+                  "pvtCornersPush: ?unionJsonPath is required" nil))))
+
+    (setq parsed (pvtJsonParseFile unionJsonPath))
+    (cond
+      ((pvtIsErr parsed) (return parsed)))
+    (setq parsed (pvtUnwrap parsed))
+
+    (cond
+      ((not (tablep parsed))
+        (return (pvtErr 'pvt_validation
+                  (strcat unionJsonPath ": top-level must be a JSON object")
+                  unionJsonPath))))
+
+    (setq unionName (arrayref parsed "name"))
+    (cond
+      ((or (null unionName) (equal unionName PVT_JSON_ABSENT))
+        (return (pvtErr 'pvt_validation
+                  (strcat unionJsonPath ": missing 'name' field")
+                  unionJsonPath))))
+
+    (setq rowsArr (arrayref parsed "rows"))
+    (cond
+      ((or (null rowsArr) (equal rowsArr PVT_JSON_ABSENT))
+        (return (pvtErr 'pvt_validation
+                  (strcat unionJsonPath ": missing 'rows' array")
+                  unionJsonPath)))
+      ((not (listp rowsArr))
+        (return (pvtErr 'pvt_validation
+                  (strcat unionJsonPath ": 'rows' must be a JSON array")
+                  unionJsonPath))))
+
+    (cond
+      (dryRun (return (pvtOk unionName))))
+
+    (setq sessResult (_pvtCornersResolveSession sess))
+    (cond
+      ((pvtIsErr sessResult) (return sessResult)))
+    (setq resolvedSess (pvtUnwrap sessResult))
+
+    (setq sdb (car (errset (axlGetMainSetupDB resolvedSess) nil)))
+    (cond
+      ((null sdb)
+        (return (pvtErr 'pvt_validation
+                  "axlGetMainSetupDB returned nil for the resolved session"
+                  nil))))
+
+    (setq rowFailed nil)
+    (foreach rowObj rowsArr
+      (cond
+        ((null rowFailed)
+          (setq rowResult (_pvtCornersPushRow sdb rowObj))
+          (cond
+            ((pvtIsErr rowResult) (setq rowFailed rowResult))))))
+
+    (cond
+      (rowFailed (return rowFailed)))
+
+    (return (pvtOk unionName))
   )
 )
