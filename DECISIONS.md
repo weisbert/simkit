@@ -410,3 +410,24 @@ The CAST-and-normalise pattern threads both needles: SQL-side avoids the pytz pa
 - Ship `pytz` as a vendored module in the offline bundle. Rejected: adds a transitive dependency surface for one decoding behaviour we control entirely on the read side.
 - Change the column type to `VARCHAR` and drop TIMESTAMPTZ. Rejected: would forfeit DuckDB's `EPOCH(...)` and time arithmetic for any future query layer; the CAST cost is constant per row and only paid in §5 listing/reconstruction paths.
 
+---
+
+## #27 — Netlist Spectre detection: file presence is the probe
+_Date: 2026-05-12_
+
+**Decision:** `_pvtCollCopyNetlist` no longer probes the simulator type via `asiGetAnalogSimulator` (or any other API). It resolves `axlGetPointNetlistDir(histID, testName)` and then tests `(isFile "<dir>/input.scs")`. If the file exists, the simulator was Spectre and we copy it. If not, the run was non-Spectre (or the netlist wasn't emitted yet), and we soft-miss with a clear warning listing the path that was checked.
+
+**Why:** The pre-fix probe `(asiGetAnalogSimulator sess)` was the right API for ADE-L but wrong for Maestro / ADE-XL: `asi*` is a generic that dispatches on a *tool handle*, and a Maestro session is not a tool. The call hit the no-dispatch path and returned nil on every spectre run, tripping the "simulator nil is not Spectre" warning. A 2026-05-12 skillbridge probing run against `fnxSession0` exhaustively searched the `axl* / asi* / fnx* / mmi* / ade*` namespaces for a Maestro-aware simulator getter and found none — the only test-handle-aware accessors that exist (`axlGetEnabledTests`, `axlGetVars`, `axlGetVar`) don't carry simulator info either.
+
+Rather than wrestle with an absent API, the fix flips the gate: `input.scs` is **the** Spectre netlist filename in the per-point netlist dir; HSPICE writes `input.cir`, Verilog-A simulators emit `.va`, etc. The pre-existing `(isFile srcPath)` check at step 4 was already doing the actual work — the broken simulator probe at step 2 was just a redundant pre-filter. Deleting it collapses the simulator detection and the file presence test into one step, with a more informative warning.
+
+**Implications:**
+- Tier-2 verified on the live `simkit_verify` session 2026-05-12: PvtSave now emits `run.netlist_path="input.scs"` (was null on the 2026-05-10 reference fixture) and copies the 2938-byte `input.scs` into the run dir. `pvt validate` exits 0 (W2 warning gone); `pvt ingest` populates `runs.netlist_path` non-null. 42-row count + first-row value (`Rtime_clkout=2.13452e-11`) match the 2026-05-10 reference, so no other behaviour shifted.
+- The validator's `W2` warning ("netlist_path is null — collector soft-miss") and the schema-vs-impl gap noted in DECISIONS #18 are now reachable only when the simulator is genuinely non-Spectre (HSPICE etc.) or when the netlist dir is missing — the bug-free outcome instead of a false alarm.
+- The signature of `_pvtCollCopyNetlist` is unchanged; callers don't need to update. The `sess` parameter is now unused but kept on the prototype to preserve the call-site (no semantic change).
+- No new Tier-1 coverage: the function only calls live axl/ipc APIs that aren't unit-testable without skillbridge; Tier-2 byte-equal regression on `simkit_verify` is the durable witness.
+
+**Alternatives considered:**
+- Keep the explicit probe but find the correct Maestro API. Rejected after the namespace probe came up empty; the cost (further probing across Cadence release-specific APIs) outweighs the marginal benefit of having a second confirmation alongside file presence.
+- Parameterise by simulator (look for `input.scs`, fall back to `input.cir`, etc.). Rejected for v1 — non-Spectre simulators are out of scope per `docs/schema.md` §2.1 (`netlist_path` doc strings refer specifically to Spectre's `input.scs`). When a non-Spectre use case arrives we can extend the file list and bump `schema_version`.
+

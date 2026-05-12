@@ -58,7 +58,7 @@ Durable source of truth for tasks. Claude's in-session `TaskCreate` may be used 
   - (c) — documentation-only; remains pending (Tier-2 scenarios doc not yet written).
   - (b) — still deferred.
   - **Bug B follow-up (partially closed 2026-05-12)**: pidList build extracted to `_pvtCollBuildPidListFromTests`, with 9 new Tier-1 tests covering empty / single / contiguous / **gappy** / unsorted / duplicate / nil-pid / all-nil / large scrambled cases. SKILL Tier-1 215 → 224. Live-walker integration test still deferred — see DECISIONS #23 update; skillbridge `putd` cannot override `maeReadResDB` (write-protected) and classic SKILL has no `flet`.
-- [ ] Copy simulated netlist to run dir — soft-miss path works (`netlist_path: null` when collector can't determine simulator); needs follow-up: detect Spectre via `axlGetMainSetupDB`-driven simulator probe rather than current heuristic, which warned `simulator nil is not Spectre` on a real spectre run.
+- [x] Copy simulated netlist to run dir — fixed 2026-05-12 (DECISIONS #27). Simulator probe was the wrong API for Maestro; replaced with the path-presence check that was already gating the copy (only Spectre writes `input.scs`). Tier-2 verified on `simkit_verify`: `netlist_path="input.scs"`, 2938-byte file copied, `pvt validate` clean.
 - [ ] Optional screenshot (waveform, results table) via `awvSaveAsImage` / `hiScreenShot` — explicitly deferred to v1.1; current behaviour is one-shot warn + return nil (Decision in S3_DESIGN §3.5).
 - [x] Write JSON dump using the spec from task 1 — round-trip verified via `python3 -m json.tool` and via the SKILL parser; `testbench_alias` resolution working.
 

@@ -996,24 +996,27 @@
 ;;
 ;; Best-effort. Returns "input.scs" on success, nil on any soft miss, with
 ;; one warn() per miss. NEVER returns pvtErr.
+;;
+;; Simulator detection (2026-05-12 update): the original implementation
+;; called `asiGetAnalogSimulator sess` to gate "is this Spectre?" before
+;; the netlist copy. In a Maestro / ADE-XL context that's the wrong API
+;; — `asiGet*` is a generic that wants a tool handle, not a Maestro
+;; session — and the call falls into the generic-dispatch error path,
+;; returning nil and tripping the "simulator nil is not Spectre" warning
+;; on every spectre run. Replaced with a *path-based* probe: only Spectre
+;; emits `input.scs` into the per-point netlist dir (HSPICE writes
+;; `input.cir`, etc.), so testing `(isFile srcPath)` is itself the
+;; authoritative gate. The probe and the warning collapse into one step.
 ;; ============================================================================
 
 (procedure (_pvtCollCopyNetlist sess histID firstTestName absRunDir)
-  (prog (sim netlistDir srcPath dstPath cmd cid status)
+  (prog (netlistDir srcPath dstPath cmd cid status)
     ;; --- 1. empty result-set guard
     (cond
       ((or (null firstTestName) (not (stringp firstTestName)))
         (warn "PvtSave: empty result set — skipping netlist copy\n")
         (return nil)))
-    ;; --- 2. simulator must be Spectre (case-tolerant; S3_DESIGN open Q-2)
-    (setq sim (errset (asiGetAnalogSimulator sess) nil))
-    (setq sim (cond ((listp sim) (car sim)) (t nil)))
-    (cond
-      ((not (member sim '("spectre" "Spectre")))
-        (warn "PvtSave: simulator %L is not Spectre — skipping netlist copy\n"
-              sim)
-        (return nil)))
-    ;; --- 3. resolve top-level netlist dir
+    ;; --- 2. resolve top-level netlist dir
     (setq netlistDir
           (errset (axlGetPointNetlistDir histID firstTestName) nil))
     (setq netlistDir
@@ -1023,15 +1026,20 @@
         (warn "PvtSave: axlGetPointNetlistDir returned nil for test %L — skipping netlist copy\n"
               firstTestName)
         (return nil)))
+    ;; --- 3. file presence is the simulator probe — only Spectre emits
+    ;;        input.scs. If the file isn't there, the simulator is
+    ;;        non-Spectre or the netlist hasn't been written yet; either
+    ;;        way the right move is a clean soft-miss with the path so
+    ;;        the user can see what was looked for.
     (setq srcPath (strcat netlistDir "/input.scs"))
     (cond
       ((not (isFile srcPath))
-        (warn "PvtSave: source netlist %L not found — skipping netlist copy\n"
+        (warn "PvtSave: no Spectre netlist at %L — skipping netlist copy (non-Spectre simulator or netlist not yet emitted)\n"
               srcPath)
         (return nil)))
     ;; --- 4. shell out to cp. The `--` guard prevents any leading-dash
-    ;; surprise; %L produces "/path/with quotes" so paths containing odd
-    ;; chars survive the shell round-trip.
+    ;;        surprise; %L produces "/path/with quotes" so paths containing
+    ;;        odd chars survive the shell round-trip.
     (setq dstPath (strcat absRunDir "/input.scs"))
     (setq cmd (sprintf nil "cp -- %L %L" srcPath dstPath))
     (setq cid (errset (ipcBeginProcess cmd) nil))
