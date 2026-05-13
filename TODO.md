@@ -52,17 +52,17 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 
 ### §5. `pvt corners` CLI
 
-- [ ] `pvt corners build <union>.union.json [--out <path>]` — validate + emit Maestro corners-CSV.
-- [ ] `pvt corners explode <union>.union.json [--json]` — print sub-corner table.
-- [ ] `pvt corners list [--project P]` — enumerate unions in `<unionsDir>/`.
-- [ ] `pvt corners diff <a> <b>` — row-by-row axis-by-axis comparison.
-- [ ] `pvt corners push <union>.union.json` — delegate to skillbridge.
-- [ ] `pvt corners pull <output>.union.json` — delegate to skillbridge.
-- [ ] **Verification gate (per PM-mode rule):** pytest covers each subcommand against the example file; manual smoke on `pvt corners explode config/pvt_union_example.union.json` matches spec §9.
+- [ ] `pvt corners build <union>.union.json [--out <path>]` — validate + emit Maestro corners-CSV. **Blocked on Open Decision 8.3** (CSV format); awaits real Maestro corners-CSV export sample.
+- [x] `pvt corners explode <union>.union.json [--json]` — print sub-corner table.
+- [x] `pvt corners list [--project P]` — enumerate unions in `<unionsDir>/`.
+- [x] `pvt corners diff <a> <b>` — row-by-row axis-by-axis comparison.
+- [x] `pvt corners push <union>.union.json [--project P] [--session S] [--dry-run]` — skillbridge → `pvtCornersPush`.
+- [x] `pvt corners pull <output>.union.json [--project P] [--session S] [--union-name N]` — skillbridge → `pvtCornersPull`.
+- [x] **Verification gate (per PM-mode rule):** pytest covers each subcommand (24 in `test_corners_cli.py`; 18 in `test_skill_bridge.py` for the wrapper layer). Live runtime-verified 2026-05-13 against `fnxSession0`: pull → push → pull → diff is 3/3 identical, dry-run does not perturb live state (`/tmp/cli_live_verify.sh`).
 
 ### §6. End-to-end acceptance gates
 
-- [x] **Gate U1** — Round-trip fidelity on `fnxSession0` (live Maestro). Manually verified 2026-05-12 via `/tmp/probe_push.py`: pull → push → pull on 3 corners (TT scalar, TT_pvt with vars+models sweeps, TT_2p5G) is semantically byte-identical. **Pin as offline pytest** once a captured pre/post fixture pair is committed to `tests/fixtures/unions/` (TODO).
+- [x] **Gate U1** — Round-trip fidelity on `fnxSession0` (live Maestro). Manually verified 2026-05-12 via `/tmp/probe_push.py` and offline-pinned 2026-05-13 (commit `8ae37bf`) via captured baseline → edited → post_edit_pull triple in `tests/fixtures/unions/u1_*` + 6-case `TestGateU1RoundTrip`. The edit-persists-and-pulls-back invariant: TT.temperature 55→85 push survives and re-pulls byte-identical; non-TT rows unaffected; baseline pushed back restores `fnxSession0` to its original 3-row state.
 - [x] **Gate U2** — VCO LO acceptance. 2026-05-13: user didn't have VCO LO loaded; I synthesised the 21-row × 3-pt shape from the PHASE_PLAN.md / DECISIONS #29 description and pushed it into the live `fnxSession0`. Session went 3 → 24 rows; all 21 pushed rows pull back byte-identical (vars + models). Offline pinned at `tests/fixtures/unions/vco_lo_21x3.union.json` with 5 pytest cases in `TestGateU2VCOLoAcceptance` (load, row-count, ind-temp × process matrix, temperature-sweep shape, explode → 63 sub-corners, section-per-process). Open Decision 8.6: per-row sweep is only 1 axis × 3 values, so this case doesn't stress alphabetic-key explode order — that's still pending a multi-axis-per-row real case.
 - [x] **Gate U3** — Explode arithmetic on a synthetic 2 × 3 × 5 = 30 union (`tests/test_acceptance_phase2.py::TestGateU3ExplodeArithmetic`, 6 tests).
 - [ ] **Gate U4** — Sidecar → CSV → Sidecar bit-identical (modulo §4.2). Blocked on `pvt corners build` CLI subcommand (Open Decision 8.3 — CSV format).
