@@ -1,0 +1,60 @@
+{
+  "union_schema_version": 1,
+  "name": "u1_post_edit_pull",
+  "project": "u1_capture",
+  "testbench_id": "sim_yusheng/Test/maestro",
+  "rows": [
+    {
+      "row_name": "TT",
+      "vars": {
+        "temperature": "85"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "tt"
+        }
+      ]
+    },
+    {
+      "row_name": "TT_pvt",
+      "vars": {
+        "temperature": "55",
+        "VDD": [
+          "3",
+          "2.8"
+        ]
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": [
+            "tt",
+            "ss",
+            "ff"
+          ]
+        }
+      ]
+    },
+    {
+      "row_name": "TT_2p5G",
+      "vars": {
+        "temperature": "55",
+        "VDD": "3",
+        "flo": "1M"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "tt"
+        }
+      ]
+    }
+  ]
+}

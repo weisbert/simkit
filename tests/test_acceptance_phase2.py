@@ -2,14 +2,11 @@
 
 Gates per `docs/phase2_pvt_union_spec.md` §6:
 
-* **U1 — Round-trip fidelity on simkit_verify**. Requires live Maestro.
-  Manually verified 2026-05-12 via `/tmp/probe_push.py` against
-  `fnxSession0` (3 corners; vars + models sweeps); committed in
-  `263adb0`. Pin as an offline regression once a captured pre/post
-  fixture pair is checked in.
-* **U2 — VCO LO acceptance**. Deferred until VCO LO setup is loaded
-  in Maestro. Open Decision 8.6 — explode-order rule needs scale
-  confirmation on the 21-column case.
+* **U1 — Round-trip fidelity on fnxSession0**. Offline-pinned via
+  captured pre/post fixture triple in tests/fixtures/unions/u1_*. Live
+  capture script: /tmp/u1_capture_edit.py (2026-05-13).
+* **U2 — VCO LO acceptance** (21-row synthesised + pushed to fnxSession0
+  2026-05-13; offline-pinned).
 * **U3 — Explode arithmetic** (THIS FILE). 2 × 3 × 5 = 30 sub-corners,
   documented sub-corner names + ordering.
 * **U4 — Sidecar -> CSV -> Sidecar bit-identical**. Blocked on
@@ -18,6 +15,7 @@ Gates per `docs/phase2_pvt_union_spec.md` §6:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -167,3 +165,74 @@ class TestGateU2VCOLoAcceptance:
             else:
                 expected_section = proc.lower()
             assert row.models[0].section == (expected_section,)
+
+
+# ----------------------------------------------------------------------------
+# Gate U1 — Round-trip fidelity (offline-pinned).
+#
+# Live capture on 2026-05-13 against fnxSession0 (skillbridge invocation in
+# /tmp/u1_capture_edit.py):
+#
+#   1. pull baseline       -> u1_baseline.union.json (3 rows, TT.temp="55")
+#   2. edit (Python)       -> u1_edited.union.json   (TT.temp flipped to "85")
+#   3. push edited; pull   -> u1_post_edit_pull.union.json
+#   4. push baseline back  -> fnxSession0 restored
+#
+# The edit-persists invariant: u1_edited and u1_post_edit_pull must be
+# byte-identical modulo the top-level "name" field (pvtCornersPull derives
+# `name` from the outPath basename, so two pulls written to different paths
+# carry different names by construction). All other fields — rows, vars,
+# models, sweeps — must match exactly.
+# ----------------------------------------------------------------------------
+
+_U1_BASELINE = _REPO_ROOT / "tests" / "fixtures" / "unions" / "u1_baseline.union.json"
+_U1_EDITED = _REPO_ROOT / "tests" / "fixtures" / "unions" / "u1_edited.union.json"
+_U1_POST = _REPO_ROOT / "tests" / "fixtures" / "unions" / "u1_post_edit_pull.union.json"
+
+
+def _drop_top_name(d: dict) -> dict:
+    return {k: v for k, v in d.items() if k != "name"}
+
+
+class TestGateU1RoundTrip:
+
+    def test_baseline_loads_three_rows(self):
+        u = load_union(_U1_BASELINE)
+        assert len(u.rows) == 3
+        assert {r.row_name for r in u.rows} == {"TT", "TT_pvt", "TT_2p5G"}
+
+    def test_baseline_TT_temperature_is_original(self):
+        u = load_union(_U1_BASELINE)
+        tt = next(r for r in u.rows if r.row_name == "TT")
+        # Loader normalises scalar var values to 1-tuples.
+        assert tt.vars["temperature"] == ("55",)
+
+    def test_edited_diverges_from_baseline(self):
+        baseline = load_union(_U1_BASELINE)
+        edited = load_union(_U1_EDITED)
+        b_tt = next(r for r in baseline.rows if r.row_name == "TT")
+        e_tt = next(r for r in edited.rows if r.row_name == "TT")
+        assert b_tt.vars["temperature"] == ("55",)
+        assert e_tt.vars["temperature"] == ("85",)
+
+    def test_edit_persists_through_push_pull(self):
+        """The core U1 invariant: edited.union pushed and re-pulled comes
+        back identical modulo the top-level `name` field."""
+        edited = json.loads(_U1_EDITED.read_text())
+        post = json.loads(_U1_POST.read_text())
+        assert _drop_top_name(edited) == _drop_top_name(post)
+
+    def test_post_pull_TT_temperature_is_edited_value(self):
+        """Sanity probe — independent of the JSON-equality check above."""
+        u = load_union(_U1_POST)
+        tt = next(r for r in u.rows if r.row_name == "TT")
+        assert tt.vars["temperature"] == ("85",)
+
+    def test_non_TT_rows_unaffected_by_edit(self):
+        """Edit only touched TT — TT_pvt and TT_2p5G must be untouched
+        across baseline / edited / post_pull."""
+        baseline = json.loads(_U1_BASELINE.read_text())
+        post = json.loads(_U1_POST.read_text())
+        b_other = [r for r in baseline["rows"] if r["row_name"] != "TT"]
+        p_other = [r for r in post["rows"] if r["row_name"] != "TT"]
+        assert b_other == p_other
