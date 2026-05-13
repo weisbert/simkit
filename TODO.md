@@ -58,6 +58,7 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 - [x] `pvt corners diff <a> <b>` — row-by-row axis-by-axis comparison.
 - [x] `pvt corners push <union>.union.json [--project P] [--session S] [--dry-run]` — skillbridge → `pvtCornersPush`.
 - [x] `pvt corners pull <output>.union.json [--project P] [--session S] [--union-name N]` — skillbridge → `pvtCornersPull`. Pull now also captures per-row `enabled` and per-model `_file_abs` (2026-05-13 extension).
+- [x] `pvt corners restore <csv> [--testbench-id ID] [--session S] [--dry-run]` — parse CSV → Union → push via skillbridge. Convenience companion to `build`; **the truly skillbridge-independent recovery path is still Maestro GUI `Tools → Corners → Import`**.
 - [x] **Verification gate (per PM-mode rule):** pytest covers each subcommand (29 in `test_corners_cli.py`; 18 in `test_skill_bridge.py` for the wrapper layer; 18 in `test_corners_csv.py` for the emitter). Live runtime-verified 2026-05-13 against `fnxSession0`: pull → push → pull → diff is 3/3 identical, dry-run does not perturb live state, `build` produces a CSV byte-identical to GUI export.
 
 ### §6. End-to-end acceptance gates
