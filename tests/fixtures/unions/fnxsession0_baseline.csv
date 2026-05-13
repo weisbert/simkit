@@ -1,0 +1,7 @@
+Corner,TT,TT_pvt,TT_2p5G
+Enable,f,t,t
+Temperature,55,55,55
+VDD,,3 2.8,3
+flo,,,1M
+Modelfile::/home/yusheng/IC/Cadence_Process_Library/TSMC18RF_PDK_v13d_OA/tsmc18rf/../models/spectre/rf018.scs,t tt,t tt ss ff,t tt
+t Test::Test,t,t,t

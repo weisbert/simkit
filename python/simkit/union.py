@@ -51,6 +51,12 @@ class ModelEntry:
     block: str
     test: str
     section: tuple[str, ...]
+    # Absolute model-file path (informational; `_`-prefixed in JSON per spec
+    # §4.2 so it does not participate in round-trip). Populated by
+    # SKILL pull from axlGetModelFile; required by `pvt corners build`
+    # to emit Maestro-importable CSV. `None` for sidecars that predate
+    # the 2026-05-13 pull extension.
+    file_abs: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +66,11 @@ class UnionRow:
     models: tuple[ModelEntry, ...]
     sweep_var_keys: frozenset[str] = field(default_factory=frozenset)
     sweep_model_indices: frozenset[int] = field(default_factory=frozenset)
+    # Per-corner enable flag mirroring Maestro's GUI "Enable" column.
+    # Default True for backward compatibility with sidecars that predate
+    # the 2026-05-13 pull extension. Captured via axlGetEnabled on pull;
+    # emitted by `pvt corners build` to the CSV `Enable,...` row.
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -216,6 +227,12 @@ def _validate_row(path: Path, idx: int, raw: object) -> UnionRow:
             f"{where}: at least one of 'vars' or 'models' must be non-empty"
         )
 
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise UnionValidationError(
+            f"{where}: 'enabled' must be a JSON boolean (got {type(enabled).__name__})"
+        )
+
     vars_out: dict[str, tuple[str, ...]] = {}
     sweep_var_keys: set[str] = set()
     for vname, vval in raw_vars.items():
@@ -247,6 +264,7 @@ def _validate_row(path: Path, idx: int, raw: object) -> UnionRow:
         models=tuple(models_out),
         sweep_var_keys=frozenset(sweep_var_keys),
         sweep_model_indices=frozenset(sweep_model_indices),
+        enabled=enabled,
     )
 
 
@@ -276,8 +294,17 @@ def _validate_model_entry(
         raw["section"], f"{where}: 'section'"
     )
 
+    file_abs = raw.get("_file_abs")
+    if file_abs is not None and (not isinstance(file_abs, str) or file_abs == ""):
+        raise UnionValidationError(
+            f"{where}: '_file_abs' must be a non-empty string if present"
+        )
+
     return (
-        ModelEntry(file=file_, block=block, test=test, section=section_tup),
+        ModelEntry(
+            file=file_, block=block, test=test, section=section_tup,
+            file_abs=file_abs,
+        ),
         is_sweep,
     )
 

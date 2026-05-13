@@ -236,3 +236,84 @@ class TestGateU1RoundTrip:
         b_other = [r for r in baseline["rows"] if r["row_name"] != "TT"]
         p_other = [r for r in post["rows"] if r["row_name"] != "TT"]
         assert b_other == p_other
+
+
+# ----------------------------------------------------------------------------
+# Gate U4 — Sidecar → CSV bit-identical against Maestro GUI export.
+#
+# Ground truth: tests/fixtures/unions/fnxsession0_baseline.csv — captured
+# 2026-05-13 via Tools → Corners → Export on the live fnxSession0 (3 rows:
+# TT/TT_pvt/TT_2p5G). The matching `.union.json` fixture was produced by a
+# fresh pull through the 2026-05-13-extended SKILL collector that captures
+# the per-corner `enabled` flag (via axlGetEnabled) and per-model
+# `_file_abs` absolute path (via axlGetModelFile).
+#
+# The invariant: `build_csv(load_union(fnx_fixture)).text` equals the
+# ground truth byte-for-byte. This is the round-trip property the user
+# relies on as a Cadence-crash backup — the emitted CSV must be
+# re-importable via the same Maestro GUI Import dialog that produced
+# the exported sample.
+# ----------------------------------------------------------------------------
+
+from simkit.corners_csv import build_csv  # noqa: E402
+
+_U4_FNX_UNION = (
+    _REPO_ROOT / "tests" / "fixtures" / "unions" / "fnxsession0_baseline.union.json"
+)
+_U4_FNX_CSV = (
+    _REPO_ROOT / "tests" / "fixtures" / "unions" / "fnxsession0_baseline.csv"
+)
+
+
+class TestGateU4SidecarToCSV:
+
+    def test_fnx_fixture_loads(self):
+        u = load_union(_U4_FNX_UNION)
+        assert len(u.rows) == 3
+        assert {r.row_name for r in u.rows} == {"TT", "TT_pvt", "TT_2p5G"}
+
+    def test_fnx_fixture_preserves_disabled_TT(self):
+        """The live-captured baseline had TT disabled in the GUI — pull's
+        enabled-flag extraction must preserve that."""
+        u = load_union(_U4_FNX_UNION)
+        for r in u.rows:
+            if r.row_name == "TT":
+                assert r.enabled is False
+            else:
+                assert r.enabled is True
+
+    def test_fnx_fixture_carries_file_abs(self):
+        """Every model must have its absolute path captured — without it
+        the emitted CSV would not be Maestro-importable."""
+        u = load_union(_U4_FNX_UNION)
+        for r in u.rows:
+            for m in r.models:
+                assert m.file_abs is not None
+                assert m.file_abs.startswith("/")
+
+    def test_build_csv_byte_identical_to_ground_truth(self):
+        """Gate U4 primary invariant — emitted CSV equals GUI export."""
+        u = load_union(_U4_FNX_UNION)
+        result = build_csv(u)
+        assert result.warnings == ()
+        ground = _U4_FNX_CSV.read_text(encoding="utf-8")
+        assert result.text == ground, (
+            "emitted CSV diverged from ground-truth — diff:\n"
+            + _unified_diff(result.text, ground)
+        )
+
+    def test_emitted_layout_has_seven_lines(self):
+        """1 header + 1 enable + 3 vars (Temperature/VDD/flo) + 1 model + 1 test."""
+        u = load_union(_U4_FNX_UNION)
+        text = build_csv(u).text
+        non_empty = [l for l in text.splitlines() if l.strip()]
+        assert len(non_empty) == 7
+
+
+def _unified_diff(a: str, b: str) -> str:
+    import difflib
+    return "".join(difflib.unified_diff(
+        a.splitlines(keepends=True),
+        b.splitlines(keepends=True),
+        fromfile="emitted", tofile="ground", n=3,
+    ))

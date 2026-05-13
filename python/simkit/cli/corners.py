@@ -116,6 +116,25 @@ def add_subparser(sub) -> None:
     )
     p_pull.set_defaults(func=_run_pull)
 
+    p_build = cs.add_parser(
+        "build",
+        help="Emit a Maestro-importable corners CSV from a .union.json sidecar.",
+        description=(
+            "Pure Python — no live Maestro needed. Output CSV matches the "
+            "format Maestro produces via Tools → Corners → Export, so the "
+            "file can be re-imported via Tools → Corners → Import after a "
+            "Cadence crash without depending on skillbridge. Requires the "
+            "sidecar to carry `_file_abs` on each model (pulled by the "
+            "2026-05-13+ skill/pvtCorners.il)."
+        ),
+    )
+    p_build.add_argument("union_json_path", help="Path to a .union.json sidecar.")
+    p_build.add_argument(
+        "--out", default=None,
+        help="Output CSV path. Default: <stem>.csv next to the input sidecar.",
+    )
+    p_build.set_defaults(func=_run_build)
+
     p_push = cs.add_parser(
         "push",
         help="Push a .union.json sidecar into the live ADE-XL setup.",
@@ -426,3 +445,47 @@ def _run_push(args) -> int:
     marker = " (dry-run)" if args.dry_run else ""
     print(f"pushed{marker} -> {union_name}")
     return 0
+
+
+# --- build (offline CSV emission) ----------------------------------------
+
+
+def _run_build(args) -> int:
+    union_path = Path(args.union_json_path).expanduser()
+    if not union_path.is_file():
+        print(
+            f"pvt corners build: .union.json not found: {union_path}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        union = load_union(union_path)
+    except UnionError as exc:
+        print(f"pvt corners build: {exc}", file=sys.stderr)
+        return 2
+
+    from simkit.corners_csv import CsvBuildError, build_csv
+    try:
+        result = build_csv(union)
+    except CsvBuildError as exc:
+        print(f"pvt corners build: {exc}", file=sys.stderr)
+        return 4
+
+    if args.out is not None:
+        out_path = Path(args.out).expanduser()
+    else:
+        stem = union_path.name
+        if stem.endswith(".union.json"):
+            stem = stem[: -len(".union.json")]
+        else:
+            stem = union_path.stem
+        out_path = union_path.parent / f"{stem}.csv"
+
+    out_path.write_text(result.text, encoding="utf-8")
+
+    for w in result.warnings:
+        print(f"pvt corners build: warning [{w.code}] {w.message}", file=sys.stderr)
+
+    print(f"built -> {out_path}")
+    return 0 if not result.warnings else 0  # warnings don't fail the build

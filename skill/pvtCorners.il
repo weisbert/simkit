@@ -292,11 +292,14 @@
 
 (procedure (_pvtCornersReadModels cornerHandle)
   "Read all models on a corner. Returns a list of model alists; each entry is
-   ((file F) (block B) (test T) (section TOKENS)). `TOKENS` is a list of
-   unwrapped section names (length >= 1)."
+   ((file F) (_file_abs A) (block B) (test T) (section TOKENS)). `TOKENS` is a
+   list of unwrapped section names (length >= 1). `_file_abs` is the
+   absolute model file path (informational — `_`-prefixed per spec §4.2 so
+   it does not participate in round-trip; used by `pvt corners build` to
+   emit Maestro-importable CSV)."
   ;; Ref: axlGetModels p.215, axlGetModel p.203, axlGetModelFile p.205,
   ;;      axlGetModelSection p.211, axlGetModelBlock p.204, axlGetModelTest p.213.
-  (prog (raw files out mh file block test secRaw secTokens)
+  (prog (raw files out mh file fileAbs block test secRaw secTokens)
     (setq raw (errset (axlGetModels cornerHandle) nil))
     (cond
       ((null raw) (return nil)))
@@ -312,8 +315,9 @@
           ;; file: prefer the basename Maestro stored on the corner (already
           ;; what axlGetModels returned). axlGetModelFile returns the
           ;; absolute path which is environment-specific and not what we
-          ;; round-trip.
-          (setq file fname)
+          ;; round-trip; capture it separately as `_file_abs` for CSV build.
+          (setq file    fname)
+          (setq fileAbs (car (errset (axlGetModelFile (car mh)) nil)))
           (setq block (or (car (errset (axlGetModelBlock (car mh)) nil))
                           _PVT_CORNERS_DEFAULT_MODEL_BLOCK))
           (setq test  (or (car (errset (axlGetModelTest  (car mh)) nil))
@@ -323,10 +327,11 @@
           (cond
             (secTokens
               (setq out
-                (cons (list (list "file"    file)
-                            (list "block"   block)
-                            (list "test"    test)
-                            (list "section" secTokens))
+                (cons (list (list "file"      file)
+                            (list "_file_abs" (or fileAbs file))
+                            (list "block"     block)
+                            (list "test"      test)
+                            (list "section"   secTokens))
                       out)))))))
     (return (reverse out))
   )
@@ -359,7 +364,7 @@
    resolved or has no var/model content."
   ;; Ref: axlGetCorner adexlSKILLref.pdf p.315.
   (prog (ch varsAlist modelsList varsObj modelsArr rowObj
-         jsonVarsAlist jsonModelsList)
+         jsonVarsAlist jsonModelsList enabled)
     (setq ch (errset (axlGetCorner sdb cornerName) nil))
     (cond
       ((or (null ch) (null (car ch))) (return nil)))
@@ -386,9 +391,10 @@
     (setq jsonModelsList
       (mapcar (lambda (m)
                 (_pvtCornersAlistToObj
-                  (list (assoc "file"    m)
-                        (assoc "block"   m)
-                        (assoc "test"    m)
+                  (list (assoc "file"      m)
+                        (assoc "_file_abs" m)
+                        (assoc "block"     m)
+                        (assoc "test"      m)
                         (list  "section"
                                (_pvtCornersValueToJsonField
                                  (cadr (assoc "section" m)))))
@@ -396,12 +402,20 @@
               modelsList))
     (setq modelsArr (or jsonModelsList PVT_JSON_EMPTY_ARRAY))
 
+    ;; NEW (2026-05-13): capture per-corner enabled flag for CSV build path.
+    ;; axlGetEnabled returns t/nil; map to PVT_JSON_TRUE/PVT_JSON_FALSE so the
+    ;; emitter writes JSON booleans, not the SKILL `t`/nil that pvtJson would
+    ;; otherwise stringify as "true"/empty.
+    (setq enabled (car (errset (axlGetEnabled (car ch)) nil)))
+
     (setq rowObj (makeTable 'pvtUnionRow PVT_JSON_NULL))
     (setarray rowObj "row_name" cornerName)
+    (setarray rowObj "enabled"
+      (cond (enabled PVT_JSON_TRUE) (t PVT_JSON_FALSE)))
     (setarray rowObj "vars"     varsObj)
     (setarray rowObj "models"   modelsArr)
     (setarray rowObj _PVT_JSON_KEYS_PROP
-      (list "row_name" "vars" "models"))
+      (list "row_name" "enabled" "vars" "models"))
     (return rowObj)
   )
 )

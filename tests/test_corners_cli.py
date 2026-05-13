@@ -378,5 +378,90 @@ class PushCliTests(unittest.TestCase):
         self.assertEqual(push.call_args.kwargs["session"], "fnxSession0")
 
 
+# --- build CLI tests -----------------------------------------------------
+
+
+class BuildCliTests(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_cli_build_"))
+        doc = {
+            "union_schema_version": 1,
+            "name": "u",
+            "project": "p",
+            "testbench_id": "L/MyCell/schematic",
+            "rows": [
+                {
+                    "row_name": "TT",
+                    "enabled": True,
+                    "vars": {"temperature": "55"},
+                    "models": [{
+                        "file": "rf018.scs", "_file_abs": "/opt/pdk/rf018.scs",
+                        "section": "tt",
+                    }],
+                },
+            ],
+        }
+        self.union_file = self.tmp / "u.union.json"
+        self.union_file.write_text(json.dumps(doc), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_build_default_out_is_sibling_csv(self):
+        rc, out, err = _run("corners", "build", str(self.union_file))
+        self.assertEqual(rc, 0, f"err={err}")
+        expected_out = self.tmp / "u.csv"
+        self.assertTrue(expected_out.is_file())
+        text = expected_out.read_text(encoding="utf-8")
+        self.assertIn("Corner,TT", text)
+        self.assertIn("Modelfile::/opt/pdk/rf018.scs,t tt", text)
+        self.assertIn(f"built -> {expected_out}", out)
+
+    def test_build_explicit_out(self):
+        out_path = self.tmp / "anywhere.csv"
+        rc, out, err = _run(
+            "corners", "build", str(self.union_file), "--out", str(out_path),
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertTrue(out_path.is_file())
+
+    def test_build_missing_input_returns_2(self):
+        rc, out, err = _run("corners", "build", "/no/such.union.json")
+        self.assertEqual(rc, 2)
+        self.assertIn(".union.json not found", err)
+
+    def test_build_warns_on_missing_file_abs(self):
+        bad = self.tmp / "no_abs.union.json"
+        bad.write_text(json.dumps({
+            "union_schema_version": 1, "name": "no_abs", "project": "p",
+            "testbench_id": "L/C/schematic",
+            "rows": [{
+                "row_name": "TT", "vars": {"temperature": "55"},
+                "models": [{"file": "rf018.scs", "section": "tt"}],
+            }],
+        }), encoding="utf-8")
+        rc, out, err = _run("corners", "build", str(bad))
+        self.assertEqual(rc, 0)
+        self.assertIn("missing_file_abs", err)
+
+    def test_build_rejects_comma_in_value(self):
+        bad = self.tmp / "comma.union.json"
+        bad.write_text(json.dumps({
+            "union_schema_version": 1, "name": "comma", "project": "p",
+            "testbench_id": "L/C/schematic",
+            "rows": [{
+                "row_name": "TT", "vars": {"temperature": "0,1"},
+                "models": [{
+                    "file": "rf018.scs", "_file_abs": "/opt/pdk/rf018.scs",
+                    "section": "tt",
+                }],
+            }],
+        }), encoding="utf-8")
+        rc, out, err = _run("corners", "build", str(bad))
+        self.assertEqual(rc, 4)
+        self.assertIn("','", err)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

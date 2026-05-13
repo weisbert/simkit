@@ -538,5 +538,97 @@ class ExplodeLexSortGotchaTests(unittest.TestCase):
         )
 
 
+# ----------------------------------------------------------------------------
+# Schema extensions for Phase 2 CSV-build path (2026-05-13).
+# Pull now captures `enabled` per row and `_file_abs` per model. Old
+# sidecars must still load with sane defaults: enabled=True, file_abs=None.
+# ----------------------------------------------------------------------------
+
+
+def _doc_with_model(name: str = "for_extension") -> dict:
+    return {
+        "union_schema_version": 1,
+        "name": name,
+        "project": "my_ldo",
+        "testbench_id": "MY_LIB/ldo_top_tb/schematic",
+        "rows": [
+            {
+                "row_name": "TT",
+                "vars": {"temperature": "55"},
+                "models": [
+                    {"file": "rf018.scs", "section": "tt"},
+                ],
+            },
+            {
+                "row_name": "TT_alt",
+                "vars": {"temperature": "85"},
+                "models": [
+                    {"file": "rf018.scs", "section": "ss"},
+                ],
+            },
+        ],
+    }
+
+
+class EnabledFieldTests(TempDirMixin, unittest.TestCase):
+
+    def test_missing_enabled_defaults_to_true(self):
+        doc = _doc_with_model()
+        path = self.tmp / f"{doc['name']}.union.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        u = load_union(path)
+        for row in u.rows:
+            self.assertTrue(row.enabled, f"row {row.row_name!r} should default-enable")
+
+    def test_enabled_false_round_trips(self):
+        doc = _doc_with_model()
+        doc["rows"][0]["enabled"] = False
+        path = self.tmp / f"{doc['name']}.union.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        u = load_union(path)
+        self.assertFalse(u.rows[0].enabled)
+        self.assertTrue(u.rows[1].enabled)
+
+    def test_non_bool_enabled_rejected(self):
+        doc = _doc_with_model()
+        doc["rows"][0]["enabled"] = "yes"
+        path = self.tmp / f"{doc['name']}.union.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        with self.assertRaises(UnionValidationError) as ctx:
+            load_union(path)
+        self.assertIn("'enabled' must be a JSON boolean", str(ctx.exception))
+
+
+class FileAbsFieldTests(TempDirMixin, unittest.TestCase):
+
+    def test_missing_file_abs_defaults_to_none(self):
+        doc = _doc_with_model()
+        path = self.tmp / f"{doc['name']}.union.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        u = load_union(path)
+        for row in u.rows:
+            for m in row.models:
+                self.assertIsNone(m.file_abs)
+
+    def test_file_abs_loads(self):
+        doc = _doc_with_model()
+        for r in doc["rows"]:
+            r["models"][0]["_file_abs"] = "/opt/pdk/models/rf018.scs"
+        path = self.tmp / f"{doc['name']}.union.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        u = load_union(path)
+        for row in u.rows:
+            self.assertEqual(row.models[0].file_abs, "/opt/pdk/models/rf018.scs")
+
+    def test_empty_file_abs_rejected(self):
+        doc = _doc_with_model()
+        doc["rows"][0]["models"][0]["_file_abs"] = ""
+        path = self.tmp / f"{doc['name']}.union.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        with self.assertRaises(UnionValidationError) as ctx:
+            load_union(path)
+        self.assertIn("'_file_abs' must be a non-empty string", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
