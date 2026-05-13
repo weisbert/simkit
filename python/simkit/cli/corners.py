@@ -116,6 +116,37 @@ def add_subparser(sub) -> None:
     )
     p_pull.set_defaults(func=_run_pull)
 
+    p_restore = cs.add_parser(
+        "restore",
+        help="Parse a Maestro corners-CSV and push it to the live ADE-XL setup.",
+        description=(
+            "Inverse of `build`: parse the CSV (pure Python) into a Union, "
+            "resolve testbench_id from the live session, then push via the "
+            "skillbridge → pvtCornersPush path. This is a convenience that "
+            "DEPENDS on skillbridge being functional; the truly "
+            "skillbridge-independent recovery path is still Maestro's GUI "
+            "Tools → Corners → Import."
+        ),
+    )
+    p_restore.add_argument("csv_path", help="Path to a Maestro corners CSV.")
+    p_restore.add_argument(
+        "--project", default=None,
+        help="Path to a .pvtproject file. Default: PVT_PROJECT env or cwd walker.",
+    )
+    p_restore.add_argument(
+        "--session", default=None,
+        help="Maestro session id. Default: SKILL infers from the active window.",
+    )
+    p_restore.add_argument(
+        "--testbench-id", default=None,
+        help="Override testbench_id (lib/cell/view). Default: pull from live session.",
+    )
+    p_restore.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+        help="Parse + write the temporary .union.json, but skip the live push.",
+    )
+    p_restore.set_defaults(func=_run_restore)
+
     p_build = cs.add_parser(
         "build",
         help="Emit a Maestro-importable corners CSV from a .union.json sidecar.",
@@ -489,3 +520,134 @@ def _run_build(args) -> int:
 
     print(f"built -> {out_path}")
     return 0 if not result.warnings else 0  # warnings don't fail the build
+
+
+# --- restore (CSV → live push via skillbridge) ----------------------------
+
+
+def _run_restore(args) -> int:
+    import json
+    import tempfile
+
+    csv_path = Path(args.csv_path).expanduser()
+    if not csv_path.is_file():
+        print(
+            f"pvt corners restore: CSV not found: {csv_path}",
+            file=sys.stderr,
+        )
+        return 2
+
+    pvtproject_path = _resolve_project_for_live(args)
+    if pvtproject_path is None:
+        return 3
+
+    # Resolve testbench_id.
+    if args.testbench_id is not None:
+        testbench_id = args.testbench_id
+    else:
+        from simkit.skill_bridge import (
+            SkillBridgeError,
+            resolve_live_testbench_id,
+        )
+        try:
+            testbench_id = resolve_live_testbench_id(session=args.session)
+        except SkillBridgeError as exc:
+            print(f"pvt corners restore: {exc}", file=sys.stderr)
+            return 4
+
+    # Project name from .pvtproject.
+    try:
+        proj_data = json.loads(pvtproject_path.read_text(encoding="utf-8"))
+        project_name = proj_data.get("project", "restored")
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"pvt corners restore: cannot read project: {exc}", file=sys.stderr)
+        return 3
+
+    # Parse CSV.
+    from simkit.corners_csv import CsvBuildError, parse_csv
+    try:
+        text = csv_path.read_text(encoding="utf-8")
+        union = parse_csv(
+            text,
+            testbench_id=testbench_id,
+            union_name=_safe_union_name(csv_path.stem),
+            project=project_name,
+        )
+    except CsvBuildError as exc:
+        print(f"pvt corners restore: {exc}", file=sys.stderr)
+        return 4
+
+    # Serialize Union back to a .union.json so the existing SKILL push
+    # entry point can consume it.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pvt_restore_"))
+    try:
+        tmp_json = tmp_dir / f"{union.name}.union.json"
+        tmp_json.write_text(_union_to_json(union), encoding="utf-8")
+
+        if args.dry_run:
+            print(f"parsed {len(union.rows)} rows from {csv_path}")
+            print(f"would push -> {testbench_id}")
+            print(f"intermediate union: {tmp_json}")
+            return 0
+
+        from simkit.skill_bridge import SkillBridgeError, pvt_corners_push
+        try:
+            name = pvt_corners_push(
+                str(tmp_json.resolve()),
+                pvtproject_path=pvtproject_path,
+                session=args.session,
+            )
+        except SkillBridgeError as exc:
+            print(f"pvt corners restore: {exc}", file=sys.stderr)
+            return 4
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    print(f"restored {len(union.rows)} corners from {csv_path.name} -> {name}")
+    return 0
+
+
+_UNION_NAME_SANITISE_RE = __import__("re").compile(r"[^a-z0-9_-]+")
+
+
+def _safe_union_name(stem: str) -> str:
+    """Sanitise a CSV filename stem to the union_name regex ^[a-z0-9_-]+$."""
+    cleaned = _UNION_NAME_SANITISE_RE.sub("_", stem.lower()).strip("_")
+    return cleaned or "restored"
+
+
+def _union_to_json(union) -> str:
+    import json
+    rows_out = []
+    for r in union.rows:
+        models_out = []
+        for m in r.models:
+            entry = {
+                "file": m.file,
+                "block": m.block,
+                "test": m.test,
+                "section": list(m.section) if len(m.section) > 1 else m.section[0],
+            }
+            if m.file_abs is not None:
+                entry["_file_abs"] = m.file_abs
+            models_out.append(entry)
+        vars_out = {
+            vname: (list(vals) if len(vals) > 1 else vals[0])
+            for vname, vals in r.vars.items()
+        }
+        row = {
+            "row_name": r.row_name,
+            "enabled": r.enabled,
+            "vars": vars_out,
+            "models": models_out,
+        }
+        rows_out.append(row)
+    doc = {
+        "union_schema_version": union.union_schema_version,
+        "name": union.name,
+        "project": union.project,
+        "testbench_id": union.testbench_id,
+        "rows": rows_out,
+    }
+    return json.dumps(doc, indent=2) + "\n"

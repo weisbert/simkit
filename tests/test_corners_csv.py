@@ -13,6 +13,7 @@ from simkit.corners_csv import (  # noqa: E402
     CsvBuildError,
     CsvBuildResult,
     build_csv,
+    parse_csv,
 )
 from simkit.union import (  # noqa: E402
     ModelEntry,
@@ -231,6 +232,124 @@ class CellSafetyTests(unittest.TestCase):
         u = _make_union((_make_row("TT", {"temperature": ("55",)}, section=('t"t',)),))
         with self.assertRaises(CsvBuildError):
             build_csv(u)
+
+
+# ---------------------------------------------------------------------------
+# parse_csv (reverse of build_csv) — used by `pvt corners restore`.
+# ---------------------------------------------------------------------------
+
+
+class ParseCsvHappyPathTests(unittest.TestCase):
+
+    def test_minimal_csv_parses(self):
+        text = (
+            "Corner,TT\n"
+            "Enable,t\n"
+            "Temperature,55\n"
+            "Modelfile::/opt/pdk/rf018.scs,t tt\n"
+            "t Test::Test,t\n"
+        )
+        u = parse_csv(text, testbench_id="L/Test/schematic")
+        self.assertEqual(len(u.rows), 1)
+        r = u.rows[0]
+        self.assertEqual(r.row_name, "TT")
+        self.assertTrue(r.enabled)
+        self.assertEqual(r.vars["temperature"], ("55",))
+        self.assertEqual(r.models[0].file, "rf018.scs")
+        self.assertEqual(r.models[0].file_abs, "/opt/pdk/rf018.scs")
+        self.assertEqual(r.models[0].section, ("tt",))
+
+    def test_temperature_display_case_reversed(self):
+        """Maestro emits 'Temperature' on display; parse must canonicalize
+        back to 'temperature' to match SKILL-side var name."""
+        text = (
+            "Corner,TT\n"
+            "Enable,t\n"
+            "Temperature,55\n"
+            "Modelfile::/opt/pdk/rf018.scs,t tt\n"
+        )
+        u = parse_csv(text, testbench_id="L/Test/schematic")
+        self.assertIn("temperature", u.rows[0].vars)
+        self.assertNotIn("Temperature", u.rows[0].vars)
+
+    def test_disabled_corner_round_trips(self):
+        text = (
+            "Corner,TT,FF\n"
+            "Enable,f,t\n"
+            "Temperature,55,85\n"
+            "Modelfile::/opt/pdk/rf018.scs,t tt,t tt\n"
+        )
+        u = parse_csv(text, testbench_id="L/Test/schematic")
+        self.assertFalse(u.rows[0].enabled)
+        self.assertTrue(u.rows[1].enabled)
+
+    def test_var_absent_for_a_corner(self):
+        text = (
+            "Corner,TT,TT_pvt\n"
+            "Enable,t,t\n"
+            "Temperature,55,55\n"
+            "VDD,,3 2.8\n"
+            "Modelfile::/opt/pdk/rf018.scs,t tt,t tt ss ff\n"
+        )
+        u = parse_csv(text, testbench_id="L/Test/schematic")
+        # TT has only temperature; TT_pvt has temperature + VDD sweep.
+        self.assertEqual(set(u.rows[0].vars.keys()), {"temperature"})
+        self.assertEqual(u.rows[1].vars["VDD"], ("3", "2.8"))
+        self.assertIn("VDD", u.rows[1].sweep_var_keys)
+
+    def test_section_sweep_parsed_to_tuple(self):
+        text = (
+            "Corner,TT_pvt\n"
+            "Enable,t\n"
+            "Temperature,55\n"
+            "Modelfile::/opt/pdk/rf018.scs,t tt ss ff\n"
+        )
+        u = parse_csv(text, testbench_id="L/Test/schematic")
+        self.assertEqual(u.rows[0].models[0].section, ("tt", "ss", "ff"))
+        self.assertIn(0, u.rows[0].sweep_model_indices)
+
+
+class ParseCsvRoundTripTests(unittest.TestCase):
+
+    def test_build_parse_build_identity_on_minimal_union(self):
+        u = _make_union((
+            _make_row("TT", {"temperature": ("55",)}, enabled=False),
+            _make_row("TT_pvt", {"temperature": ("55",), "VDD": ("3", "2.8")}, section=("tt", "ss")),
+        ))
+        csv1 = build_csv(u).text
+        u2 = parse_csv(csv1, testbench_id=u.testbench_id,
+                       union_name=u.name, project=u.project)
+        csv2 = build_csv(u2).text
+        self.assertEqual(csv1, csv2)
+
+
+class ParseCsvErrorTests(unittest.TestCase):
+
+    def test_too_short_rejected(self):
+        with self.assertRaises(CsvBuildError):
+            parse_csv("Corner,TT\nEnable,t\n", testbench_id="L/C/s")
+
+    def test_missing_corner_header_rejected(self):
+        text = "Foo,TT\nEnable,t\nTemperature,55\nModelfile::/x,t tt\n"
+        with self.assertRaises(CsvBuildError) as ctx:
+            parse_csv(text, testbench_id="L/C/s")
+        self.assertIn("Corner,", str(ctx.exception))
+
+    def test_missing_enable_row_rejected(self):
+        text = "Corner,TT\nTemperature,55\nModelfile::/x,t tt\n"
+        with self.assertRaises(CsvBuildError) as ctx:
+            parse_csv(text, testbench_id="L/C/s")
+        self.assertIn("Enable,", str(ctx.exception))
+
+    def test_cell_count_mismatch_rejected(self):
+        text = (
+            "Corner,TT,FF\n"
+            "Enable,t\n"   # only 1 cell
+            "Temperature,55,85\n"
+            "Modelfile::/x,t tt,t tt\n"
+        )
+        with self.assertRaises(CsvBuildError):
+            parse_csv(text, testbench_id="L/C/s")
 
 
 if __name__ == "__main__":

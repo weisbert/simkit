@@ -49,7 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
-from simkit.union import Union, UnionRow
+from simkit.union import ModelEntry, Union, UnionRow
 
 # Maestro's GUI title-cases certain reserved design variables on display
 # even though the SKILL API exposes them lowercase. Apply the known map
@@ -168,6 +168,163 @@ def build_csv(union: Union) -> CsvBuildResult:
         text="\n".join(lines) + "\n",
         warnings=tuple(warnings),
     )
+
+
+def parse_csv(
+    text: str,
+    *,
+    testbench_id: str,
+    union_name: str = "from_csv",
+    project: str = "from_csv",
+) -> Union:
+    """Reverse of ``build_csv`` — parse Maestro corners-CSV text into a
+    :class:`Union`. The CSV does not carry the ``testbench_id`` /
+    ``project`` / ``name`` fields (the GUI export omits them), so the
+    caller must supply them; ``pvt corners restore`` resolves
+    ``testbench_id`` from the live session and ``project`` from
+    ``.pvtproject``.
+
+    Lossy fields:
+
+    * ``block`` / ``test`` per model — CSV emits the testbench-cell
+      shortcut; we restore the SKILL-side defaults (``Global`` / ``All``)
+      so the pushed corners match what a fresh ``pvtCornersPull`` would
+      produce. Maestro accepts both forms.
+    * Per-(corner, test) enable matrix — not currently surfaced in the
+      Union schema. v1 ignores the trailing test row.
+    * Multi-test setups — v1 only honours the first test row.
+    """
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) < 3:
+        raise CsvBuildError(
+            f"CSV too short to be a Maestro corners export ({len(lines)} non-empty lines)"
+        )
+
+    # 1) Header: Corner,<row_name>,<row_name>,...
+    head = lines[0].split(",")
+    if len(head) < 2 or head[0] != "Corner":
+        raise CsvBuildError(
+            f"first row must start with 'Corner,'; got {lines[0]!r}"
+        )
+    row_names = head[1:]
+    n_cols = len(row_names)
+
+    # 2) Enable row
+    if not lines[1].startswith("Enable,"):
+        raise CsvBuildError(
+            f"second row must start with 'Enable,'; got {lines[1]!r}"
+        )
+    enable_cells = lines[1].split(",")[1:]
+    if len(enable_cells) != n_cols:
+        raise CsvBuildError(
+            f"Enable row has {len(enable_cells)} cells, expected {n_cols}"
+        )
+    enabled_per_row = [cell == "t" for cell in enable_cells]
+
+    # 3..M) Var rows. They run from line 2 up to the first 'Modelfile::' line.
+    var_lines: list[tuple[str, list[str]]] = []
+    model_lines: list[tuple[str, list[str]]] = []
+    test_lines: list[tuple[str, list[str]]] = []
+
+    for line in lines[2:]:
+        parts = line.split(",")
+        header_cell = parts[0]
+        body = parts[1:]
+        if len(body) != n_cols:
+            raise CsvBuildError(
+                f"row {header_cell!r} has {len(body)} cells, expected {n_cols}"
+            )
+        if header_cell.startswith("Modelfile::"):
+            model_lines.append((header_cell[len("Modelfile::"):], body))
+        elif (header_cell.startswith("t ") or header_cell.startswith("f ")) \
+                and "::" in header_cell:
+            test_lines.append((header_cell, body))
+        else:
+            var_lines.append((header_cell, body))
+
+    # Build per-row data structures.
+    per_row_vars: list[dict[str, tuple[str, ...]]] = [
+        {} for _ in range(n_cols)
+    ]
+    sweep_keys_per_row: list[set[str]] = [set() for _ in range(n_cols)]
+
+    for display_name, body in var_lines:
+        # Reverse the Maestro display-case rule (Temperature → temperature).
+        canon_name = _reverse_display_case(display_name)
+        for k, cell in enumerate(body):
+            cell = cell.strip()
+            if cell == "":
+                continue  # var not set for this corner
+            vals = tuple(cell.split(" "))
+            per_row_vars[k][canon_name] = vals
+            if len(vals) > 1:
+                sweep_keys_per_row[k].add(canon_name)
+
+    per_row_models: list[list[ModelEntry]] = [[] for _ in range(n_cols)]
+    per_row_sweep_model_idx: list[set[int]] = [set() for _ in range(n_cols)]
+
+    for abs_path, body in model_lines:
+        basename = abs_path.rsplit("/", 1)[-1] if "/" in abs_path else abs_path
+        for k, cell in enumerate(body):
+            cell = cell.strip()
+            if cell == "":
+                continue
+            tokens = cell.split(" ")
+            # First token is the per-corner per-model 'enabled' marker
+            # (t/f). v1 emitter always emits 't' so we accept either but
+            # don't surface it.
+            if tokens and tokens[0] in ("t", "f"):
+                section_tokens = tuple(tokens[1:])
+            else:
+                section_tokens = tuple(tokens)
+            if not section_tokens:
+                continue
+            model_idx = len(per_row_models[k])
+            per_row_models[k].append(ModelEntry(
+                file=basename,
+                block=_DEFAULT_MODEL_BLOCK,
+                test=_DEFAULT_MODEL_TEST,
+                section=section_tokens,
+                file_abs=abs_path,
+            ))
+            if len(section_tokens) > 1:
+                per_row_sweep_model_idx[k].add(model_idx)
+
+    rows: list[UnionRow] = []
+    for k, row_name in enumerate(row_names):
+        if not per_row_vars[k] and not per_row_models[k]:
+            # Skip empty corners — Union schema rejects them. Maestro can
+            # emit corners with neither vars nor models for default-bench
+            # nominal rows; we treat those as out-of-scope for the v1 round-trip.
+            continue
+        rows.append(UnionRow(
+            row_name=row_name,
+            vars=per_row_vars[k],
+            models=tuple(per_row_models[k]),
+            sweep_var_keys=frozenset(sweep_keys_per_row[k]),
+            sweep_model_indices=frozenset(per_row_sweep_model_idx[k]),
+            enabled=enabled_per_row[k],
+        ))
+
+    if not rows:
+        raise CsvBuildError("CSV produced zero non-empty corner rows")
+
+    return Union(
+        union_schema_version=1,
+        name=union_name,
+        project=project,
+        testbench_id=testbench_id,
+        rows=tuple(rows),
+    )
+
+
+_REVERSE_DISPLAY_CASE = {v: k for k, v in _DISPLAY_CASE.items()}
+_DEFAULT_MODEL_BLOCK = "Global"
+_DEFAULT_MODEL_TEST = "All"
+
+
+def _reverse_display_case(display_name: str) -> str:
+    return _REVERSE_DISPLAY_CASE.get(display_name, display_name)
 
 
 def _check_cell_safety(union: Union) -> None:

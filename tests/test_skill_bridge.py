@@ -49,6 +49,7 @@ def _make_mock_ws(pull_return=None, push_return=None):
     table = {
         "load": load_fn,
         "changeWorkingDir": cwd_fn,
+        "setShellEnvVar": MagicMock(),
         "pvtCornersPull": pull_fn,
         "pvtCornersPush": push_fn,
     }
