@@ -219,5 +219,164 @@ class DiffCliTests(unittest.TestCase):
         self.assertEqual(rc, 2)
 
 
+# ----------------------------------------------------------------------------
+# pull / push — exercised with simkit.skill_bridge patched out so tests don't
+# need a live Virtuoso session. Live verification is a separate runtime probe.
+# ----------------------------------------------------------------------------
+
+
+from unittest.mock import patch  # noqa: E402
+
+from simkit.skill_bridge import SkillBridgeError  # noqa: E402
+
+
+class PullCliTests(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_cli_pull_"))
+        self.pvtproject = self.tmp / ".pvtproject"
+        self.pvtproject.write_text(
+            json.dumps({"project": "test_pull", "dbRoot": "./db", "schema_version": 1}),
+            encoding="utf-8",
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_pull_ok_prints_written_path(self):
+        out_path = self.tmp / "x.union.json"
+        with patch("simkit.skill_bridge.pvt_corners_pull",
+                   return_value=str(out_path.resolve())) as pull:
+            rc, out, err = _run(
+                "corners", "pull", str(out_path),
+                "--project", str(self.pvtproject),
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertIn(f"pulled -> {out_path.resolve()}", out)
+        pull.assert_called_once()
+        kwargs = pull.call_args.kwargs
+        self.assertEqual(kwargs["pvtproject_path"], self.pvtproject.resolve())
+        self.assertIsNone(kwargs["session"])
+        self.assertIsNone(kwargs["union_name"])
+
+    def test_pull_rejects_bad_extension(self):
+        rc, out, err = _run(
+            "corners", "pull", "/tmp/whatever.json",
+            "--project", str(self.pvtproject),
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("must end '.union.json'", err)
+
+    def test_pull_missing_pvtproject_returns_3(self):
+        rc, out, err = _run(
+            "corners", "pull", "/tmp/x.union.json",
+            "--project", "/no/such/.pvtproject",
+        )
+        self.assertEqual(rc, 3)
+        self.assertIn("pvt corners pull", err)
+
+    def test_pull_skillbridge_error_returns_4(self):
+        out_path = self.tmp / "x.union.json"
+        with patch(
+            "simkit.skill_bridge.pvt_corners_pull",
+            side_effect=SkillBridgeError("pvt_validation", "no setup db", None),
+        ):
+            rc, out, err = _run(
+                "corners", "pull", str(out_path),
+                "--project", str(self.pvtproject),
+            )
+        self.assertEqual(rc, 4)
+        self.assertIn("pvt_validation: no setup db", err)
+
+    def test_pull_session_and_union_name_forwarded(self):
+        out_path = self.tmp / "x.union.json"
+        with patch(
+            "simkit.skill_bridge.pvt_corners_pull", return_value=str(out_path)
+        ) as pull:
+            rc, out, err = _run(
+                "corners", "pull", str(out_path),
+                "--project", str(self.pvtproject),
+                "--session", "fnxSession0",
+                "--union-name", "my_union",
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        kwargs = pull.call_args.kwargs
+        self.assertEqual(kwargs["session"], "fnxSession0")
+        self.assertEqual(kwargs["union_name"], "my_union")
+
+
+class PushCliTests(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_cli_push_"))
+        self.pvtproject = self.tmp / ".pvtproject"
+        self.pvtproject.write_text(
+            json.dumps({"project": "test_push", "dbRoot": "./db", "schema_version": 1}),
+            encoding="utf-8",
+        )
+        self.union_file = self.tmp / "u.union.json"
+        self.union_file.write_text(json.dumps(_min_doc("u")), encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_push_ok_prints_union_name(self):
+        with patch(
+            "simkit.skill_bridge.pvt_corners_push", return_value="u"
+        ) as push:
+            rc, out, err = _run(
+                "corners", "push", str(self.union_file),
+                "--project", str(self.pvtproject),
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertIn("pushed -> u", out)
+        kwargs = push.call_args.kwargs
+        self.assertFalse(kwargs["dry_run"])
+
+    def test_push_missing_union_file_returns_2(self):
+        rc, out, err = _run(
+            "corners", "push", "/tmp/no_such.union.json",
+            "--project", str(self.pvtproject),
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn(".union.json not found", err)
+
+    def test_push_dry_run_passes_flag_and_marks_output(self):
+        with patch(
+            "simkit.skill_bridge.pvt_corners_push", return_value="u"
+        ) as push:
+            rc, out, err = _run(
+                "corners", "push", str(self.union_file),
+                "--project", str(self.pvtproject),
+                "--dry-run",
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertIn("pushed (dry-run) -> u", out)
+        self.assertTrue(push.call_args.kwargs["dry_run"])
+
+    def test_push_skillbridge_error_returns_4(self):
+        with patch(
+            "simkit.skill_bridge.pvt_corners_push",
+            side_effect=SkillBridgeError("pvt_io", "axlPutCorner failed", None),
+        ):
+            rc, out, err = _run(
+                "corners", "push", str(self.union_file),
+                "--project", str(self.pvtproject),
+            )
+        self.assertEqual(rc, 4)
+        self.assertIn("pvt_io: axlPutCorner failed", err)
+
+    def test_push_session_forwarded(self):
+        with patch(
+            "simkit.skill_bridge.pvt_corners_push", return_value="u"
+        ) as push:
+            _run(
+                "corners", "push", str(self.union_file),
+                "--project", str(self.pvtproject),
+                "--session", "fnxSession0",
+            )
+        self.assertEqual(push.call_args.kwargs["session"], "fnxSession0")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

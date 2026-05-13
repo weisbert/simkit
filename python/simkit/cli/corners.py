@@ -1,12 +1,17 @@
-"""``pvt corners`` subcommand group (Phase 2 §5, offline verbs).
+"""``pvt corners`` subcommand group.
 
-Nested argparse group with three offline subcommands:
+Nested argparse group:
 
 * ``pvt corners explode <path>`` — explode a `.union.json` to its sub-corners.
 * ``pvt corners list [--project P]`` — enumerate unions under ``<unionsDir>/``.
 * ``pvt corners diff <a> <b>`` — diff two `.union.json` files row-by-row.
+* ``pvt corners pull <out>`` — pull live ADE-XL setup to a `.union.json`
+  sidecar (via skillbridge → ``pvtCornersPull``).
+* ``pvt corners push <union.json>`` — push a `.union.json` sidecar into
+  the live ADE-XL setup (via skillbridge → ``pvtCornersPush``).
 
-The ``build`` / ``push`` / ``pull`` verbs are live-Maestro and land in Phase 2 §3.
+The ``build`` verb (sidecar → Maestro corners-CSV) is still blocked on
+Open Decision 8.3 (CSV format).
 """
 
 from __future__ import annotations
@@ -36,10 +41,12 @@ from simkit.union import (
 def add_subparser(sub) -> None:
     p = sub.add_parser(
         "corners",
-        help="PVT-union authoring helpers (explode / list / diff / build / push / pull).",
+        help="PVT-union authoring helpers (explode / list / diff / pull / push).",
         description=(
             "Phase 2 PVT-union builder. Offline verbs: explode, list, diff. "
-            "Live-Maestro verbs (build / push / pull) land in Phase 2 §3."
+            "Live-Maestro verbs (via skillbridge): pull, push. The `build` "
+            "verb (sidecar → Maestro corners-CSV) is still pending Open "
+            "Decision 8.3."
         ),
     )
     cs = p.add_subparsers(dest="corners_cmd", required=True)
@@ -83,6 +90,55 @@ def add_subparser(sub) -> None:
         help="Emit a JSON object instead of the default grouped table.",
     )
     p_diff.set_defaults(func=_run_diff)
+
+    p_pull = cs.add_parser(
+        "pull",
+        help="Pull live ADE-XL corner table into a .union.json sidecar.",
+        description=(
+            "Invoke skillbridge to call pvtCornersPull against the running "
+            "Virtuoso session. The output filename basename (minus "
+            "'.union.json') becomes the union 'name' unless --union-name "
+            "overrides it."
+        ),
+    )
+    p_pull.add_argument("out_path", help="Output path (must end .union.json).")
+    p_pull.add_argument(
+        "--project", default=None,
+        help="Path to a .pvtproject file. Default: PVT_PROJECT env or cwd walker.",
+    )
+    p_pull.add_argument(
+        "--session", default=None,
+        help="Maestro session id. Default: SKILL infers from the active window.",
+    )
+    p_pull.add_argument(
+        "--union-name", default=None,
+        help="Override the union 'name' field (default: basename of out_path).",
+    )
+    p_pull.set_defaults(func=_run_pull)
+
+    p_push = cs.add_parser(
+        "push",
+        help="Push a .union.json sidecar into the live ADE-XL setup.",
+        description=(
+            "Invoke skillbridge to call pvtCornersPush against the running "
+            "Virtuoso session. Use --dry-run to parse + validate the sidecar "
+            "without touching the live setup."
+        ),
+    )
+    p_push.add_argument("union_json_path", help="Path to a .union.json sidecar.")
+    p_push.add_argument(
+        "--project", default=None,
+        help="Path to a .pvtproject file. Default: PVT_PROJECT env or cwd walker.",
+    )
+    p_push.add_argument(
+        "--session", default=None,
+        help="Maestro session id. Default: SKILL infers from the active window.",
+    )
+    p_push.add_argument(
+        "--dry-run", dest="dry_run", action="store_true",
+        help="Validate the sidecar but do not touch the live setup.",
+    )
+    p_push.set_defaults(func=_run_push)
 
 
 # --- explode ---------------------------------------------------------------
@@ -297,3 +353,76 @@ def _print_diff(a, b, diff: UnionDiff) -> None:
     print()
 
     print(f"Rows identical: {diff.identical_count}")
+
+
+# --- pull / push (live Maestro via skillbridge) --------------------------
+
+
+def _resolve_project_for_live(args) -> Path | None:
+    """Resolve `.pvtproject` path for live verbs; print + return None on error."""
+    from simkit.skill_bridge import resolve_pvtproject_path
+    try:
+        return resolve_pvtproject_path(args.project)
+    except (FileNotFoundError, PvtProjectError) as exc:
+        print(f"pvt corners {args.corners_cmd}: {exc}", file=sys.stderr)
+        return None
+
+
+def _run_pull(args) -> int:
+    out_path = Path(args.out_path).expanduser()
+    if not out_path.name.endswith(".union.json"):
+        print(
+            f"pvt corners pull: out_path basename must end '.union.json' "
+            f"(got {out_path.name!r})",
+            file=sys.stderr,
+        )
+        return 2
+
+    pvtproject_path = _resolve_project_for_live(args)
+    if pvtproject_path is None:
+        return 3
+
+    from simkit.skill_bridge import SkillBridgeError, pvt_corners_pull
+    try:
+        result = pvt_corners_pull(
+            str(out_path.resolve()),
+            pvtproject_path=pvtproject_path,
+            session=args.session,
+            union_name=args.union_name,
+        )
+    except SkillBridgeError as exc:
+        print(f"pvt corners pull: {exc}", file=sys.stderr)
+        return 4
+
+    print(f"pulled -> {result}")
+    return 0
+
+
+def _run_push(args) -> int:
+    union_path = Path(args.union_json_path).expanduser()
+    if not union_path.is_file():
+        print(
+            f"pvt corners push: .union.json not found: {union_path}",
+            file=sys.stderr,
+        )
+        return 2
+
+    pvtproject_path = _resolve_project_for_live(args)
+    if pvtproject_path is None:
+        return 3
+
+    from simkit.skill_bridge import SkillBridgeError, pvt_corners_push
+    try:
+        union_name = pvt_corners_push(
+            str(union_path.resolve()),
+            pvtproject_path=pvtproject_path,
+            session=args.session,
+            dry_run=args.dry_run,
+        )
+    except SkillBridgeError as exc:
+        print(f"pvt corners push: {exc}", file=sys.stderr)
+        return 4
+
+    marker = " (dry-run)" if args.dry_run else ""
+    print(f"pushed{marker} -> {union_name}")
+    return 0
