@@ -1,6 +1,6 @@
 # Project State
 
-_Last updated: 2026-05-13 (morning — Phase 2 §6 Gate U2 closed via synthesised 21×3 VCO shape pushed into fnxSession0; offline regression pinned)_
+_Last updated: 2026-05-13 (checkpoint — Phase 1 + Phase 2 main lines closed; CLI wrappers + corners-build are the only deferred items on the shelf; fnxSession0 cleaned back to its 3-row baseline)_
 
 ## Current phase
 
@@ -38,6 +38,9 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - **2026-05-12 (late evening — after user reload of sbStart.il)**: §3.V verification cleared. `a98b9e5` fixes 5 bugs caught during Tier-1 + Tier-2: 4 operator-shorthand uses (`<=` / `<` / `+` / `-` → `leqp` / `lessp` / `plus` / `difference`; DECISIONS #32) and 1 `pvtJsonEmitToPort` arg-order bug. SKILL Tier-1 256 → 286 / 1 (baseline FAIL unchanged); Tier-2 live `pvtCornersPull` against `fnxSession0` reproduces spec §9 verbatim. DECISIONS #33 records the verification.
 - **2026-05-12 (late evening — after user restarted Cadence)**: Phase 2 §3 push side landed and verified. `263adb0` adds `pvtCornersPush` + 13 push-helper Tier-1 cases (cumulative SKILL 256 → 300 / 0 fail — 1 baseline FAIL flipped to PASS in the fresh VM; net +30 corner tests). Tier-2 pull→push→pull round-trip on `fnxSession0` (3 corners: TT scalar / TT_pvt with vars+models sweeps / TT_2p5G with 3 scalar vars) is **semantically byte-identical** modulo per-pull `name` field. DECISIONS #34 captures the verification.
 - **2026-05-12 (closing)**: §6 Gate U3 pinned as 6-test pytest module (`tests/test_acceptance_phase2.py`); Python suite 325 → 331 / 0. U1 manually verified live (the Tier-2 round-trip in `263adb0`) but not yet offline-pinned (awaits captured fixture pair). U2 (VCO LO) and U4 (CSV round-trip) remain deferred — U2 needs VCO LO loaded, U4 needs `pvt corners build` to lock the CSV format (Open Decision 8.3). User pre-staged two history runs in `fnxSession0` for the Phase 1 §3 messy-data deferred Tier-2 verification: `simkit_simerr` (all-sim-err) and `simkit_Rtime_err` (one corner Rtime_clkout eval-err). Cataloged in TODO §1 Backlog.
+- **2026-05-12 (overnight)**: Phase 1 §3 messy-data Tier-2 closed via the new histories. `d150990` introduces `eval_err` per-output sentinel (DECISIONS #35): pass-1 now emits a row preserving the output name for any value the rdb returns that isn't number/non-"wave"-string — fixed the silent drop of TT_2p5G/Rtime_clkout in `simkit_Rtime_err`. Validator I12/I14/I1 extended. SKILL Tier-1 300 → 313 / 1 baseline; Python 331 → 338 / 0. `simkit_simerr` already worked cleanly (pass-2 only).
+- **2026-05-13 (morning)**: Phase 2 §6 Gate U2 closed via synthesised 21×3 VCO shape (`92ab6f5`). User didn't have actual VCO LO loaded; I built the shape from the PHASE_PLAN.md description (7 process × 3 ind-temp = 21 rows; each row sweeps temperature ×3 = 63 sub-corners), pushed into `fnxSession0` (3 → 24 rows), pulled back byte-identical for all 21 rows. Fixture pinned at `tests/fixtures/unions/vco_lo_21x3.union.json` + 5 pytest cases. Python 338 → 343 / 0. DECISIONS #36 records rationale and the open clause on 8.6 (multi-axis-per-row at scale still untested). Surfaced a UX caveat: `["-40","25","105"]` lex-sorts to `["-40","105","25"]` (numeric-string gotcha already noted in spec §3.4); flagged to user.
+- **2026-05-13 (cleanup)**: 21 synthesised VCO corners removed from `fnxSession0` via `axlRemoveElement`. Session is back to its original 3 rows (TT / TT_pvt / TT_2p5G). No commit — cleanup is an interactive operation, not a code change. Bridge state had to be reset twice during the session (`pyKillServer` / `pyStartServer` recovery procedure documented in user-memory `reference_skillbridge_recovery.md`).
 
 ## What's DONE
 
@@ -57,15 +60,15 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 
 ## What's IN PROGRESS
 
-_Nothing in progress — Phase 2 core landed. Three follow-ups on the deferred-work shelf below._
+_Nothing — both pillars at a clean stopping point._
 
 ## What's NEXT (the deferred-work shelf)
 
-1. **§5 `pvt corners pull` / `push` CLI wrappers** — thin Python CLI subcommands around the now-verified SKILL `pvtCornersPull` / `pvtCornersPush`. Mostly mechanical: skillbridge invocation + arg parsing. Couple-hour subagent task once §6 Gate U1 has a sandbox session strategy for CI.
-2. **§5 `pvt corners build`** — needs a real Maestro corners-CSV export sample to reverse-engineer (Open Decision 8.3). User can drop a sample at `tests/fixtures/unions/maestro_corners_export.csv` next time they're in Maestro; until then this stays deferred.
-3. **§6 Gate U1 pin as offline regression** — capture a pre/post fixture pair from the live `fnxSession0` round-trip, commit them, then wire `tests/test_acceptance_phase2.py::TestGateU1RoundTrip` to diff them. Maybe a half-session of fixture work + 4-5 tests.
-4. **§6 Gate U2 VCO LO acceptance** — needs the VCO LO setup loaded in Maestro. User flag when ready; ~half-session to probe and run the 21-col case + write the gate.
-5. **§6 Gate U4 sidecar↔CSV round-trip** — chained behind `pvt corners build`.
+1. **§5 `pvt corners pull` / `push` CLI wrappers** — thin Python CLI subcommands around the verified SKILL `pvtCornersPull` / `pvtCornersPush`. Mostly mechanical: skillbridge invocation + arg parsing. Subagent-friendly. Blocked only on the question of how `push` interacts with CI (no live session in CI — push will be a no-op-via-mock in tests).
+2. **§5 `pvt corners build`** — needs a real Maestro corners-CSV export sample to reverse-engineer (Open Decision 8.3). User can drop a sample at `tests/fixtures/unions/maestro_corners_export.csv` next time they're in Maestro.
+3. **§6 Gate U1 pin as offline regression** — capture a pre/post fixture pair from the `fnxSession0` round-trip already manually verified, commit them, then wire a pytest. Half-session of fixture work + 4-5 tests.
+4. **§6 Gate U4 sidecar↔CSV round-trip** — chained behind `pvt corners build` (item 2).
+5. **Open Decision 8.6 — explode order at multi-axis scale** — Gate U2 closed at 21-row × 1-axis-per-row scale (synthesised); Gate U3 closed at 2×3×5 = 30 small synthetic scale. Multi-axis (e.g. 5+ sweep fields in one row) at real-bench scale still untested. Park until a real VCO LO setup is available.
 
 ## Phase 1 backlog (continues)
 
