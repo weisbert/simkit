@@ -651,3 +651,49 @@ _Date: 2026-05-13_
 **Alternatives considered:**
 - Wait until user has actual VCO LO loaded. Rejected: the synthesised shape exercises the same code paths and acts as a permanent regression fixture for the 21-row scale.
 - Push to a sandbox session instead of `fnxSession0`. Rejected: user explicitly authorised pushing to the working session; pull-then-compare proves no data loss.
+
+
+---
+
+## #37 — Maestro corners-CSV is the v1 backup format; `pvt corners build` is skillbridge-independent recovery (resolves Open Decision 8.3)
+_Date: 2026-05-13_
+
+**Decision:** `pvt corners build <union.json>` emits a Maestro-native corners CSV (the same format that `Tools → Corners → Export` produces). The recovery flow after a Cadence crash is: restart Maestro → `Tools → Corners → Import → <file>.csv` — explicitly NOT requiring `skillbridge` or `sbStart.il` to be functional.
+
+**Why CSV and not the `.union.json` itself:** The user pushed back on the original Phase 2 framing where `.union.json` + `pvt corners push` was assumed to be the recovery path. Real concern: "公司 Cadence 经常闪退" — after a crash, the `skillbridge` socket may be gone and reloading `sbStart.il` is one more failure point. A pure-GUI recovery via Maestro's own Import dialog has no `skillbridge` dependency.
+
+**CSV format** (reverse-engineered from a live `Tools → Corners → Export` on `fnxSession0`; ground truth pinned at `tests/fixtures/unions/fnxsession0_baseline.csv`):
+
+```
+Corner,<row_name>,<row_name>,...
+Enable,<f|t>,<f|t>,...
+<VarName>,<val|sweep|empty>,...                   ← one row per var
+Modelfile::<abs_path>,<test_en> <sect1> <sect2>,...
+<test_en> <block>::<test_name>,<t|f>,<t|f>,...    ← one row per test
+```
+
+Key empirical facts:
+- Sweep values within a cell: space-separated (e.g. `3 2.8`).
+- `temperature` (lowercase in SKILL API) appears as `Temperature` in the GUI/CSV — Maestro display rule. Other var names preserved as-is.
+- `block` / `test` in the CSV's last row use the **testbench cell name**, NOT the SKILL-side `axlGetModelBlock` / `axlGetModelTest` defaults (`"Global"` / `"All"`).
+- Per-corner `Enable` flag is GUI-visible and `axlGetEnabled` exposes it (this is a different API than the historical guesses; `axlIsCornerEnabled` does NOT exist).
+- The `Modelfile::` row prefix uses the absolute model path. SKILL's `axlGetModels(corner)` gives basenames only; `axlGetModelFile(modelHandle)` is the API that gives the absolute path. Production code historically chose basenames for cross-machine portability; the CSV path needs the abs path, so pull now captures BOTH (`file` = basename for round-trip, `_file_abs` underscore-prefixed for build).
+
+**Schema implications (Phase 2 §3.3 extension):**
+- `UnionRow.enabled: bool = True` — proper schema field, participates in round-trip.
+- `ModelEntry.file_abs: str | None = None` — underscore-prefixed in JSON (`_file_abs`) per spec §4.2 modulus, so it does NOT participate in round-trip. It's informational; only the build emitter consumes it. Sidecars without it still load (default `None`); `pvt corners build` warns + falls back to basename + the emitted CSV is NOT Maestro-importable in that fallback case.
+
+**v1 emitter limitations** (documented in `python/simkit/corners_csv.py` module docstring):
+- Single test per setup. Multi-test extension needs per-(corner, test) enable matrix.
+- One `Modelfile::` row per distinct abs path; corners sharing the same model file share one row.
+- No CSV quoting/escaping. Any cell value containing `,` / `"` / `\n` / `\r` raises `CsvBuildError` rather than producing an ambiguous CSV. Real-world data has not exercised this.
+
+**Alternatives considered:**
+- `.sdb` (binary Maestro setup database) via `axlExportSetup`. Rejected for v1: requires Maestro running to produce the backup file (live API), defeats the "backup against runtime failures" purpose. Also opaque to inspection.
+- `.pcf` (process customization file) via `axlLoadCornersFromPcfToSetupDB` on the import side. Rejected: no documented `axl*ToPcf` / export-side companion API; the format is GUI-only.
+- Pure-Python custom CSV (one row per sub-corner, simple flat layout). Rejected: not re-importable via Maestro GUI; user would have to either retype or run the pure-Python re-importer, which itself depends on skillbridge — same dependency the backup was trying to avoid.
+
+**Verification status (2026-05-13):**
+- Offline byte-identical: emitter output equals `fnxsession0_baseline.csv` exactly, pinned as 5-case `TestGateU4SidecarToCSV`.
+- Live runtime-verify: CLI `pvt corners build` produces the same bytes as the offline emitter; smoke test `diff` against ground truth is clean.
+- **NOT YET verified**: end-to-end recovery flow (kill Maestro → restart → `Tools → Corners → Import → built.csv` → confirm 3 corners reappear with right vars/sections). Single physical action owed by user; logged in PROJECT_STATE.md "Owed" section.

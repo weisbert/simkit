@@ -1,10 +1,12 @@
 # Project State
 
-_Last updated: 2026-05-13 (checkpoint — Phase 2 §5 pull/push CLI shipped + Gate U1 offline-pinned; only `corners build` / Gate U4 remain, both blocked on Open Decision 8.3)_
+_Last updated: 2026-05-13 (checkpoint — Phase 2 fully closed; all 4 §6 gates offline-pinned; only remaining ask is a one-shot user GUI verification of CSV Import recovery)_
 
 ## Current phase
 
-**Phase 2: PVT-Union Builder — main line closed.** Spec frozen; loader + explode + offline CLI (explode/list/diff) shipped; SKILL `pvtCornersPull` + `pvtCornersPush` verified live; Python skillbridge wrapper + `pvt corners pull/push` CLI shipped + live-verified against `fnxSession0`. Acceptance gates: U1 / U2 / U3 all offline-pinned (17 cases in `test_acceptance_phase2.py`). Only `pvt corners build` (CSV emit) + Gate U4 remain — both blocked on Open Decision 8.3 awaiting a real Maestro corners-CSV export sample.
+**Phase 2: PVT-Union Builder — DONE.** Spec frozen; loader + explode + offline CLI (explode/list/diff) shipped; SKILL `pvtCornersPull` + `pvtCornersPush` extended to capture enable + abs-path; Python skillbridge wrapper + `pvt corners pull/push/build` CLI all shipped + live-verified against `fnxSession0`. Acceptance gates U1/U2/U3/U4 all offline-pinned (22 cases in `test_acceptance_phase2.py`). Open Decision 8.3 (CSV format) resolved 2026-05-13 by reverse-engineering a live `Tools → Corners → Export` sample — emitter produces byte-identical output.
+
+**Owed back from user**: one-shot GUI verification that `pvt corners build` output is re-importable via `Tools → Corners → Import` after Cadence restarts (the crash-recovery use case). Until that's done, the recovery flow is "logically correct" (byte-identical to a confirmed export format) but has not been physically demonstrated.
 
 **Phase 1: Data Pillar MVP — COMPLETE.** Six sections shipped: spec, `.pvtproject` loaders (Python + SKILL + first-save dialog), collector SKILL with messy-data refactor + Bug A/B/C/D fixes + netlist Spectre fix, Python ingester + inline validator, full `pvt` CLI surface (`ingest`/`validate`/`attach`/`label`/`list`/`diff`), 4 acceptance gates pinned as regression. Open items (§2.2 dialog Tier-2 manual, screenshot v1.1, walker mock-rdb) all deferred per their DECISIONS entries.
 
@@ -43,6 +45,7 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - **2026-05-13 (cleanup)**: 21 synthesised VCO corners removed from `fnxSession0` via `axlRemoveElement`. Session is back to its original 3 rows (TT / TT_pvt / TT_2p5G). No commit — cleanup is an interactive operation, not a code change. Bridge state had to be reset twice during the session (`pyKillServer` / `pyStartServer` recovery procedure documented in user-memory `reference_skillbridge_recovery.md`).
 - **2026-05-13 (mid-day)**: Gate U1 offline-pinned (`8ae37bf`). Live capture via `/tmp/u1_capture_edit.py` ran the full round trip on `fnxSession0`: pull baseline (3 rows, TT.temperature=55) → programmatic edit (TT.temperature=85) → push edited → pull post_edit_pull → assert byte-identical modulo top-level `name` → push baseline back → assert `fnxSession0` restored. Three fixtures + 6 pytest cases pinned in `tests/fixtures/unions/u1_*` + `TestGateU1RoundTrip`. Python 343 → 349 / 0.
 - **2026-05-13 (afternoon)**: Phase 2 §5 push/pull CLI wrappers shipped (`6ef6cea`). New `python/simkit/skill_bridge.py` exposes `pvt_corners_pull` / `pvt_corners_push` as Python callables — re-loads production .il files per invocation (idempotent, <1s), cwds to `.pvtproject` parent before each call, decodes `pvt_ok` / `pvt_err` into `SkillBridgeError`. CLI: `pvt corners pull <out.union.json>` and `pvt corners push <union.json> [--dry-run]` with `--project` / `--session` overrides. 28 new Tier-1 cases (18 wrapper + 10 CLI via mocked `Workspace`). Runtime-verified against live `fnxSession0` via `/tmp/cli_live_verify.sh`: pull → push back → pull → diff shows 3/3 identical; dry-run does not perturb live state. Python suite 349 → 377 / 0.
+- **2026-05-13 (late afternoon)**: Phase 2 §5 `pvt corners build` + Gate U4 landed (`538b0df`). User pushed back on CSV scope — "正常使用不会用，但要作为 Cadence 闪退的备份保护" — so I extended SKILL pull to capture per-row `enabled` (via `axlGetEnabled`) and per-model `_file_abs` (via `axlGetModelFile`), extended Python `Union`/`UnionRow`/`ModelEntry` schema with `enabled: bool = True` and `file_abs: str | None = None` (backward-compat defaults), and wrote `python/simkit/corners_csv.py` to emit Maestro-format CSV. Ground truth at `tests/fixtures/unions/fnxsession0_baseline.csv` from a live `Tools → Corners → Export` on `fnxSession0`; emitter produces **byte-identical** output (Gate U4 pinned in 5-case `TestGateU4SidecarToCSV`). Discovery: Maestro displays `temperature` as `Temperature` in the GUI/CSV (case-rule in emitter). `block`/`test` columns in CSV are testbench cell name, not SKILL-side defaults `"Global"/"All"`. Open Decision 8.3 resolved. Python 377 → 411 / 0 (+34). One physical action still owed by user: verify the emitted CSV is re-importable via `Tools → Corners → Import` on a fresh Maestro (the actual crash-recovery flow).
 
 ## What's DONE
 
@@ -70,6 +73,8 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 - §6 Gate U1 offline-pinned (pre/post fixture triple + 6 cases).
 - §6 Gate U2 closed via 21×3 synthesised VCO LO push/pull round-trip + 5 cases.
 - §6 Gate U3 closed via 2×3×5 = 30 synthetic explode + 6 cases.
+- §5 `pvt corners build` shipped + Gate U4 byte-identical pin (5 cases). Live `Tools → Corners → Export` ground truth at `tests/fixtures/unions/fnxsession0_baseline.csv`; emitter at `python/simkit/corners_csv.py`.
+- Pull extended to capture per-row `enabled` + per-model `_file_abs`. Backward-compatible defaults preserve old sidecars.
 
 ## What's IN PROGRESS
 
@@ -77,9 +82,9 @@ _Nothing — both pillars at a clean stopping point._
 
 ## What's NEXT (the deferred-work shelf)
 
-1. **§5 `pvt corners build`** — needs a real Maestro corners-CSV export sample to reverse-engineer (Open Decision 8.3). User can drop a sample at `tests/fixtures/unions/maestro_corners_export.csv` next time they're in Maestro.
-2. **§6 Gate U4 sidecar↔CSV round-trip** — chained behind `pvt corners build` (item 1).
-3. **Open Decision 8.6 — explode order at multi-axis scale** — Gate U2 closed at 21-row × 1-axis-per-row scale (synthesised); Gate U3 closed at 2×3×5 = 30 small synthetic scale. Multi-axis (e.g. 5+ sweep fields in one row) at real-bench scale still untested. Park until a real VCO LO setup is available.
+1. **One-shot CSV import verification (user)** — the only thing standing between "logically-correct backup" and "physically-demonstrated recovery": user opens a fresh Maestro session, does `Tools → Corners → Import` on the latest `pvt corners build` output, and confirms the 3 corners reappear with the right vars/sections. Two-minute test once you've got Cadence open.
+2. **Open Decision 8.6 — explode order at multi-axis scale** — Gate U2 closed at 21-row × 1-axis-per-row scale (synthesised); Gate U3 closed at 2×3×5 = 30 small synthetic scale. Multi-axis (e.g. 5+ sweep fields in one row) at real-bench scale still untested. Park until a real VCO LO setup is available.
+3. **CSV format edge cases** — emitter is v1 (single-test, single-model-per-row, no quoting). If a real session ever has a var/section/path with comma/quote/newline, `pvt corners build` raises `CsvBuildError`. Add a v2 quoting path then. Multi-test setups also need per-(corner, test) enable matrix — additional schema work.
 
 ## Phase 1 backlog (continues)
 
