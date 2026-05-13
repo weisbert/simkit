@@ -63,7 +63,7 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 ### §6. End-to-end acceptance gates
 
 - [x] **Gate U1** — Round-trip fidelity on `fnxSession0` (live Maestro). Manually verified 2026-05-12 via `/tmp/probe_push.py`: pull → push → pull on 3 corners (TT scalar, TT_pvt with vars+models sweeps, TT_2p5G) is semantically byte-identical. **Pin as offline pytest** once a captured pre/post fixture pair is committed to `tests/fixtures/unions/` (TODO).
-- [ ] **Gate U2** — VCO LO acceptance (real 21-col × 3-pt setup; deferred until VCO LO is loaded in Maestro). DECISIONS #30 open clause 8.6 covers the explode-order rule check needed.
+- [x] **Gate U2** — VCO LO acceptance. 2026-05-13: user didn't have VCO LO loaded; I synthesised the 21-row × 3-pt shape from the PHASE_PLAN.md / DECISIONS #29 description and pushed it into the live `fnxSession0`. Session went 3 → 24 rows; all 21 pushed rows pull back byte-identical (vars + models). Offline pinned at `tests/fixtures/unions/vco_lo_21x3.union.json` with 5 pytest cases in `TestGateU2VCOLoAcceptance` (load, row-count, ind-temp × process matrix, temperature-sweep shape, explode → 63 sub-corners, section-per-process). Open Decision 8.6: per-row sweep is only 1 axis × 3 values, so this case doesn't stress alphabetic-key explode order — that's still pending a multi-axis-per-row real case.
 - [x] **Gate U3** — Explode arithmetic on a synthetic 2 × 3 × 5 = 30 union (`tests/test_acceptance_phase2.py::TestGateU3ExplodeArithmetic`, 6 tests).
 - [ ] **Gate U4** — Sidecar → CSV → Sidecar bit-identical (modulo §4.2). Blocked on `pvt corners build` CLI subcommand (Open Decision 8.3 — CSV format).
 

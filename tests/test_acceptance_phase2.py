@@ -111,3 +111,59 @@ class TestGateU3ExplodeArithmetic:
         assert last.vars["A"] == "a2"
         assert last.vars["B"] == "b3"
         assert last.models[0].section == "s5"
+
+
+# ----------------------------------------------------------------------------
+# Gate U2 — VCO LO 21×3 acceptance (offline component).
+#
+# Live verified 2026-05-13 against fnxSession0: push of the 21-row sidecar
+# leaves Maestro with 21 new corner rows alongside the existing ones; pull
+# back is byte-identical for all 21 vars + models. The offline component
+# below pins the fixture so future regressions catch any shape break in the
+# loader or explode order without needing a live session. See DECISIONS #34
+# (push verification) and TODO Phase 2 §6.
+# ----------------------------------------------------------------------------
+
+from simkit.union import load_union  # noqa: E402
+
+_GATE_U2_FIXTURE = (
+    _REPO_ROOT / "tests" / "fixtures" / "unions" / "vco_lo_21x3.union.json"
+)
+
+
+class TestGateU2VCOLoAcceptance:
+
+    def test_fixture_loads(self):
+        u = load_union(_GATE_U2_FIXTURE)
+        assert u.name == "vco_lo_21x3"
+        assert len(u.rows) == 21
+
+    def test_seven_processes_three_ind_temps(self):
+        u = load_union(_GATE_U2_FIXTURE)
+        row_names = {r.row_name for r in u.rows}
+        processes = {"TT", "FF", "SS", "FNSP", "SNFP", "FF_ext", "SS_ext"}
+        ind_temps = {"Cold", "RT", "Hot"}
+        expected = {f"{p}_{i}" for p in processes for i in ind_temps}
+        assert row_names == expected
+
+    def test_each_row_has_temperature_sweep_of_three(self):
+        u = load_union(_GATE_U2_FIXTURE)
+        for row in u.rows:
+            assert row.vars["temperature"] == ("-40", "25", "105")
+
+    def test_explode_yields_63_sub_corners(self):
+        u = load_union(_GATE_U2_FIXTURE)
+        sub = explode(u)
+        assert len(sub) == 63
+
+    def test_section_per_process(self):
+        u = load_union(_GATE_U2_FIXTURE)
+        for row in u.rows:
+            proc = row.row_name.split("_")[0]
+            # "FF_ext" / "SS_ext" split to ("FF", "ext"); section is the
+            # lowercase full process tag e.g. "ff_ext".
+            if row.row_name.startswith(("FF_ext", "SS_ext")):
+                expected_section = row.row_name.rsplit("_", 1)[0].lower()
+            else:
+                expected_section = proc.lower()
+            assert row.models[0].section == (expected_section,)

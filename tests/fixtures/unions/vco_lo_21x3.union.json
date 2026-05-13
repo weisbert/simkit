@@ -1,0 +1,429 @@
+{
+  "_doc": "Synthesised VCO LO PVT union: 7 process \u00d7 3 ind-temp = 21 corner rows; each row sweeps temperature across 3 values = 63 sub-corners. Modeled after the 2026-05-11 VCO LO motivating case (PHASE_PLAN.md, DECISIONS #29). Section names lowercase to match common PDK convention.",
+  "union_schema_version": 1,
+  "name": "vco_lo_21x3",
+  "project": "vco_probe",
+  "testbench_id": "sim_yusheng/Test/maestro",
+  "rows": [
+    {
+      "row_name": "TT_Cold",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x08"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "tt"
+        }
+      ]
+    },
+    {
+      "row_name": "TT_RT",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x08"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "tt"
+        }
+      ]
+    },
+    {
+      "row_name": "TT_Hot",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x08"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "tt"
+        }
+      ]
+    },
+    {
+      "row_name": "FF_Cold",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x05"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ff"
+        }
+      ]
+    },
+    {
+      "row_name": "FF_RT",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x05"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ff"
+        }
+      ]
+    },
+    {
+      "row_name": "FF_Hot",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x05"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ff"
+        }
+      ]
+    },
+    {
+      "row_name": "SS_Cold",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0B"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ss"
+        }
+      ]
+    },
+    {
+      "row_name": "SS_RT",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0B"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ss"
+        }
+      ]
+    },
+    {
+      "row_name": "SS_Hot",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0B"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ss"
+        }
+      ]
+    },
+    {
+      "row_name": "FNSP_Cold",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x06"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "fnsp"
+        }
+      ]
+    },
+    {
+      "row_name": "FNSP_RT",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x06"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "fnsp"
+        }
+      ]
+    },
+    {
+      "row_name": "FNSP_Hot",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x06"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "fnsp"
+        }
+      ]
+    },
+    {
+      "row_name": "SNFP_Cold",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0A"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "snfp"
+        }
+      ]
+    },
+    {
+      "row_name": "SNFP_RT",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0A"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "snfp"
+        }
+      ]
+    },
+    {
+      "row_name": "SNFP_Hot",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0A"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "snfp"
+        }
+      ]
+    },
+    {
+      "row_name": "FF_ext_Cold",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x03"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ff_ext"
+        }
+      ]
+    },
+    {
+      "row_name": "FF_ext_RT",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x03"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ff_ext"
+        }
+      ]
+    },
+    {
+      "row_name": "FF_ext_Hot",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x03"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ff_ext"
+        }
+      ]
+    },
+    {
+      "row_name": "SS_ext_Cold",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0D"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ss_ext"
+        }
+      ]
+    },
+    {
+      "row_name": "SS_ext_RT",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0D"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ss_ext"
+        }
+      ]
+    },
+    {
+      "row_name": "SS_ext_Hot",
+      "vars": {
+        "temperature": [
+          "-40",
+          "25",
+          "105"
+        ],
+        "VDD": "1.8",
+        "ct_code": "0x0D"
+      },
+      "models": [
+        {
+          "file": "rf018.scs",
+          "block": "Global",
+          "test": "All",
+          "section": "ss_ext"
+        }
+      ]
+    }
+  ]
+}

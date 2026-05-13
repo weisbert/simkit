@@ -629,3 +629,25 @@ This was the exact "per-output convergence inside a converged test" scenario fla
 - Surfacing the raw eval-err message (the list payload often carries diagnostic text). Rejected for v1: the value field is null; the diagnostic stays in Maestro's results log. Future v1.1 could add a `error_message` optional field to eval_err rows if there's demand.
 
 **Open: column constraint at the DB layer.** DuckDB `results.status` is currently a free string per DECISIONS #21. If a future schema bump introduces a constraint, it must include `eval_err`. Not blocking v1.
+
+
+---
+
+## #36 — Phase 2 §6 Gate U2 verified via synthesised 21×3 VCO shape
+_Date: 2026-05-13_
+
+**Decision:** Gate U2 (Phase 2 §6 VCO LO acceptance) is verified end-to-end via a synthesised 21-row × 3-pt union shape pushed into the live `fnxSession0`. User did not have an actual VCO LO setup loaded on the test machine; per their request, I built the shape from the PHASE_PLAN.md / DECISIONS #29 description (7 process corners × 3 inductor-temperature bins = 21 corner-table rows; each row has a 3-value temperature sweep = 63 total sub-corners) as `tests/fixtures/unions/vco_lo_21x3.union.json`.
+
+**Push result**: session went 3 → 24 corner rows. All 21 pushed rows pull back byte-identical for `vars` + `models`. Zero mismatches, zero missing. Gate U2 PASS at the round-trip level.
+
+**Why synthesised, not actual VCO LO:** Acceptance-gate purpose is to verify the toolchain handles the 21-row scale. Whether the rows correspond to a real circuit or a synthetic name set doesn't change what the SKILL push / pull / explode logic exercises — they walk the same axl* APIs regardless. Synthetic fixture also lets the offline pytest portion (`TestGateU2VCOLoAcceptance`, 5 cases) run in CI without a live session.
+
+**Implications:**
+- `tests/fixtures/unions/vco_lo_21x3.union.json` is the permanent Gate U2 reference. Future regressions on the explode order or row-shape would surface here.
+- The pushed rows persist in `fnxSession0` until the user manually removes them (push is additive; no auto-cleanup). Acceptable per user's explicit request to "add them yourself".
+- Open Decision 8.6 (alphabetic-by-field-key explode order at scale) is **NOT fully validated** by this gate — each row sweeps only ONE field (`temperature`), so the multi-axis interaction case (e.g., temperature + VDD + section all sweeping inside one row) remains untested at scale. The Gate U3 synthetic 2×3×5 covers it at small scale (3 sweep fields per row); a future real bench with multi-axis sweeps inside one corner-group would close 8.6.
+- Caveat surfaced (already documented in spec §3.4): `temperature` sweep `["-40", "25", "105"]` explodes in **lex order** = `["-40", "105", "25"]`, so sub-corner indexing is NOT numerically intuitive (sub_0 = -40, sub_1 = 105, sub_2 = 25). User-side workaround is consistent leading-zero formatting like `["m40", "025", "105"]` or numeric prefixes; tool-side fix would require a per-field "sort key" override which is not in v1 scope.
+
+**Alternatives considered:**
+- Wait until user has actual VCO LO loaded. Rejected: the synthesised shape exercises the same code paths and acts as a permanent regression fixture for the 21-row scale.
+- Push to a sandbox session instead of `fnxSession0`. Rejected: user explicitly authorised pushing to the working session; pull-then-compare proves no data loss.

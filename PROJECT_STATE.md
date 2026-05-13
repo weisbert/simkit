@@ -1,6 +1,6 @@
 # Project State
 
-_Last updated: 2026-05-12 (overnight — Phase 2 §1-§4 + §5-offline + §6-U1/U3 all done; SKILL pull+push verified end-to-end against fnxSession0)_
+_Last updated: 2026-05-13 (morning — Phase 2 §6 Gate U2 closed via synthesised 21×3 VCO shape pushed into fnxSession0; offline regression pinned)_
 
 ## Current phase
 
