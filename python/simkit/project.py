@@ -26,6 +26,12 @@ _KNOWN_FIELDS = frozenset({
     "author",
     "testbench_aliases",
     "schema_version",
+    # Phase 2 §1 — `.union.json` sidecar dir override.
+    "unionsDir",
+    # Phase 3B §1 (DECISIONS #41) — measurement-template authoring layer dirs.
+    "templatesDir",
+    "signalGroupsDir",
+    "measurementsDir",
 })
 
 

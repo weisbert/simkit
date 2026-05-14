@@ -20,6 +20,7 @@ from simkit.cli import diff as diff_cmd
 from simkit.cli import ingest as ingest_cmd
 from simkit.cli import label as label_cmd
 from simkit.cli import list_runs as list_cmd
+from simkit.cli import measure as measure_cmd
 from simkit.cli import validate as validate_cmd
 
 
@@ -39,6 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd.add_subparser(sub)
     diff_cmd.add_subparser(sub)
     corners_cmd.add_subparser(sub)
+    measure_cmd.add_subparser(sub)
     return parser
 
 

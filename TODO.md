@@ -74,3 +74,64 @@ Driven by the VCO LO 2026-05-11 motivating case (21 columns × 3 points = 63 cor
 - [ ] Append new decisions to `DECISIONS.md` as they happen
 - [ ] Park any non-Phase-2 ideas into `PHASE_PLAN.md`
 - [ ] Keep README usage section current
+
+---
+
+## Phase 3B — Formula-Template Authoring (SKELETON DONE 2026-05-14)
+
+**Goal:** Close the Define layer. Skeleton that lets the user author + persist their own formula templates and apply them to a live Maestro session. NO pre-baked template library in v1.
+
+Spec at `docs/phase3b_measure_template_spec.md`. Eight design decisions in `DECISIONS.md` #38–#41, restore safety fix in #42. Final tally: Python 607/607, SKILL Tier-1 347/5. M1/M3/M4 offline-pinned; M2 live-verified on `fnxSession0`.
+
+### §1. Specification
+
+- [x] `docs/phase3b_measure_template_spec.md` — problem, three-sidecar data model, Maestro round-trip surface, CLI preview, acceptance gates, versioning, open decisions.
+- [x] `config/template_example.template.json` — worked example reverse-engineered from `fnxSession0`'s Rtime_clkout (real composite expression).
+- [x] `config/signal_group_example.siggroup.json` — minimal example.
+- [x] `config/measure_bundle_example.measure.json` — minimal example tying the above together.
+- [x] `docs/schema.md` §1 additive update — `templatesDir`, `signalGroupsDir`, `measurementsDir` fields added.
+
+### §2. Python loader + validator + paste-importer — DONE
+
+- [x] `python/simkit/template.py` (425 LOC, 29 cases in `test_template.py`).
+- [x] `python/simkit/signal_group.py` (165 LOC, 20 cases).
+- [x] `python/simkit/measure_bundle.py` (412 LOC, 24 cases).
+- [x] `python/simkit/template_render.py` (163 LOC, 15 cases).
+- [x] `python/simkit/template_paste.py` (258 LOC, 18 cases). Quote-preservation fix landed mid-flight (replaces `"/path"` → `"$SIG"` keeping outer quotes so render reconstitutes byte-equal to source).
+
+### §3. SKILL bridge — DONE
+
+- [x] `skill/pvtMeasure.il` (685 LOC) — `pvtMeasurePush` + `pvtMeasurePull` per spec §4.3.
+- [x] `skill/tests/testPvtMeasure.il` (244 LOC, +47 Tier-1 cases; SKILL Tier-1 300/5 → 347/5).
+- [x] **§3.V Verification gate** — `/tmp/probe_p3b_skill.py` ran the push → export-verify → pull-verify → cleanup cycle in 0.04 s wall on `fnxSession0`; baseline restored. Probe transcript recorded in Subagent B's report.
+
+### §5. `pvt measure` CLI — DONE
+
+- [x] All 12 subcommands wired in `python/simkit/cli/measure.py` (1374 LOC, 53 cases in `test_cli_measure.py`):
+      `new-template`, `list-templates`, `show-template`, `new-signal-group`, `list-signal-groups`,
+      `new-bundle`, `list-bundles`, `render`, `apply`, `pull`, `diff`, `restore`.
+- [x] `python/simkit/skill_bridge.py` extended +272 LOC: `pvt_measure_push` / `pvt_measure_pull` / `pvt_measure_restore` wrappers (27 cases in `test_skill_bridge_measure.py`).
+- [x] **Verification gate** — pytest covers each subcommand; live runtime verification of `apply` + `pull` + `restore` against `fnxSession0` clean (see Gates M2 + M3 below).
+
+### §6. End-to-end acceptance gates
+
+- [x] **Gate M1** — Paste-import faithfulness. Pinned as 3-case `GateM1PasteRoundTripTests` in `tests/test_template_paste.py`. Paste `fnxSession0`'s real `Rtime_clkout` → render with V_LOW=10, V_HIGH=90, signal=`/Vout` → byte-equal to source.
+- [x] **Gate M2** — Apply round-trip. **Live-verified 2026-05-14** against `fnxSession0` via `/tmp/verify_m2_m3_live.py`: `pvt measure apply config/voltage_outs_rise.measure.json` lands `Rtime_Vout` with the exact `_pasted_from` expression; existing 11 rows untouched. Offline pinning deferred (live capture suffices; M1 covers the offline contract).
+- [x] **Gate M3** — Snapshot bit-identical. **Live-verified 2026-05-14**: pull → restore (merge mode, post-DECISIONS #42) → pull → bit-identical (modulo `_`-prefixed keys and key order). Offline pinning deferred.
+- [x] **Gate M4** — Python-side validation. 8/8 negative cases pinned across `test_template.py` / `test_measure_bundle.py` / `test_template_render.py` (unbalanced parens, undeclared $PARAM, unreferenced param, quote imbalance, signal-group/template mismatch in both directions, missing required override, output-name collision).
+
+### §7. Maintenance — kept up alongside
+
+- [x] PROJECT_STATE.md updated.
+- [x] DECISIONS.md #38–#42 appended.
+- [x] PHASE_PLAN.md marks P3B done; A (sim orchestrator) flagged as next candidate.
+- [ ] README usage section — pending.
+
+### Deferred from Phase 3B v1 (do NOT block next phase):
+
+- Pre-baked template library (rise_time / fall_time / dutyCycle / overshoot / avg_current / etc.) — user authors against the framework for now; built-ins via a future `pvt measure install-builtins` command.
+- Multi-signal templates (v1 enforces exactly one `signal`-kind param per template).
+- Cross-project template sharing (user-home `~/.simkit/templates/`).
+- Snapshot template match-back (reverse-engineer a pulled snapshot into bundle + parameters).
+- Specs via `axlAddSpecToOutput` and user-defined Output columns.
+- Offline acceptance gates M2 + M3 (currently live-verified; would need captured fixture pair like Phase 2 Gate U1).

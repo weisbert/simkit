@@ -1,0 +1,14 @@
+{
+  "_doc": "Phase 3B §1 worked example. Applies the rise_time_threshold template to the voltage_outs group on the Test test of an fnxLib testbench. Expected rendered output: one row with output_name='Rtime_Vout', expression matching template._pasted_from.",
+  "measure_schema_version": 1,
+  "name": "voltage_outs_rise",
+  "project": "my_block",
+  "testbench_id": "fnxLib/my_block_tb/schematic",
+  "test_name": "Test",
+  "apply": [
+    {
+      "template": "rise_time_threshold",
+      "signal_group": "voltage_outs"
+    }
+  ]
+}

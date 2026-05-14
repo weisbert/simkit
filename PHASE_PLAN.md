@@ -6,20 +6,29 @@ This file is a **scratch pad for ideas that are NOT Phase 1**. When an idea pops
 
 ---
 
-## Phase 2: PVT-Union Builder — PROMOTED to active phase 2026-05-12
+## Phase 2: PVT-Union Builder — DONE 2026-05-13
 
-Picked from the candidate list below; see `TODO.md` for current task state and `docs/phase2_pvt_union_spec.md` for the locked §1 spec. Motivating case (VCO LO 2026-05-11, 21 columns × 3 points = 63 corners) is the §6 Gate U2 acceptance target. The 21× explosion is purely an authoring-layer problem — the tool lets the user *describe* the union once (sidecar JSON) and emit the 63 corners mechanically.
+Picked 2026-05-12 from the original Phase 3 candidate list; closed across §1–§6 in `TODO.md` with all four §6 gates offline-pinned. See `docs/phase2_pvt_union_spec.md` for the locked §1 spec. Motivating case (VCO LO 2026-05-11, 21 columns × 3 points = 63 corners) became the §6 Gate U2 acceptance fixture.
+
+## Phase 3B: Formula-Template Authoring — PROMOTED to active phase 2026-05-14
+
+Picked from the candidate list below; see `TODO.md` for current task state and `docs/phase3b_measure_template_spec.md` for the locked §1 spec. **Goal:** complete the **Define** layer of the system architecture by giving the user a way to declare "what to measure" with the same authoring economics Phase 2 gave them for "what conditions to measure under" (PVT unions). v1 is a working skeleton — no pre-baked rise_time / dutyCycle / avg_current library; the user authors those against the framework.
+
+Rationale for going B before A (sim orchestrator): Phase 3A explicitly waits on a stable Define layer per this file's earlier note; running the orchestrator with measurements still hand-edited in Maestro Calculator just batches the wrong configuration. See DECISIONS #38 for the longer rationale.
 
 **Candidates NOT picked this phase** (kept here for the next phase boundary):
 
-- **Formula templates** (pains 1.b, 1.c) — library of reusable measurement formulas (rise time, dutyCycle, etc.), apply across many signals at once.
+- **Sim orchestrator** (pain: manually clicking N corner × M test combinations in Maestro) — was the original "Phase 3 (tentative)" candidate. Promote next, once P3B is in daily use.
 - **Design-ref bulk update** (pain 1.f) — when bumping Maestro copy/version, update all tests' `design` pointers in one shot.
+- **Report generator** — auto-PDF (number tables + waveform PNGs + netlist diff vs prior slice) over a slice from Phase 1's data layer.
+- **Auto-hook on Maestro sim completion** — eliminate the manual `PvtSave` call.
+- **Standard TB generator** — parameterized symbol gen + standard skeleton + heavy/lite variant switching.
 
 **Principle:** one helper, end-to-end, with a real user (you) validating. Resist doing all three at once.
 
 ---
 
-## Phase 3 (tentative): simulation orchestrator (bite-sized first cut)
+## Phase 3A (tentative — next after 3B): simulation orchestrator (bite-sized first cut)
 
 Not "batch everything." First cut:
 

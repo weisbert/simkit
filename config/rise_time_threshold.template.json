@@ -1,0 +1,17 @@
+{
+  "_doc": "Phase 3B §1 worked example. Reverse-engineered from fnxSession0's Rtime_clkout (captured 2026-05-14). Threshold numbers parameterised so the same template can apply at 10-90, 20-80, etc.",
+  "template_schema_version": 1,
+  "name": "rise_time_threshold",
+  "short_alias": "Rtime",
+  "expression": "average(riseTime(vtime('tran \"$SIG\") 0 nil VAR(\"VDD\") nil $V_LOW $V_HIGH t \"time\"))",
+  "params": [
+    {"key": "SIG",    "kind": "signal", "doc": "Voltage signal to measure rise time on"},
+    {"key": "V_LOW",  "kind": "number", "default": "10", "doc": "Lower threshold (percent)"},
+    {"key": "V_HIGH", "kind": "number", "default": "90", "doc": "Upper threshold (percent)"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "s",
+  "_pasted_from": "average(riseTime(vtime('tran \"/Vout\") 0 nil VAR(\"VDD\") nil 10 90 t \"time\"))"
+}

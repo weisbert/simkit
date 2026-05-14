@@ -1,0 +1,12 @@
+Test,Name,Type,Output,Plot,Save,Spec
+Test,,net,/Vin,t,,
+Test,,net,/Vout,,t,
+Test,,net,/AVDD,,t,
+Test,,net,/AGND,,t,
+Test,Rtime_clkout,expr,average(riseTime(vtime('tran "/Vout") 0 nil VAR("VDD") nil 10 90 t "time")),t,,
+Test,PN_wave,expr,rfEdgePhaseNoise(?result "pnoise_sample_pm0" ?eventList 'nil),t,,
+Test,PN_1M,expr,value(PN_wave 1000000),t,,
+Test,PN_3M,expr,value(PN_wave 3000000),t,,
+Test,PN_10M,expr,value(PN_wave 10000000),t,,
+Test,PN_50M,expr,value(PN_wave 50000000),t,,
+Test,PN_100M,expr,value(PN_wave 100000000),t,,

@@ -697,3 +697,136 @@ Key empirical facts:
 - Offline byte-identical: emitter output equals `fnxsession0_baseline.csv` exactly, pinned as 5-case `TestGateU4SidecarToCSV`.
 - Live runtime-verify: CLI `pvt corners build` produces the same bytes as the offline emitter; smoke test `diff` against ground truth is clean.
 - **NOT YET verified**: end-to-end recovery flow (kill Maestro → restart → `Tools → Corners → Import → built.csv` → confirm 3 corners reappear with right vars/sections). Single physical action owed by user; logged in PROJECT_STATE.md "Owed" section.
+
+---
+
+## #38 — Phase 3B promoted: Formula-template authoring layer
+_Date: 2026-05-14_
+
+**Decision:** Promote Phase 3B (Formula Templates) to active phase, ahead of all other Phase 3 candidates (sim orchestrator, design-ref bulk update, report generator, auto-hook, standard TB generator). Goal: complete the **Define** layer of the system architecture by giving the user a way to declare "what to measure" with the same authoring economics they got from Phase 2's "what conditions to measure under" (PVT unions).
+
+**Why now:**
+- Phase 1 closed the Persist + Consume root; Phase 2 closed the corners side of the Define layer. P3B is the symmetric completion: measurements side of Define.
+- Phase 3A (sim orchestrator) explicitly waits on a stable Define layer per `PHASE_PLAN.md`. Building the orchestrator while measurements are still hand-edited in Maestro Calculator means the batch flows configure the wrong things on every run.
+- User's framing 2026-05-14: "剩下的几个都是痛点，我们得好好聊聊，实现起来估计有不少坑" — B is the smallest scope among the painful Phase 3 candidates; A/D/F are bigger commits that benefit from going second.
+
+**Scope locked:** v1 = a working skeleton that lets the user author + persist their own formula templates and apply them to a live Maestro session. NO pre-baked template library in v1 — rise_time, dutyCycle, etc. are user-authored against this scaffold. Specific built-in templates land in a later iteration once the framework shape is right.
+
+**Alternatives considered:**
+- Sim orchestrator first. Rejected per the rationale above — wrong layer order.
+- Standard TB generator first. Rejected: bigger scope (symbol generation + skeleton assembly + variant switching), less obvious leverage on the Phase 1 data layer.
+- Skip B, jump to A. Rejected: leaves measurements as the hand-edited weak link; orchestrator's "auto-run + auto-ingest" still ingests the wrong measurements.
+
+---
+
+## #39 — Phase 3B core decisions (1–5b + F1–F3)
+_Date: 2026-05-14_
+
+**Decision:** Eight decisions locked during the 2026-05-14 Phase 3B spec kickoff. Recorded together because they form a coherent design and reference each other:
+
+| # | Decision | Notes |
+|---|---|---|
+| P3B.1 | Template expression = arbitrary composite calculator expression + `$PARAM` placeholders. | Not bound to a single built-in (rise_time / average / etc.). Supports multi-function composites — the live `fnxSession0` Rtime_clkout `average(riseTime(vtime('tran "/Vout") 0 nil VAR("VDD") nil 10 90 t "time"))` is a representative case. |
+| P3B.2 | Templates live project-level in `.pvtproject`'s `templatesDir/`. | Mirrors Phase 2 `unionsDir`. User-level (cross-project) library deferred to a later iteration. |
+| P3B.3 | Apply unit = template-set × signal-group, cartesian product. | Two named collections; user organises sets and groups so the product is meaningful per #P3B.F1. |
+| P3B.4 | Lands on Maestro's ADE-XL Outputs table via `axlAddOutputExpr`. | Confirmed by live probe 2026-05-14; see #40 for the API map. |
+| P3B.5a | Template authoring lives entirely on the Python side (JSON files). Cadence is not consulted during template construction. | Avoids a live-session dependency in the most common authoring flow. |
+| P3B.5b | Paste-import is a first-class flow: user pastes a working concrete Cadence expression; software extracts a template with placeholders. | User language: "也允许用户粘贴cadence的成品公式，软件自动替换为通用模板". |
+| P3B.F1 | Set × Group cartesian: not-applicable combinations are hard-applied; Maestro reports errors at sim time. | No template-side metadata for "accepts current vs voltage". Lowest authoring friction. |
+| P3B.F2 | Paste-to-template heuristic: signal paths auto-parameterized to `$SIG_n`; numeric literals are an interactive CLI choice ("parameterise 0.45? [y/N]"). | Signals are obviously knobs; numbers may be domain constants (e.g. 0.5 ≈ half-VDD) and over-parameterising them hurts UX. |
+| P3B.F3 | Syntax check at template save lives **in Python only** (revised from initial "Cadence-side check"). Cadence errors surface implicitly at apply time. | Initial assumption was that Maestro exposes a parse-without-eval entry. Live probe (see #40) showed that `axlAddOutputExpr` accepts malformed expressions (unknown function names quietly stored as `(fn args)`, mismatched parens silently no-op) so there is no clean Cadence syntax-check API to call. Python checks: balanced parens/quotes/braces; `$PARAM` references all declared in `params` list; no unknown `$PARAM` left after substitution. |
+
+**Why bundled into one entry:** These eight decisions reference each other (e.g. F1 only makes sense given P3B.3's cartesian semantics; F3 was a revision driven by #40's probe finding). Future readers should see them as one design move, not eight independent choices.
+
+---
+
+## #40 — Maestro Outputs-table API map (Phase 3B foundation)
+_Date: 2026-05-14_
+
+**Decision:** Phase 3B's Maestro-side surface is built on the following five entries, all confirmed-existent on `fnxSession0` via skillbridge probe 2026-05-14:
+
+| API | Direction | Use in P3B |
+|---|---|---|
+| `axlAddOutputExpr(sess, test, name, ?expr E, ?evalType "point\|corners\|sweeps\|maa", ?exprDPLs DPLs, ?plot g, ?save g) => t / t_error` | write | **Push path.** Single-row or DPL-batch. evalType only settable via this entry (not the CSV path). |
+| `axlAddOutputSignal(sess, test, signalName, ?type "net\|terminal", ?outputName, ?plot, ?save) => t / t_error` | write | Out of scope for v1 template flow (signal-tap outputs are a different concept). Phase 3B's pull path passes them through unchanged. |
+| `axlDeleteOutput(sess, test, name, ?type "expr\|signal") => t / t_error` | write | Cleanup. Also used in dry-run-and-rollback patterns. |
+| `axlOutputsExportToFile(sess, csvPath, ?omitTestCol) => t / nil` | read | **Pull path.** CSV columns: `Test, Name, Type, Output, Plot, Save, Spec`. Type ∈ {`net`, `expr`}. |
+| `axlOutputsImportFromFile(sess, csvPath, ?operation "merge\|overwrite\|retain", ?test) => t / nil` | write | File-based push alternative. Less granular than `axlAddOutputExpr` (no per-row error, no evalType, no dry-run), but useful for "restore from snapshot" flows. Not the primary v1 push path. |
+
+**Functions that do NOT exist on this Cadence version** (probed 2026-05-14, all returned `nil` via `getd`):
+- `axlGetOutputs`, `axlGetOutput`, `axlGetOutputName`, `axlGetOutputExpr` — no programmatic enumerator or accessor exists. The CSV export is the only read path.
+- `axlPutOutputExpr`, `axlSetOutputExpr` — no in-place expression mutation. Update = add with same name (silently no-ops if the new expression is malformed; see #39 P3B.F3).
+- `calVal` / `calParse` / `calCheck` / `axlEvalExpr` / `axlExprParse` — no parse-without-evaluate entry. Note: `calcVal` (different casing) DOES exist but is a post-sim value lookup, not a syntax check.
+
+**Probe-derived behavioural quirks** (documented here so they don't have to be re-discovered):
+- `axlAddOutputExpr` returns `t` even when the input expression is malformed (unbalanced parens) or references an unknown function. Malformed-parens add silently no-ops; unknown-function add stores the expression in LISP-rewritten form (e.g. `totally_not_a_function(VT("/X"))` becomes `(totally_not_a_function VT("/X"))` in the CSV).
+- For an output `name` that already exists in `(test, type)`, `axlAddOutputExpr` updates in place (no need to delete first), but the silent-no-op-on-malformed behaviour applies: a bad new expression leaves the old one in place.
+- `axlOutputsExportToFile`'s CSV omits `evalType`. Round-trip through CSV loses evalType information. Phase 3B's authoritative source is therefore the template sidecar (which carries `evalType`), and the CSV is the snapshot-and-recovery format.
+- Signal-tap rows (Type=net) have empty `Name`; expression rows always have `Name`. Pull-path filter for "templated outputs" is `Type == "expr" AND Name != ""`.
+
+**Reference fixture:** `tests/fixtures/scratch_p3b_fnxsession0_outputs.csv` — captured live 2026-05-14 from `fnxSession0` (Test bench, 11 outputs: 4 net + 7 expr including the multi-function-composite Rtime_clkout). Promoted to a proper fixture name during §3 (SKILL bridge) implementation.
+
+**Alternatives considered:**
+- Use `axlOutputsImportFromFile` as the primary push path. Rejected for v1: no per-row error reporting (we'd report "CSV import failed" with no row-level detail), no dry-run, no evalType. Retained as the snapshot-restore path.
+- Use Maestro's `calcVal` as a parse check. Rejected: `calcVal` only operates on already-added outputs and only after a sim run; not a parse-only entry.
+
+---
+
+## #41 — Phase 3B sidecar tri-architecture: templates × signal-groups × measurement bundles
+_Date: 2026-05-14_
+
+**Decision:** Phase 3B has **three** project-level sidecar types, not one. The split is forced by P3B.3's "set × group" cartesian and by P3B.5b's paste-to-template authoring:
+
+| Sidecar | Location | One file = | Schema responsibility |
+|---|---|---|---|
+| **Template** | `<templatesDir>/<name>.template.json` | One reusable formula with `$PARAM` placeholders | Expression + param list + default evalType/plot/save metadata. No signal paths, no test names. |
+| **Signal group** | `<signalGroupsDir>/<name>.siggroup.json` | One named collection of signal paths | Just a list of paths, no metadata about voltage-vs-current (per P3B.F1). |
+| **Measurement bundle** | `<measurementsDir>/<name>.measure.json` | One named application: pick a template-set + a signal-group + a target test → renders to N concrete output rows | The "assignment" object; the analog of Phase 2 unions. |
+
+**Sidecar paths default to** `./templates/`, `./signal_groups/`, `./measurements/` under the `.pvtproject`'s directory (mirrors Phase 2's `unionsDir`). All three are configurable via `.pvtproject` keys (`templatesDir`, `signalGroupsDir`, `measurementsDir`) — additive schema update, no version bump.
+
+**Apply mechanics:**
+- `pvt measure apply <bundle>` resolves the bundle's referenced templates + signal-group; renders each (template × signal) pair into a concrete output expression; pushes via `axlAddOutputExpr` per-row (DPL batch when N ≥ ~5).
+- Output name format **v1**: `<template.short_alias>_<signal_basename>`, where `signal_basename` is the last path segment with `/` stripped. Example: template `Rtime` (short_alias) × signal `/Vout` → output name `Rtime_Vout`. Matches the fnxSession0 convention (`Rtime_clkout` style).
+- Apply is **additive by default** — uses `axlAddOutputExpr` per row, not `axlOutputsImportFromFile overwrite`. User can pass `--replace` to delete existing same-named outputs first.
+
+**Pull mechanics (v1):**
+- `pvt measure pull <out>.snapshot.json` calls `axlOutputsExportToFile`, parses the CSV, writes a "raw snapshot" (no template match-back). The snapshot preserves enough fidelity to round-trip via `axlOutputsImportFromFile overwrite` and recover after a Maestro crash.
+- **Template match-back is deferred to v2.** The hard part of reversing a concrete expression to (template + params) is not on the critical path for the skeleton, and v1 ships without it.
+
+**Round-trip identity contracts:**
+- (Apply) Bundle → render → Maestro → snapshot pull → snapshot push (overwrite) → snapshot pull = bit-identical snapshot. Tests: §6 Gates M2 + M3.
+- (Authoring) Paste-import an existing fnxSession0 expression → template JSON → render-with-original-params → expression equals the pasted source modulo whitespace. Tests: §6 Gate M1.
+- (Validation) Template with unbalanced parens / unknown `$PARAM` / quote-imbalance is rejected by the Python loader at save time. Tests: §6 Gate M4.
+
+**Why three sidecars and not one merged "measurement-config.json":**
+- Templates are reused across multiple bundles. Inlining defeats reuse.
+- Signal groups are reused across multiple template applications.
+- Measurement bundles are the only place "which test gets which outputs" is recorded. Co-mingling with templates/signal-groups would force re-validation of the entire file when any of the three things change.
+
+**Why measurement bundles are NOT auto-derived from "apply" CLI invocations:**
+- Ad-hoc apply (`pvt measure apply --template T --signal-group SG --test Test`) is a transient operation, no sidecar required. Good for one-offs.
+- Persistent named bundles (`pvt measure apply <bundle.measure.json>`) is the recommended flow for repeat work and recovery. Authoring a bundle = create the JSON file (or `pvt measure new-bundle` helper, similar to Phase 1's `pvt label`).
+
+**Alternatives considered:**
+- One merged "measurements.json" per project. Rejected: poor reuse, large blast radius on any edit.
+- Two sidecars (drop signal-groups, inline signal lists in bundles). Rejected: signal groups ARE reused across bundles (e.g. "high_speed_clocks" used in both `core_review.measure.json` and `crosstalk_check.measure.json`); inlining duplicates the list and de-syncs.
+- Apply-and-discard, no bundle persistence. Rejected: defeats P3B.3 (you'd type the set × group every invocation) and the crash-recovery value prop.
+
+---
+
+## #42 — `pvt measure restore` defaults to `merge`, not `overwrite` (safety fix)
+_Date: 2026-05-14_
+
+**Decision:** `pvt measure restore` (and the `pvt_measure_restore` Python wrapper) default `operation` to **`merge`**, not the originally-shipped `overwrite`. Users who genuinely want to wipe-and-replace must opt in explicitly via `--operation overwrite`, and the CLI prints a one-line safety note when they do.
+
+**Why:** Live verification 2026-05-14 of P3B Gates M2 + M3 against `fnxSession0` exposed a sharp edge: `pvt measure pull` defaults to `--include-signals=False` (snapshot captures only `expr`-type rows, by design — Phase 3B operates on expression outputs, not signal taps). `pvt measure restore` then defaulted to `overwrite`. The combination silently wiped `fnxSession0`'s 4 `net`-type signal-tap rows (Vin, Vout, AVDD, AGND) because `axlOutputsImportFromFile ?operation "overwrite"` does **not** mean "replace same-named rows" (which the SKILL doc text plausibly implies) — empirically, it means "replace the entire Outputs table with the imported CSV's contents." Rows not in the imported CSV are removed.
+
+**Recovery:** Re-imported the live-captured baseline CSV (4 net + 7 expr) via direct `axlOutputsImportFromFile overwrite` to put fnxSession0 back to 11 rows. Then changed the CLI/wrapper defaults to `merge` so the same workflow can't bite anyone again. Both the live verify script (`/tmp/verify_m2_m3_live.py`) and the offline test suite (607/607) pass with the new default.
+
+**Why not the alternative — change pull's default to include signals:**
+Considered, rejected for v1. `pvt measure pull` is the audit + "what templates are applied" surface; including signal-tap rows pollutes the snapshot for that use case. Keeping pull lean and making restore conservative is the safer split. For a truly faithful crash-recovery snapshot the user can still run `pvt measure pull --include-signals`, and pair it with `pvt measure restore --operation overwrite` if needed; both opt-ins.
+
+**Test coverage:** `test_cli_measure.py::RestoreCliTests::test_restore_csv_ok` and `test_skill_bridge_measure.py::PvtMeasureRestoreTests::test_calls_axlOutputsImportFromFile_with_overwrite` (now updated to assert `merge`) pin the new default. The existing `test_restore_explicit_operation` already covered the `--operation merge` path explicitly.
+
+**Verified live 2026-05-14:** With the new defaults, full M2 + M3 round trip on `fnxSession0` is clean (M2: bundle apply → row landed byte-equal; M3: pull → restore → pull bit-identical), and the cleanup step (`axlDeleteOutput`) returns the session to its 11-row baseline. Net signal-tap rows survive intact.

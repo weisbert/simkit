@@ -1,0 +1,6 @@
+{
+  "_doc": "Phase 3B §1 worked example. Single voltage signal from fnxSession0.",
+  "signal_group_schema_version": 1,
+  "name": "voltage_outs",
+  "signals": ["/Vout"]
+}
