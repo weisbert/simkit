@@ -1,0 +1,12 @@
+{
+  "_doc": "DCO2G clock-domain nets from the user's real DCOBUF Outputs CSV. Five distinct nets that each receive Freq / DutyC / Rtime / Ftime measurements in the source — i.e. 4*5 = 20 hand-written CSV rows collapsed by the bundle into 4 apply entries.",
+  "signal_group_schema_version": 1,
+  "name": "dco2g_clocks",
+  "signals": [
+    "/bufp",
+    "/bufn",
+    "/BT2GTX_P",
+    "/BT2GTX_N",
+    "/wb2grx_inp"
+  ]
+}

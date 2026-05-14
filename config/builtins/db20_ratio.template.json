@@ -1,0 +1,15 @@
+{
+  "_doc": "20*log10(OUT_A / OUT_B) ratio between two upstream outputs. Common for amplitude-mismatch checks (e.g. I/Q magnitude mismatch in dB).",
+  "template_schema_version": 1,
+  "name": "db20_ratio",
+  "short_alias": "dB20",
+  "expression": "dB20(($OUT_A / $OUT_B))",
+  "params": [
+    {"key": "OUT_A", "kind": "string", "doc": "Numerator output name."},
+    {"key": "OUT_B", "kind": "string", "doc": "Denominator output name."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "dB"
+}

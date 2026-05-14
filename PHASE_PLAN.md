@@ -10,9 +10,9 @@ This file is a **scratch pad for ideas that are NOT Phase 1**. When an idea pops
 
 Picked 2026-05-12 from the original Phase 3 candidate list; closed across §1–§6 in `TODO.md` with all four §6 gates offline-pinned. See `docs/phase2_pvt_union_spec.md` for the locked §1 spec. Motivating case (VCO LO 2026-05-11, 21 columns × 3 points = 63 corners) became the §6 Gate U2 acceptance fixture.
 
-## Phase 3B: Formula-Template Authoring — PROMOTED to active phase 2026-05-14
+## Phase 3B: Formula-Template Authoring — DONE 2026-05-14 (skeleton + v1.1 builtins)
 
-Picked from the candidate list below; see `TODO.md` for current task state and `docs/phase3b_measure_template_spec.md` for the locked §1 spec. **Goal:** complete the **Define** layer of the system architecture by giving the user a way to declare "what to measure" with the same authoring economics Phase 2 gave them for "what conditions to measure under" (PVT unions). v1 is a working skeleton — no pre-baked rise_time / dutyCycle / avg_current library; the user authors those against the framework.
+Picked from the candidate list below; see `TODO.md` for the breakdown and `docs/phase3b_measure_template_spec.md` for the locked §1 spec. **Goal achieved:** completed the **Define** layer of the system architecture by giving the user a way to declare "what to measure" with the same authoring economics Phase 2 gave them for "what conditions to measure under" (PVT unions). Skeleton landed earlier on 2026-05-14; v1.1 same-day added a 17-template builtins library reverse-engineered from one of the user's real production Outputs CSVs (sim_DCOBUF), plus `pvt measure install-builtins` CLI, plus a walkthrough fixture that proves the framework collapses 20 hand-written CSV rows into a 4-line measure bundle.
 
 Rationale for going B before A (sim orchestrator): Phase 3A explicitly waits on a stable Define layer per this file's earlier note; running the orchestrator with measurements still hand-edited in Maestro Calculator just batches the wrong configuration. See DECISIONS #38 for the longer rationale.
 

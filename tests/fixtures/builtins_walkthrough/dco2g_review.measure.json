@@ -1,0 +1,14 @@
+{
+  "_doc": "Walkthrough bundle: 4 apply entries collapse 20 hand-written DCOBUF expr rows (5 clock nets × {Freq, DutyC, Rtime, Ftime}) into one measure-bundle JSON. Renders byte-for-byte equal to the source rows — see tests/test_builtins_walkthrough.py. The dco2g_supplies.siggroup.json fixture in this directory is intentionally NOT referenced here: its 4 nets share basenames (/VDD, /VDD, /PLUS, /PLUS) and would collide on output_name under v1 short_alias+basename naming. The user's source CSV disambiguates such cases by hand-numbering (Iavg_1, Iavg_2, ...); the framework will need a per-signal alias map in v2 to absorb that idiom natively.",
+  "measure_schema_version": 1,
+  "name": "dco2g_review",
+  "project": "dcobuf_demo",
+  "testbench_id": "DCOBUF_LIB/sim_DCOBUF/schematic",
+  "test_name": "sim_DCOBUF",
+  "apply": [
+    {"template": "freq_window",       "signal_group": "dco2g_clocks"},
+    {"template": "duty_cycle_window", "signal_group": "dco2g_clocks"},
+    {"template": "rise_time_auto",    "signal_group": "dco2g_clocks"},
+    {"template": "fall_time_auto",    "signal_group": "dco2g_clocks"}
+  ]
+}

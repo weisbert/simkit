@@ -127,10 +127,21 @@ Spec at `docs/phase3b_measure_template_spec.md`. Eight design decisions in `DECI
 - [x] PHASE_PLAN.md marks P3B done; A (sim orchestrator) flagged as next candidate.
 - [ ] README usage section — pending.
 
-### Deferred from Phase 3B v1 (do NOT block next phase):
+### Phase 3B v1.1 — Builtins library (DONE 2026-05-14)
 
-- Pre-baked template library (rise_time / fall_time / dutyCycle / overshoot / avg_current / etc.) — user authors against the framework for now; built-ins via a future `pvt measure install-builtins` command.
-- Multi-signal templates (v1 enforces exactly one `signal`-kind param per template).
+Same-day extension after the skeleton stabilised. 17-template library + install CLI + walkthrough fixture, all derived from one of the user's real production Outputs CSVs (sim_DCOBUF, 130 rows). DECISIONS #43 captures the inventory + the three shape choices (ANALYSIS-as-param, signal+string edge_delay, collision-as-loud-failure).
+
+- [x] 17 builtins authored under `config/builtins/*.template.json`: `i_avg_window`, `i_avg_full`, `freq_window`, `duty_cycle_window`, `rise_time_auto`, `fall_time_auto`, `rise_time_fixed`, `fall_time_fixed`, `dft_window`, `dft_mag_at_freq`, `dft_phase_at_freq`, `db20_ratio`, `edge_delay_avg`, `edge_delay_wave`, `cycle_wrap_positive`, `phase_diff_wrap`, `value_at`.
+- [x] `pvt measure install-builtins [--force] [--names …] [--list]` CLI in `python/simkit/cli/measure.py`. Default refuses to overwrite existing templates; `--force` overwrites; `--names` installs a subset; `--list` dry-runs.
+- [x] `tests/test_builtins.py` (5 cases) — load + render every builtin, byte-for-byte against 17 reverse-engineered DCOBUF formulas.
+- [x] `tests/test_cli_measure.py::InstallBuiltinsCliTests` (8 cases) — empty-install / dry-run / `--names` subset / unknown-name reject / collision-refuse / `--force` overwrite / missing-project / post-install listable.
+- [x] `tests/fixtures/builtins_walkthrough/` + `tests/test_builtins_walkthrough.py` (4 cases) — 4-entry bundle collapses 20 hand-written DCOBUF rows; signal-basename collision pinned as a deliberate `RenderError`.
+- [x] Python suite 598 → 602 / 0.
+
+### Deferred from Phase 3B v1.1 → v1.2 (do NOT block next phase):
+
+- **Per-signal alias map** (to absorb the user's `Iavg_1, Iavg_2, …` hand-numbering idiom on supplies whose paths share basenames). Walkthrough pinned the collision behaviour; v1.2 should let a signal_group declare `aliases: {"path": "label"}` per entry.
+- Multi-signal templates (v1 enforces ≤1 `signal`-kind param per template; edge_delay uses 1 signal + 1 string ref as the workaround).
 - Cross-project template sharing (user-home `~/.simkit/templates/`).
 - Snapshot template match-back (reverse-engineer a pulled snapshot into bundle + parameters).
 - Specs via `axlAddSpecToOutput` and user-defined Output columns.

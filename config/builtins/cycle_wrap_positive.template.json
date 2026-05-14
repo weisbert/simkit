@@ -1,0 +1,15 @@
+{
+  "_doc": "If OUT_NAME is negative, add one PERIOD_EXPR to wrap it into [0, period). Used downstream of edge_delay_avg when the reference edge can be ahead OR behind by less than a period.",
+  "template_schema_version": 1,
+  "name": "cycle_wrap_positive",
+  "short_alias": "Twrap",
+  "expression": "if(($OUT_NAME < 0) then ($OUT_NAME + $PERIOD_EXPR) else $OUT_NAME)",
+  "params": [
+    {"key": "OUT_NAME",    "kind": "string", "doc": "Upstream output name (e.g. an edge_delay_avg result)."},
+    {"key": "PERIOD_EXPR", "kind": "string", "default": "(1 / VAR(\"flo\"))", "doc": "Period (Cadence expression). The default assumes a 'flo' var holds the frequency; override per project."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "s"
+}

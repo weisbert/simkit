@@ -1,0 +1,20 @@
+{
+  "_doc": "Average delay between SIG_A rising edge and SIG_B rising edge, threshold-crossed, cycle-by-cycle, then averaged. v1 'one signal + one string-ref' shape lets SIG_A iterate a signal_group while SIG_B stays fixed (N-vs-1 typical use). Pair with cycle_wrap_positive if delays can wrap past zero.",
+  "template_schema_version": 1,
+  "name": "edge_delay_avg",
+  "short_alias": "Tedge",
+  "expression": "average((cross(clip(vtime('$ANALYSIS \"$SIG_A\") $T_START $T_END) $THRESH 1 \"$EDGE\" t \"cycle\" nil) - cross(clip(vtime('$ANALYSIS \"$SIG_B\") $T_START $T_END) $THRESH 1 \"$EDGE\" t \"cycle\" nil)))",
+  "params": [
+    {"key": "SIG_A",    "kind": "signal", "doc": "Iterated over the signal_group."},
+    {"key": "SIG_B",    "kind": "string", "doc": "Fixed reference path (override per bundle entry, e.g. \"/clk_ref\")."},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_3\")"},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_4\")"},
+    {"key": "THRESH",   "kind": "string", "default": "(VAR(\"VDD\") / 2)", "doc": "Crossing threshold (Cadence expression)."},
+    {"key": "EDGE",     "kind": "string", "default": "rising", "doc": "rising | falling | either."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "s"
+}

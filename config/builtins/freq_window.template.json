@@ -1,0 +1,17 @@
+{
+  "_doc": "Periodic-signal frequency over a transient time window.",
+  "template_schema_version": 1,
+  "name": "freq_window",
+  "short_alias": "Freq",
+  "expression": "frequency(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END))",
+  "params": [
+    {"key": "SIG",      "kind": "signal", "doc": "Voltage net path."},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran", "doc": "tran | pss | dc | ac."},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_1\")"},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_2\")"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "Hz"
+}

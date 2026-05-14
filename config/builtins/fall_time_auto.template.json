@@ -1,0 +1,19 @@
+{
+  "_doc": "Fall time at V_LOW%-V_HIGH% of the auto-detected envelope of the clipped waveform. Same body as rise_time_auto with thresholds reversed (V_LOW=90, V_HIGH=10) — Maestro's riseTime() interprets reversed thresholds as fall.",
+  "template_schema_version": 1,
+  "name": "fall_time_auto",
+  "short_alias": "Ftime",
+  "expression": "average(riseTime(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END) ymin(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END)) nil ymax(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END)) nil $V_LOW $V_HIGH t \"time\"))",
+  "params": [
+    {"key": "SIG",      "kind": "signal"},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_1\")"},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_2\")"},
+    {"key": "V_LOW",    "kind": "number", "default": "90"},
+    {"key": "V_HIGH",   "kind": "number", "default": "10"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "s"
+}

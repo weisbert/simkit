@@ -1,0 +1,15 @@
+{
+  "_doc": "Scalar value of an existing waveform output at x-coordinate X. Generic helper for PN spot values (value(phaseNoise 1000)), DFT-trace sampling, transfer-function probes, etc. X is interpreted on the waveform's native x-axis (frequency for spectra, time for transient).",
+  "template_schema_version": 1,
+  "name": "value_at",
+  "short_alias": "Val",
+  "expression": "value($OUT_NAME $X)",
+  "params": [
+    {"key": "OUT_NAME", "kind": "string", "doc": "Upstream output name."},
+    {"key": "X",        "kind": "number", "doc": "X-axis point (Hz, s, etc.) — depends on the upstream output's axis."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": ""
+}

@@ -1,0 +1,15 @@
+{
+  "_doc": "Wrap a phase-difference value to be signed around the OFFSET target (in degrees). With OFFSET=90 this re-centres an I-Q phase difference around 0: result = D-90 (if D>0) else D+270. Useful for spec-checking quadrature accuracy.",
+  "template_schema_version": 1,
+  "name": "phase_diff_wrap",
+  "short_alias": "IQwrap",
+  "expression": "if(($OUT_NAME > 0) then ($OUT_NAME - $OFFSET) else ($OUT_NAME + (360 - $OFFSET)))",
+  "params": [
+    {"key": "OUT_NAME", "kind": "string", "doc": "Upstream output (e.g. a phase-difference computed elsewhere)."},
+    {"key": "OFFSET",   "kind": "number", "default": "90", "doc": "Expected nominal phase offset in degrees."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "deg"
+}

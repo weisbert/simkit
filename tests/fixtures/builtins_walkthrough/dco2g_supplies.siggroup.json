@@ -1,0 +1,11 @@
+{
+  "_doc": "Four DCO2G supply / terminal nets from the user's DCOBUF CSV. Each gets an Iavg over the t_1..t_2 window — collapses 4 hand-written i_avg_window expressions into 1 bundle entry.",
+  "signal_group_schema_version": 1,
+  "name": "dco2g_supplies",
+  "signals": [
+    "/I_BUF2G/DCO2G_buf_to_adpll/VDD",
+    "/I_BUF2G/I_rxbuf_lp/VDD",
+    "/I82/L13/PLUS",
+    "/I82/L0/PLUS"
+  ]
+}

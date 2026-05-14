@@ -1,0 +1,20 @@
+{
+  "_doc": "Per-cycle delay waveform between SIG_A and SIG_B (same body as edge_delay_avg without the outer average). Useful for plotting delay vs. cycle / corner sweep.",
+  "template_schema_version": 1,
+  "name": "edge_delay_wave",
+  "short_alias": "TedgeW",
+  "expression": "(cross(clip(vtime('$ANALYSIS \"$SIG_A\") $T_START $T_END) $THRESH 1 \"$EDGE\" t \"cycle\" nil) - cross(clip(vtime('$ANALYSIS \"$SIG_B\") $T_START $T_END) $THRESH 1 \"$EDGE\" t \"cycle\" nil))",
+  "params": [
+    {"key": "SIG_A",    "kind": "signal"},
+    {"key": "SIG_B",    "kind": "string"},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_3\")"},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_4\")"},
+    {"key": "THRESH",   "kind": "string", "default": "(VAR(\"VDD\") / 2)"},
+    {"key": "EDGE",     "kind": "string", "default": "rising"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": true,
+  "unit": "s"
+}

@@ -61,6 +61,9 @@ from simkit.template_render import RenderError, RenderedRow, render_bundle
 
 _RENDERED_SCHEMA_VERSION = 1
 
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_BUILTINS_DIR = _REPO_ROOT / "config" / "builtins"
+
 
 # --------------------------------------------------------------------------
 # Argparse registration
@@ -143,6 +146,33 @@ def add_subparser(sub) -> None:
     p_st.add_argument("name", help="Template name (no .template.json suffix).")
     p_st.add_argument("--project", default=None)
     p_st.set_defaults(func=_run_show_template)
+
+    # --- install-builtins ------------------------------------------------
+    p_ib = cs.add_parser(
+        "install-builtins",
+        help=(
+            "Copy the shipped builtin templates "
+            "(config/builtins/*.template.json) into the active project's "
+            "templatesDir/. Refuses to overwrite on name collision unless --force."
+        ),
+    )
+    p_ib.add_argument("--project", default=None)
+    p_ib.add_argument(
+        "--force", action="store_true",
+        help="Overwrite existing templates with matching names.",
+    )
+    p_ib.add_argument(
+        "--list", dest="list_only", action="store_true",
+        help="Dry run: print what would be installed; copy nothing.",
+    )
+    p_ib.add_argument(
+        "--names", default=None,
+        help=(
+            "Comma-delimited subset of builtin template names to install. "
+            "Default: all builtins."
+        ),
+    )
+    p_ib.set_defaults(func=_run_install_builtins)
 
     # --- new-signal-group ------------------------------------------------
     p_nsg = cs.add_parser(
@@ -488,6 +518,112 @@ def _run_show_template(args) -> int:
         print(f"pvt measure show-template: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(_template_to_dict(t), indent=2))
+    return 0
+
+
+# --------------------------------------------------------------------------
+# install-builtins
+# --------------------------------------------------------------------------
+
+
+def _run_install_builtins(args) -> int:
+    if not _BUILTINS_DIR.is_dir():
+        print(
+            f"pvt measure install-builtins: builtins directory not found: "
+            f"{_BUILTINS_DIR}",
+            file=sys.stderr,
+        )
+        return 3
+
+    available = sorted(_BUILTINS_DIR.glob(f"*{TEMPLATE_FILE_SUFFIX}"))
+    if not available:
+        print(
+            f"pvt measure install-builtins: no templates in {_BUILTINS_DIR}",
+            file=sys.stderr,
+        )
+        return 3
+
+    if args.names:
+        wanted = set(_split_csv(args.names))
+        unknown = wanted - {
+            p.name[: -len(TEMPLATE_FILE_SUFFIX)] for p in available
+        }
+        if unknown:
+            print(
+                f"pvt measure install-builtins: unknown builtin name(s): "
+                f"{', '.join(sorted(unknown))}",
+                file=sys.stderr,
+            )
+            return 2
+        selected = [
+            p for p in available
+            if p.name[: -len(TEMPLATE_FILE_SUFFIX)] in wanted
+        ]
+    else:
+        selected = available
+
+    for src in selected:
+        try:
+            load_template(src)
+        except TemplateError as exc:
+            print(
+                f"pvt measure install-builtins: builtin {src.name} failed "
+                f"to load — refusing to install: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+    project = _load_project(args, "install-builtins")
+    if project is None:
+        return 3
+    dest_dir = resolve_templates_dir(project)
+
+    plan: list[tuple[Path, Path, str]] = []
+    collisions: list[str] = []
+    for src in selected:
+        dest = dest_dir / src.name
+        if dest.exists():
+            if args.force:
+                plan.append((src, dest, "overwrite"))
+            else:
+                plan.append((src, dest, "skip"))
+                collisions.append(src.name[: -len(TEMPLATE_FILE_SUFFIX)])
+        else:
+            plan.append((src, dest, "install"))
+
+    if args.list_only:
+        print(f"# templatesDir: {dest_dir}")
+        for src, dest, action in plan:
+            name = src.name[: -len(TEMPLATE_FILE_SUFFIX)]
+            print(f"{action:9s}  {name}")
+        return 0
+
+    if collisions and not args.force:
+        print(
+            f"pvt measure install-builtins: refusing to overwrite "
+            f"{len(collisions)} existing template(s) in {dest_dir}: "
+            f"{', '.join(collisions)}",
+            file=sys.stderr,
+        )
+        print(
+            "Re-run with --force to overwrite, or --names to install only "
+            "non-colliding entries.",
+            file=sys.stderr,
+        )
+        return 2
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    installed: list[tuple[str, str]] = []
+    for src, dest, action in plan:
+        if action == "skip":
+            continue
+        dest.write_bytes(src.read_bytes())
+        installed.append((src.name[: -len(TEMPLATE_FILE_SUFFIX)], action))
+
+    print(f"# templatesDir: {dest_dir}")
+    for name, action in installed:
+        print(f"{action:9s}  {name}")
+    print(f"# {len(installed)} of {len(selected)} installed")
     return 0
 
 

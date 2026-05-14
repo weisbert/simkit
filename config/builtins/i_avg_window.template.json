@@ -1,0 +1,17 @@
+{
+  "_doc": "Average current on a terminal over a transient time window. ANALYSIS defaults to 'tran'; override to 'pss' for PSS average current / power.",
+  "template_schema_version": 1,
+  "name": "i_avg_window",
+  "short_alias": "Iavg",
+  "expression": "average(clip(itime('$ANALYSIS \"$SIG\") $T_START $T_END))",
+  "params": [
+    {"key": "SIG",      "kind": "signal", "doc": "Terminal path (e.g. /L1/PLUS, /I_BUF2G/.../VDD)."},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran", "doc": "Analysis-type symbol: tran | pss | dc | ac. Defaults to tran."},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_1\")", "doc": "Window start (Cadence expression)."},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_2\")", "doc": "Window end (Cadence expression)."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "A"
+}

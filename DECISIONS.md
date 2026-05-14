@@ -830,3 +830,29 @@ Considered, rejected for v1. `pvt measure pull` is the audit + "what templates a
 **Test coverage:** `test_cli_measure.py::RestoreCliTests::test_restore_csv_ok` and `test_skill_bridge_measure.py::PvtMeasureRestoreTests::test_calls_axlOutputsImportFromFile_with_overwrite` (now updated to assert `merge`) pin the new default. The existing `test_restore_explicit_operation` already covered the `--operation merge` path explicitly.
 
 **Verified live 2026-05-14:** With the new defaults, full M2 + M3 round trip on `fnxSession0` is clean (M2: bundle apply → row landed byte-equal; M3: pull → restore → pull bit-identical), and the cleanup step (`axlDeleteOutput`) returns the session to its 11-row baseline. Net signal-tap rows survive intact.
+
+---
+
+## #43 — Phase 3B v1.1 builtins library: 17 templates, `ANALYSIS`-as-param, `signal+string` edge-delay
+_Date: 2026-05-14_
+
+**Decision:** Ship a 17-template builtins library under `config/builtins/`, installed via `pvt measure install-builtins [--force] [--names …] [--list]`. The set was derived by reverse-engineering one of the user's real production Outputs CSVs (a 130-row "sim_DCOBUF" testbench for a DCO buffer characterisation). Three shape choices that materially affect future v2 work:
+
+1. **`ANALYSIS` is a template-level string param, defaulting to `tran`** — rather than shipping separate `_pss` variants. Every template that touches `vtime('tran …)` / `itime('tran …)` now reads `vtime('$ANALYSIS …)`. Override `ANALYSIS=pss` (or `dc`, `ac`) per bundle entry. One template, many analysis types. **Why:** the user's real workflow uses PSS for power steady-state (`average(itime('pss …))`) and TRAN for everything else; duplicating every windowed template `_pss`-style would double the library without earning anything except clutter.
+
+2. **Edge-delay is `1 signal + 1 string ref`, not `2 signals`** — `edge_delay_avg` / `edge_delay_wave` declare `SIG_A` as the signal-kind param (iterates the bound signal_group) and `SIG_B` as a `string`-kind param (per-bundle-entry override, fixed reference path). The dominant real use is "many comparison signals vs. one master clock reference," which this shape captures cleanly. **Why:** Phase 3B v1 spec §3.5 enforces ≤1 `signal`-kind param per template; relaxing to N would require teaching `MeasureApply` to carry N signal_groups (pairwise / cross-product iteration), which is a real v2 design problem (do we mean cartesian, zip, or named-pairs?). Defer that until a real "N×M comparison matrix" case appears.
+
+3. **`cycle_wrap_positive` and `phase_diff_wrap` are explicit follow-on templates, not folded into `edge_delay_avg`** — the user's source CSV writes the unwrapped and wrapped values as two separate Maestro outputs (`T_criteria_temp_5G` then `T_criteria_5G`) so that the unwrapped value remains visible during debug. The framework preserves that idiom: a bundle's `apply` list is the natural place to chain "raw measurement → post-process → spec-checked output."
+
+**Library inventory (17):** `i_avg_window`, `i_avg_full`, `freq_window`, `duty_cycle_window`, `rise_time_auto`, `fall_time_auto`, `rise_time_fixed`, `fall_time_fixed`, `dft_window`, `dft_mag_at_freq`, `dft_phase_at_freq`, `db20_ratio`, `edge_delay_avg`, `edge_delay_wave`, `cycle_wrap_positive`, `phase_diff_wrap`, `value_at`.
+
+**Walkthrough proof:** A 4-entry measure bundle (`tests/fixtures/builtins_walkthrough/dco2g_review.measure.json`) collapses 20 hand-written DCOBUF CSV rows (5 clock nets × {Freq, DutyC, Rtime, Ftime}) and renders byte-for-byte equal to the source rows. Pinned as 4 cases in `tests/test_builtins_walkthrough.py`.
+
+**Known v1 limitation surfaced by the walkthrough — signal-basename collision:** When a signal_group's nets share basenames (e.g. four supply paths all ending in `/VDD`), the output-name composition `<short_alias><alias_suffix>_<basename>` collides and render fails loudly with `RenderError`. The user's source CSV disambiguates this by hand-numbering rows (`1`, `2`, …). Native absorption requires a v2 per-signal alias map — flagged as a discrete next step rather than a workaround in v1.1. Pinned as a deliberate failure case in `test_supply_group_collides_under_v1_naming`.
+
+**Test coverage:** `test_builtins.py` (5 cases — load every builtin, render every builtin, byte-for-byte vs. 17 reverse-engineered DCOBUF rows). `test_cli_measure.py::InstallBuiltinsCliTests` (8 cases — full install, dry-run, subset by `--names`, unknown-name rejection, collision-refuse, `--force` overwrite, missing-project, post-install listability). `test_builtins_walkthrough.py` (4 cases). Python suite 598 → 602 / 0.
+
+**Alternatives considered:**
+- Cross-project sharing via `~/.simkit/templates/`. Rejected: P3B spec §3.5 already defers it to v2; install-builtins keeps templates project-local (which is the right scope for editing/branching them per project).
+- Conditional rendering (e.g. optionally drop a `* $MUL` multiplier when `MUL=1`). Rejected: dumb-textual substitution is intentional per DECISIONS #41 — conditional logic in template bodies leaks the render contract into every consumer.
+- Shipping a "rise time with explicit-rail" `i_avg_window_scaled` variant. Rejected after user feedback ("感觉没什么道理，碰巧相同"): the multiplier appeared in 10 source rows but the multiplier value (2) was coincidence across unrelated devices, not a generic idiom.

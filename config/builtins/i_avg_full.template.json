@@ -1,0 +1,15 @@
+{
+  "_doc": "Average current over the entire waveform (no clip). Common shape for PSS steady-state power: ANALYSIS=pss returns one period's average.",
+  "template_schema_version": 1,
+  "name": "i_avg_full",
+  "short_alias": "Iavg_all",
+  "expression": "average(itime('$ANALYSIS \"$SIG\"))",
+  "params": [
+    {"key": "SIG",      "kind": "signal", "doc": "Terminal path."},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran", "doc": "tran | pss | dc | ac."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "A"
+}

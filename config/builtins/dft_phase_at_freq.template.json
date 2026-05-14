@@ -1,0 +1,15 @@
+{
+  "_doc": "Phase (deg) of an existing complex-spectrum output at a single frequency point. OUT_NAME references another output by name.",
+  "template_schema_version": 1,
+  "name": "dft_phase_at_freq",
+  "short_alias": "DFTphase",
+  "expression": "value(phaseDeg($OUT_NAME) $FREQ)",
+  "params": [
+    {"key": "OUT_NAME", "kind": "string"},
+    {"key": "FREQ",     "kind": "number"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "deg"
+}

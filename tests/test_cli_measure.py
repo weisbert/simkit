@@ -298,6 +298,150 @@ class ListShowTemplateCliTests(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------
+# install-builtins
+# --------------------------------------------------------------------------
+
+
+class InstallBuiltinsCliTests(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_cli_meas_ib_"))
+        self.pvtproject = _make_project(self.tmp)
+        self.templates_dir = self.tmp / "templates"
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _installed(self) -> set[str]:
+        return {
+            p.name[: -len(".template.json")]
+            for p in self.templates_dir.glob("*.template.json")
+        }
+
+    def test_full_install_empty_target(self):
+        rc, out, err = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        names = self._installed()
+        self.assertIn("i_avg_window", names)
+        self.assertIn("edge_delay_avg", names)
+        self.assertIn("value_at", names)
+        # All 17 builtins should land
+        self.assertEqual(len(names), 17, f"got: {sorted(names)}")
+        self.assertIn("17 of 17 installed", out)
+
+    def test_dry_run_list_only(self):
+        rc, out, err = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+            "--list",
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        # Nothing was actually copied
+        self.assertEqual(self._installed(), set())
+        # But the plan was reported
+        self.assertIn("install", out)
+        self.assertIn("i_avg_window", out)
+
+    def test_names_subset(self):
+        rc, out, err = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+            "--names", "i_avg_window,freq_window,value_at",
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertEqual(
+            self._installed(),
+            {"i_avg_window", "freq_window", "value_at"},
+        )
+        self.assertIn("3 of 3 installed", out)
+
+    def test_unknown_name_rejected(self):
+        rc, out, err = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+            "--names", "i_avg_window,not_a_builtin",
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("unknown builtin name(s)", err)
+        self.assertIn("not_a_builtin", err)
+        # Nothing should have been installed
+        self.assertEqual(self._installed(), set())
+
+    def test_collision_refused_without_force(self):
+        # Seed one of the builtins
+        rc, _, _ = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+            "--names", "i_avg_window",
+        )
+        self.assertEqual(rc, 0)
+        # Now a full install should refuse
+        rc, out, err = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+        )
+        self.assertEqual(rc, 2)
+        self.assertIn("refusing to overwrite", err)
+        self.assertIn("i_avg_window", err)
+        # Only the pre-seeded one is still present
+        self.assertEqual(self._installed(), {"i_avg_window"})
+
+    def test_force_overwrites_partial(self):
+        # Seed two; mutate one so we can verify --force replaces it
+        rc, _, _ = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+            "--names", "i_avg_window,freq_window",
+        )
+        self.assertEqual(rc, 0)
+        seeded = self.templates_dir / "i_avg_window.template.json"
+        original_bytes = seeded.read_bytes()
+        seeded.write_text("{}", encoding="utf-8")  # corrupt one on purpose
+        self.assertNotEqual(seeded.read_bytes(), original_bytes)
+        # Full install with --force should restore + add the rest
+        rc, out, err = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+            "--force",
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertEqual(seeded.read_bytes(), original_bytes)
+        self.assertEqual(len(self._installed()), 17)
+        self.assertIn("overwrite", out)
+        self.assertIn("17 of 17 installed", out)
+
+    def test_missing_project_returns_3(self):
+        rc, out, err = _run(
+            "measure", "install-builtins",
+            "--project", "/no/such/.pvtproject",
+        )
+        self.assertEqual(rc, 3)
+
+    def test_installed_builtins_are_listable(self):
+        # Closes the loop: after install-builtins, list-templates sees them.
+        rc, _, _ = _run(
+            "measure", "install-builtins",
+            "--project", str(self.pvtproject),
+        )
+        self.assertEqual(rc, 0)
+        rc, out, err = _run(
+            "measure", "list-templates",
+            "--project", str(self.pvtproject), "--json",
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        data = json.loads(out)
+        # Every entry parsed cleanly
+        for row in data:
+            self.assertEqual(row["status"], "OK", f"bad row: {row}")
+        names = {row["name"] for row in data}
+        self.assertIn("edge_delay_avg", names)
+        self.assertEqual(len(names), 17)
+
+
+# --------------------------------------------------------------------------
 # new-signal-group / list-signal-groups
 # --------------------------------------------------------------------------
 

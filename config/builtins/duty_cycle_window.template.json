@@ -1,0 +1,17 @@
+{
+  "_doc": "Average duty cycle (auto-threshold) over a transient time window. The auto/cycle/average triple matches Maestro Calculator's default duty-cycle measurement.",
+  "template_schema_version": 1,
+  "name": "duty_cycle_window",
+  "short_alias": "DutyC",
+  "expression": "dutyCycle(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END) ?mode \"auto\" ?xName \"cycle\" ?outputType \"average\")",
+  "params": [
+    {"key": "SIG",      "kind": "signal", "doc": "Voltage net path."},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_1\")"},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_2\")"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "%"
+}

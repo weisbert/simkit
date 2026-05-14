@@ -1,0 +1,19 @@
+{
+  "_doc": "Rise time at V_LOW%-V_HIGH% of the auto-detected envelope (ymin..ymax) of the clipped waveform. Matches the 'I let Maestro figure out the rails' idiom; for explicit VSS/VDD rails see rise_time_fixed.",
+  "template_schema_version": 1,
+  "name": "rise_time_auto",
+  "short_alias": "Rtime",
+  "expression": "average(riseTime(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END) ymin(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END)) nil ymax(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END)) nil $V_LOW $V_HIGH t \"time\"))",
+  "params": [
+    {"key": "SIG",      "kind": "signal"},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_1\")"},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_2\")"},
+    {"key": "V_LOW",    "kind": "number", "default": "10", "doc": "Lower threshold (% of envelope)."},
+    {"key": "V_HIGH",   "kind": "number", "default": "90", "doc": "Upper threshold (% of envelope)."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "s"
+}

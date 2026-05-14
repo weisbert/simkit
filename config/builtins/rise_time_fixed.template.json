@@ -1,0 +1,21 @@
+{
+  "_doc": "Rise time at V_LOW%-V_HIGH% of an explicit rail span [VSS, VDD]. Use when ymin/ymax of the clipped waveform doesn't cover the full rail (e.g. signal hasn't settled in the window).",
+  "template_schema_version": 1,
+  "name": "rise_time_fixed",
+  "short_alias": "Rtime",
+  "expression": "average(riseTime(clip(vtime('$ANALYSIS \"$SIG\") $T_START $T_END) $VSS nil $VDD nil $V_LOW $V_HIGH t \"time\"))",
+  "params": [
+    {"key": "SIG",      "kind": "signal"},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_1\")"},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_2\")"},
+    {"key": "VSS",      "kind": "string", "default": "0",            "doc": "Lower rail (Cadence expression)."},
+    {"key": "VDD",      "kind": "string", "default": "VAR(\"VDD\")", "doc": "Upper rail (Cadence expression)."},
+    {"key": "V_LOW",    "kind": "number", "default": "10"},
+    {"key": "V_HIGH",   "kind": "number", "default": "90"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "s"
+}

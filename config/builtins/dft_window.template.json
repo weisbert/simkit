@@ -1,0 +1,19 @@
+{
+  "_doc": "Discrete Fourier Transform of a voltage waveform over a time window. The result is itself a waveform (frequency-domain); reference it from dft_mag_at_freq / dft_phase_at_freq to extract a scalar at a specific bin.",
+  "template_schema_version": 1,
+  "name": "dft_window",
+  "short_alias": "DFT",
+  "expression": "dft(vtime('$ANALYSIS \"$SIG\") $T_START $T_END $N \"$WINDOW\" 0 0 1)",
+  "params": [
+    {"key": "SIG",      "kind": "signal"},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "T_START",  "kind": "string", "default": "VAR(\"t_3\")", "doc": "DFT-window-start var (DFT typically uses t_3..t_4, not the wider t_1..t_2)."},
+    {"key": "T_END",    "kind": "string", "default": "VAR(\"t_4\")"},
+    {"key": "N",        "kind": "number", "default": "512",          "doc": "Number of samples."},
+    {"key": "WINDOW",   "kind": "string", "default": "Rectangular",  "doc": "Maestro window-function name (Rectangular | Hanning | Hamming | Blackman | …)."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": true,
+  "unit": ""
+}

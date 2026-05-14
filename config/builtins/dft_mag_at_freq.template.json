@@ -1,0 +1,15 @@
+{
+  "_doc": "Magnitude of an existing complex-spectrum output at a single frequency point. Use after dft_window. OUT_NAME references another output by name (must be set via param_overrides — no default).",
+  "template_schema_version": 1,
+  "name": "dft_mag_at_freq",
+  "short_alias": "DFTmag",
+  "expression": "mag(value($OUT_NAME $FREQ))",
+  "params": [
+    {"key": "OUT_NAME", "kind": "string", "doc": "Name of an upstream output (e.g. a dft_window result)."},
+    {"key": "FREQ",     "kind": "number", "doc": "Frequency point (Hz) — e.g. 2.5e9 for 2.5 GHz."}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": ""
+}
