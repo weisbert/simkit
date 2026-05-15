@@ -1,0 +1,17 @@
+{
+  "_doc": "Fall time at V_LOW%-V_HIGH% of the auto-detected envelope of the full (unclipped) waveform. Reversed-threshold convention as fall_time_auto. Same shape but without the t_1..t_2 window.",
+  "template_schema_version": 1,
+  "name": "fall_time_auto_full",
+  "short_alias": "Ftime",
+  "expression": "average(riseTime(vtime('$ANALYSIS \"$SIG\") ymin(vtime('$ANALYSIS \"$SIG\")) nil ymax(vtime('$ANALYSIS \"$SIG\")) nil $V_LOW $V_HIGH t \"time\"))",
+  "params": [
+    {"key": "SIG",      "kind": "signal"},
+    {"key": "ANALYSIS", "kind": "string", "default": "tran"},
+    {"key": "V_LOW",    "kind": "number", "default": "90"},
+    {"key": "V_HIGH",   "kind": "number", "default": "10"}
+  ],
+  "eval_type": "point",
+  "plot": true,
+  "save": false,
+  "unit": "s"
+}

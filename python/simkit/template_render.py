@@ -53,18 +53,22 @@ def render_bundle(bundle: MeasureBundle) -> list[RenderedRow]:
     rows: list[RenderedRow] = []
     seen_names: dict[str, str] = {}
     for i, entry in enumerate(bundle.apply):
+        kind_tag = (
+            f"template={entry.template.name!r}"
+            if entry.template is not None
+            else "raw_expression"
+        )
         for row in _render_entry(i, entry):
             if row.output_name in seen_names:
                 raise RenderError(
                     f"bundle render: output_name {row.output_name!r} "
                     f"appears twice — first from {seen_names[row.output_name]}, "
                     f"second from apply[{i}] "
-                    f"(template={entry.template.name!r}). "
-                    f"Use 'alias_suffix' to disambiguate."
+                    f"({kind_tag}). "
+                    f"Use 'alias_suffix' or 'output_name' to disambiguate."
                 )
             seen_names[row.output_name] = (
-                f"apply[{_find_index(bundle, entry)}] "
-                f"(template={entry.template.name!r})"
+                f"apply[{_find_index(bundle, entry)}] ({kind_tag})"
             )
             rows.append(row)
     return rows
@@ -78,6 +82,23 @@ def _find_index(bundle: MeasureBundle, target: MeasureApply) -> int:
 
 
 def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
+    # v1.2 (f) — raw_expression entries bypass the template machinery.
+    if entry.template is None:
+        assert entry.raw_expression is not None
+        assert entry.output_name is not None
+        return [RenderedRow(
+            output_name=entry.output_name,
+            expression=entry.raw_expression,
+            eval_type=entry.raw_eval_type,
+            plot=entry.raw_plot,
+            save=entry.raw_save,
+        )]
+
+    # v1.2 (e) — param_sweep expands into N rendered rows in parallel with
+    # the entry's explicit output_names list.
+    if entry.param_sweep is not None:
+        return _render_swept_entry(idx, entry)
+
     template = entry.template
     signal_param = template.signal_param()
     out: list[RenderedRow] = []
@@ -85,7 +106,7 @@ def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
         expression = _substitute(
             template, entry.param_overrides, signal_value=None, idx=idx
         )
-        output_name = f"{template.short_alias}{entry.alias_suffix}"
+        output_name = _resolve_output_name(entry, basename=None)
         out.append(
             RenderedRow(
                 output_name=output_name,
@@ -109,9 +130,7 @@ def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
             template, entry.param_overrides, signal_value=sig, idx=idx
         )
         basename = signal_basename(sig)
-        output_name = (
-            f"{template.short_alias}{entry.alias_suffix}_{basename}"
-        )
+        output_name = _resolve_output_name(entry, basename=basename)
         out.append(
             RenderedRow(
                 output_name=output_name,
@@ -122,6 +141,26 @@ def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
             )
         )
     return out
+
+
+_SIG_PLACEHOLDER = "${SIG}"
+
+
+def _resolve_output_name(entry: MeasureApply, *, basename: Optional[str]) -> str:
+    """v1.2 (a) — honor apply-entry output_name override.
+
+    If entry.output_name is set, it fully replaces the default
+    short_alias + alias_suffix [+ _basename] scheme. The literal
+    ``${SIG}`` is substituted with the signal basename (when applicable).
+    """
+    template = entry.template
+    if entry.output_name is not None:
+        if basename is not None:
+            return entry.output_name.replace(_SIG_PLACEHOLDER, basename)
+        return entry.output_name
+    if basename is None:
+        return f"{template.short_alias}{entry.alias_suffix}"
+    return f"{template.short_alias}{entry.alias_suffix}_{basename}"
 
 
 def _substitute(
@@ -161,3 +200,58 @@ def _substitute(
         return default
 
     return _PARAM_TOKEN_RE.sub(repl, template.expression)
+
+
+def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
+    """v1.2 (e) — expand a param_sweep entry into N rendered rows.
+
+    Each iteration overrides one sweep key with its i-th value and emits
+    a row named by ``output_names[i]``. Mirrors the no-sweep branches for
+    {signal-bound, signal-less} templates but folds the per-i override
+    into the substitution map.
+    """
+    assert entry.template is not None
+    assert entry.param_sweep is not None
+    assert entry.output_names is not None
+    template = entry.template
+    (sweep_key, sweep_values), = entry.param_sweep.items()
+    signal_param = template.signal_param()
+    rows: list[RenderedRow] = []
+
+    for i, value in enumerate(sweep_values):
+        merged = dict(entry.param_overrides)
+        merged[sweep_key] = value
+        name_tpl = entry.output_names[i]
+
+        if signal_param is None:
+            expr = _substitute(
+                template, merged, signal_value=None, idx=idx
+            )
+            rows.append(RenderedRow(
+                output_name=name_tpl,
+                expression=expr,
+                eval_type=template.eval_type,
+                plot=template.plot,
+                save=template.save,
+            ))
+            continue
+
+        if entry.signal_group is None:  # pragma: no cover (loader rejects)
+            raise RenderError(
+                f"apply[{idx}] template {template.name!r} has signal "
+                f"param {signal_param.key!r} but signal_group is None"
+            )
+        for sig in entry.signal_group.signals:
+            expr = _substitute(
+                template, merged, signal_value=sig, idx=idx
+            )
+            basename = signal_basename(sig)
+            out_name = name_tpl.replace(_SIG_PLACEHOLDER, basename)
+            rows.append(RenderedRow(
+                output_name=out_name,
+                expression=expr,
+                eval_type=template.eval_type,
+                plot=template.plot,
+                save=template.save,
+            ))
+    return rows

@@ -38,6 +38,12 @@ _EXPECTED_BUILTIN_NAMES = frozenset({
     "fall_time_auto",
     "rise_time_fixed",
     "fall_time_fixed",
+    # v1.2 (b) — unwindowed rise/fall variants. Follow the i_avg_window /
+    # i_avg_full naming precedent rather than adding a CLIP parameter.
+    "rise_time_auto_full",
+    "rise_time_fixed_full",
+    "fall_time_auto_full",
+    "fall_time_fixed_full",
     "dft_window",
     "dft_mag_at_freq",
     "dft_phase_at_freq",
@@ -138,6 +144,10 @@ _RENDER_INPUTS: dict[str, tuple[str | None, dict[str, str]]] = {
     "fall_time_auto":      ("/bufp", {}),
     "rise_time_fixed":     ("/Vout", {}),
     "fall_time_fixed":     ("/Vout", {}),
+    "rise_time_auto_full": ("/bufp", {}),
+    "fall_time_auto_full": ("/bufp", {}),
+    "rise_time_fixed_full": ("/Vout", {}),
+    "fall_time_fixed_full": ("/Vout", {}),
     "dft_window":          ("/LOIP", {}),
     "dft_mag_at_freq":     (None,    {"OUT_NAME": "LOIP_DFT",  "FREQ": "2.5e9"}),
     "dft_phase_at_freq":   (None,    {"OUT_NAME": "LOIP_DFT",  "FREQ": "2.5e9"}),
@@ -308,6 +318,15 @@ _REFERENCE_RENDERS = [
         "/Vout",
         {},
         'average(riseTime(clip(vtime(\'tran "/Vout") VAR("t_1") VAR("t_2")) '
+        '0 nil VAR("VDD") nil 10 90 t "time"))',
+    ),
+    # v1.2 (b): rise_time_fixed_full at default rails — exactly matches the
+    # live fnxSession0 Rtime_clkout output expression (unwindowed form).
+    (
+        "rise_time_fixed_full",
+        "/Vout",
+        {},
+        'average(riseTime(vtime(\'tran "/Vout") '
         '0 nil VAR("VDD") nil 10 90 t "time"))',
     ),
     # edge_delay_wave

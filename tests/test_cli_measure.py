@@ -328,9 +328,9 @@ class InstallBuiltinsCliTests(unittest.TestCase):
         self.assertIn("i_avg_window", names)
         self.assertIn("edge_delay_avg", names)
         self.assertIn("value_at", names)
-        # All 17 builtins should land
-        self.assertEqual(len(names), 17, f"got: {sorted(names)}")
-        self.assertIn("17 of 17 installed", out)
+        # All 21 builtins should land (17 from v1.1 + 4 v1.2 _full variants)
+        self.assertEqual(len(names), 21, f"got: {sorted(names)}")
+        self.assertIn("21 of 21 installed", out)
 
     def test_dry_run_list_only(self):
         rc, out, err = _run(
@@ -409,9 +409,9 @@ class InstallBuiltinsCliTests(unittest.TestCase):
         )
         self.assertEqual(rc, 0, f"err={err}")
         self.assertEqual(seeded.read_bytes(), original_bytes)
-        self.assertEqual(len(self._installed()), 17)
+        self.assertEqual(len(self._installed()), 21)
         self.assertIn("overwrite", out)
-        self.assertIn("17 of 17 installed", out)
+        self.assertIn("21 of 21 installed", out)
 
     def test_missing_project_returns_3(self):
         rc, out, err = _run(
@@ -438,7 +438,7 @@ class InstallBuiltinsCliTests(unittest.TestCase):
             self.assertEqual(row["status"], "OK", f"bad row: {row}")
         names = {row["name"] for row in data}
         self.assertIn("edge_delay_avg", names)
-        self.assertEqual(len(names), 17)
+        self.assertEqual(len(names), 21)
 
 
 # --------------------------------------------------------------------------
@@ -637,7 +637,19 @@ class BundleCliTests(unittest.TestCase):
         self.assertEqual(rc, 0, f"err={err}")
         data = json.loads(out)
         self.assertEqual(len(data), 1)
-        self.assertNotEqual(data[0]["status"], "OK")
+        # v1.2 (d): status starts with explicit ERR: marker rather than
+        # a leading path that truncates the actually-useful message.
+        self.assertTrue(
+            data[0]["status"].startswith("ERR: "),
+            f"expected 'ERR: ' prefix, got {data[0]['status']!r}",
+        )
+        # And the leading bundle-path prefix must be stripped — STATUS must
+        # not start with the .measure.json file's own path.
+        bundle_path = str(data[0]["path"])
+        self.assertFalse(
+            data[0]["status"].startswith(f"ERR: {bundle_path}"),
+            f"status leaks bundle path: {data[0]['status']!r}",
+        )
 
 
 # --------------------------------------------------------------------------

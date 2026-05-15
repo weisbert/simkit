@@ -71,9 +71,11 @@ def _voltage_outs_doc(name: str = "voltage_outs", signals=None) -> dict:
     }
 
 
-def _bundle_doc(name: str = "voltage_outs_rise", apply=None) -> dict:
+def _bundle_doc(
+    name: str = "voltage_outs_rise", apply=None, *, schema_version: int = 2,
+) -> dict:
     return {
-        "measure_schema_version": 1,
+        "measure_schema_version": schema_version,
         "name": name,
         "project": "my_block",
         "testbench_id": "MY_LIB/my_block_tb/schematic",
@@ -238,6 +240,190 @@ class AliasSuffixTests(ProjectFixtureMixin, unittest.TestCase):
         rows = render_bundle(bundle)
         self.assertEqual(rows[0].output_name, "Rtime_20_80_Vout")
         self.assertIn(" 20 80 ", rows[0].expression)
+
+
+class OutputNameOverrideTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.2 (a) — apply-entry output_name shadows the default concat name."""
+
+    def test_output_name_replaces_default_for_no_signal_template(self):
+        self._write_template(_no_signal_template_doc(), name="pn_at_freq")
+        doc = _bundle_doc(apply=[{
+            "template": "pn_at_freq",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "output_name": "PN_1M",
+        }])
+        bundle_path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(bundle_path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(rows[0].output_name, "PN_1M")
+
+    def test_output_name_with_sig_placeholder_substitutes_basename(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "voltage_outs",
+            "output_name": "MyRtime_${SIG}",
+        }])
+        bundle_path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(bundle_path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(rows[0].output_name, "MyRtime_Vout")
+
+    def test_output_name_without_placeholder_uses_literal_for_single_signal(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "voltage_outs",
+            "output_name": "MyRtime",
+        }])
+        bundle_path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(bundle_path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(rows[0].output_name, "MyRtime")
+
+    def test_output_name_without_placeholder_collides_on_multi_signal(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        sg = {
+            "signal_group_schema_version": 1,
+            "name": "two_rails",
+            "signals": ["/Vout", "/AVDD"],
+        }
+        self._write_signal_group(sg, name="two_rails")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "two_rails",
+            "output_name": "MyRtime",
+        }])
+        bundle_path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(bundle_path, project=self.project)
+        from simkit.template_render import RenderError
+        with self.assertRaisesRegex(RenderError, "appears twice"):
+            render_bundle(bundle)
+
+
+class ParamSweepRenderTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.2 (e) — param_sweep expansion at render time."""
+
+    def test_sweep_expands_value_at_into_five_rows(self):
+        self._write_template(
+            _no_signal_template_doc(name="value_at"), name="value_at"
+        )
+        doc = _bundle_doc(apply=[{
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": [
+                "1000000", "3000000", "10000000", "50000000", "100000000",
+            ]},
+            "output_names": [
+                "PN_1M", "PN_3M", "PN_10M", "PN_50M", "PN_100M",
+            ],
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual([r.output_name for r in rows], [
+            "PN_1M", "PN_3M", "PN_10M", "PN_50M", "PN_100M",
+        ])
+        self.assertIn("PN_wave", rows[0].expression)
+        self.assertIn("1000000", rows[0].expression)
+        self.assertIn("100000000", rows[4].expression)
+
+    def test_sweep_with_signal_group_substitutes_sig_in_names(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        sg = {
+            "signal_group_schema_version": 1,
+            "name": "two_rails",
+            "signals": ["/Vout", "/AVDD"],
+        }
+        self._write_signal_group(sg, name="two_rails")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "two_rails",
+            "param_sweep": {"V_LOW": ["10", "20"]},
+            "output_names": ["Rtime10_${SIG}", "Rtime20_${SIG}"],
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        # 2 sweep values × 2 signals = 4 rows, in (sweep, signal) order
+        self.assertEqual([r.output_name for r in rows], [
+            "Rtime10_Vout", "Rtime10_AVDD",
+            "Rtime20_Vout", "Rtime20_AVDD",
+        ])
+
+    def test_sweep_collision_detected(self):
+        self._write_template(
+            _no_signal_template_doc(name="value_at"), name="value_at"
+        )
+        doc = _bundle_doc(apply=[{
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1e6", "3e6"]},
+            "output_names": ["Dup", "Dup"],
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        from simkit.template_render import RenderError
+        with self.assertRaisesRegex(RenderError, "appears twice"):
+            render_bundle(bundle)
+
+
+class RawExpressionRenderTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.2 (f) — raw_expression entries render to literal expression."""
+
+    def test_raw_entry_renders_literal(self):
+        doc = _bundle_doc(apply=[{
+            "raw_expression": "rfEdgePhaseNoise(?result \"pnoise_sample_pm0\")",
+            "output_name": "PN_wave",
+            "plot": True,
+            "save": False,
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].output_name, "PN_wave")
+        self.assertEqual(
+            rows[0].expression,
+            "rfEdgePhaseNoise(?result \"pnoise_sample_pm0\")",
+        )
+        self.assertTrue(rows[0].plot)
+        self.assertFalse(rows[0].save)
+
+    def test_raw_and_template_entries_mixed(self):
+        self._write_template(_no_signal_template_doc(), name="pn_at_freq")
+        doc = _bundle_doc(apply=[
+            {
+                "raw_expression": "rfEdgePhaseNoise(?result \"pn_pm0\")",
+                "output_name": "PN_wave",
+            },
+            {
+                "template": "pn_at_freq",
+                "signal_group": None,
+                "param_overrides": {"OUT_NAME": "PN_wave"},
+                "output_name": "PN_1M",
+            },
+        ])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual([r.output_name for r in rows], ["PN_wave", "PN_1M"])
+
+    def test_raw_collision_detected(self):
+        doc = _bundle_doc(apply=[
+            {"raw_expression": "x", "output_name": "Dup"},
+            {"raw_expression": "y", "output_name": "Dup"},
+        ])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        from simkit.template_render import RenderError
+        with self.assertRaisesRegex(RenderError, "appears twice"):
+            render_bundle(bundle)
 
 
 class OverridePriorityTests(ProjectFixtureMixin, unittest.TestCase):

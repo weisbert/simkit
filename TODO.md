@@ -138,9 +138,25 @@ Same-day extension after the skeleton stabilised. 17-template library + install 
 - [x] `tests/fixtures/builtins_walkthrough/` + `tests/test_builtins_walkthrough.py` (4 cases) — 4-entry bundle collapses 20 hand-written DCOBUF rows; signal-basename collision pinned as a deliberate `RenderError`.
 - [x] Python suite 598 → 602 / 0.
 
-### Deferred from Phase 3B v1.1 → v1.2 (do NOT block next phase):
+### Phase 3B v1.2 — Expressiveness pass (DONE 2026-05-15)
 
-- **Per-signal alias map** (to absorb the user's `Iavg_1, Iavg_2, …` hand-numbering idiom on supplies whose paths share basenames). Walkthrough pinned the collision behaviour; v1.2 should let a signal_group declare `aliases: {"path": "label"}` per entry.
+Dogfood-driven follow-on. fnxSession0's 11-row baseline (4 nets + 7 expr) couldn't be expressed in a single v1.1 bundle. Six friction items closed:
+
+- [x] (c) implicit `signal_group: null` when template has no signal-kind param
+- [x] (d) `list-bundles` STATUS column shows `ERR: <reason>` with bundle-path prefix stripped
+- [x] (a) apply-entry `output_name` field fully shadows the concat scheme; supports `${SIG}` placeholder
+- [x] (b) 4 new `_full` builtins (rise/fall × auto/fixed) — drop the `clip(t_1, t_2)` wrap; follow `i_avg_window`/`i_avg_full` naming precedent rather than adding a CLIP parameter
+- [x] (f) `raw_expression` apply-entry kind — peer to template entries, schema enforces exactly-one-of
+- [x] (e) `param_sweep: {KEY: [...]}` + parallel `output_names: [...]` — single-axis sweep expansion
+- [x] `measure_schema_version` bumped to 2; v1 bundles still load; v2-only fields rejected in v1 with a "bump to 2" error
+- [x] **Dogfood proof** — `~/cadence_work/simkit_p3b_dogfood/measurements/dogfood_v2.measure.json` (3 entries: 1 raw + 1 sweep + 1 template-with-override) describes all 7 fnxSession0 expr rows; apply --replace → pull → diff vs. baseline.snapshot.json is 11/11 byte-identical
+- [x] Python suite 602 → 662 / 0 (+60 cases across measure_bundle / template_render / builtins / cli_measure)
+- [x] DECISIONS #44
+
+### Deferred from Phase 3B v1.2 → v1.3 (do NOT block next phase):
+
+- **Per-signal alias map** (to absorb the user's `Iavg_1, Iavg_2, …` hand-numbering idiom on supplies whose paths share basenames). v1.1 walkthrough pinned the collision; v1.2 didn't change the underlying signal-group shape so the gap remains.
+- **Multi-axis param_sweep** — v1.2 enforces single-axis. A real "freq × temperature" 2-D matrix case would justify lifting it.
 - Multi-signal templates (v1 enforces ≤1 `signal`-kind param per template; edge_delay uses 1 signal + 1 string ref as the workaround).
 - Cross-project template sharing (user-home `~/.simkit/templates/`).
 - Snapshot template match-back (reverse-engineer a pulled snapshot into bundle + parameters).

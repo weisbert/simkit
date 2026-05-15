@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -38,7 +38,18 @@ MEASURE_FILE_SUFFIX = ".measure.json"
 _MEASURE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 _ALIAS_SUFFIX_RE = re.compile(r"^[A-Za-z0-9_]*$")
 
-_SUPPORTED_MEASURE_SCHEMA_VERSIONS = frozenset({1})
+_SUPPORTED_MEASURE_SCHEMA_VERSIONS = frozenset({1, 2})
+# v1.2 features that require schema_version >= 2. v1 bundles that touch
+# these fields are rejected with a "bump to 2" error.
+_V2_ONLY_APPLY_FIELDS = frozenset({
+    "output_name",
+    "param_sweep",
+    "output_names",
+    "raw_expression",
+    "plot",
+    "save",
+    "eval_type",
+})
 
 _DEFAULT_TEMPLATES_DIR = "templates"
 _DEFAULT_SIGNAL_GROUPS_DIR = "signal_groups"
@@ -63,10 +74,26 @@ class MeasureBundleLoadError(MeasureBundleError):
 
 @dataclass(frozen=True)
 class MeasureApply:
-    template: Template
-    signal_group: Optional[SignalGroup]
-    param_overrides: dict[str, str]
-    alias_suffix: str
+    # Either ``template`` is set (the entry is a template-driven apply) or
+    # ``raw_expression`` is set (v1.2 (f) — a one-off literal expression).
+    # The loader enforces exactly-one-of; downstream code dispatches on
+    # ``template is None``.
+    template: Optional[Template] = None
+    signal_group: Optional[SignalGroup] = None
+    param_overrides: dict[str, str] = field(default_factory=dict)
+    alias_suffix: str = ""
+    output_name: Optional[str] = None
+    # v1.2 (e) param-sweep: when set, the entry expands into N rows where N
+    # is the length of every parallel array. Each row overrides exactly the
+    # sweep key with its i-th value and is named by the i-th element of
+    # output_names. v1.2 enforces a single sweep axis (one key in the dict).
+    param_sweep: Optional[dict[str, tuple[str, ...]]] = None
+    output_names: Optional[tuple[str, ...]] = None
+    # v1.2 (f) raw_expression branch — only used when template is None.
+    raw_expression: Optional[str] = None
+    raw_plot: bool = True
+    raw_save: bool = False
+    raw_eval_type: str = "point"
 
 
 @dataclass(frozen=True)
@@ -165,7 +192,8 @@ def load_measure_bundle(
     signal_groups_dir = resolve_signal_groups_dir(project)
 
     apply_entries = _validate_apply(
-        p, data, templates_dir, signal_groups_dir
+        p, data, templates_dir, signal_groups_dir,
+        schema_version=schema_version,
     )
 
     return MeasureBundle(
@@ -241,6 +269,8 @@ def _validate_apply(
     data: dict,
     templates_dir: Path,
     signal_groups_dir: Path,
+    *,
+    schema_version: int,
 ) -> tuple[MeasureApply, ...]:
     if "apply" not in data:
         raise MeasureBundleLoadError(
@@ -255,7 +285,8 @@ def _validate_apply(
     out: list[MeasureApply] = []
     for i, raw_entry in enumerate(raw):
         entry = _validate_apply_entry(
-            path, i, raw_entry, templates_dir, signal_groups_dir
+            path, i, raw_entry, templates_dir, signal_groups_dir,
+            schema_version=schema_version,
         )
         out.append(entry)
     return tuple(out)
@@ -267,13 +298,36 @@ def _validate_apply_entry(
     raw: object,
     templates_dir: Path,
     signal_groups_dir: Path,
+    *,
+    schema_version: int,
 ) -> MeasureApply:
     where = f"{path}: apply[{idx}]"
     if not isinstance(raw, dict):
         raise MeasureBundleLoadError(f"{where}: must be a JSON object")
 
-    if "template" not in raw:
-        raise MeasureBundleLoadError(f"{where}: missing 'template'")
+    # v1.2 schema gate — reject v2-only fields when the bundle declares v1.
+    if schema_version < 2:
+        used_v2 = [k for k in raw.keys() if k in _V2_ONLY_APPLY_FIELDS]
+        if used_v2:
+            raise MeasureBundleLoadError(
+                f"{where}: field(s) {sorted(used_v2)} require "
+                f"'measure_schema_version': 2 (got {schema_version})"
+            )
+
+    has_template = "template" in raw
+    has_raw = "raw_expression" in raw
+    if has_template and has_raw:
+        raise MeasureBundleLoadError(
+            f"{where}: cannot set both 'template' and 'raw_expression' "
+            f"(an apply entry is exactly one kind)"
+        )
+    if not has_template and not has_raw:
+        raise MeasureBundleLoadError(
+            f"{where}: missing 'template' or 'raw_expression'"
+        )
+    if has_raw:
+        return _validate_raw_apply_entry(where, raw)
+
     tmpl_name = raw["template"]
     if not isinstance(tmpl_name, str) or tmpl_name == "":
         raise MeasureBundleLoadError(
@@ -292,17 +346,21 @@ def _validate_apply_entry(
             f"{where}: failed to load template {tmpl_name!r} — {exc}"
         ) from exc
 
-    if "signal_group" not in raw:
-        raise MeasureBundleLoadError(
-            f"{where}: missing 'signal_group' (use null when template has no signal param)"
-        )
-    sg_field = raw["signal_group"]
+    # v1.2 (c): if 'signal_group' is omitted, infer from template — equivalent
+    # to explicit null when the template has no signal-kind param.
+    sg_implicit = "signal_group" not in raw
+    sg_field = None if sg_implicit else raw["signal_group"]
     signal_group: Optional[SignalGroup]
     signal_param = template.signal_param()
 
     if sg_field is None:
-        # M4 case f: template has signal param but bundle gave null.
+        # M4 case f: template has signal param but bundle gave null / omitted.
         if signal_param is not None:
+            if sg_implicit:
+                raise MeasureBundleLoadError(
+                    f"{where}: missing 'signal_group' — template {tmpl_name!r} "
+                    f"declares signal-kind param {signal_param.key!r}"
+                )
             raise MeasureBundleLoadError(
                 f"{where}: 'signal_group' is null but template {tmpl_name!r} "
                 f"declares signal-kind param {signal_param.key!r}; "
@@ -339,12 +397,19 @@ def _validate_apply_entry(
 
     param_overrides = _validate_param_overrides(where, raw, template)
     alias_suffix = _validate_alias_suffix(where, raw)
+    output_name = _validate_output_name(where, raw, template)
+    sweep, sweep_names = _validate_param_sweep(
+        where, raw, template, param_overrides, output_name
+    )
 
     return MeasureApply(
         template=template,
         signal_group=signal_group,
         param_overrides=param_overrides,
         alias_suffix=alias_suffix,
+        output_name=output_name,
+        param_sweep=sweep,
+        output_names=sweep_names,
     )
 
 
@@ -377,14 +442,20 @@ def _validate_param_overrides(
         overrides[k] = v
 
     # M4 case g: every non-signal param with no default must be overridden.
+    # v1.2 (e) — params declared in param_sweep also count as supplied,
+    # since the sweep array provides one value per iteration.
+    sweep_keys: set[str] = set()
+    if isinstance(raw.get("param_sweep"), dict):
+        sweep_keys = {k for k in raw["param_sweep"].keys() if isinstance(k, str)}
     missing: list[str] = []
     for p in template.params:
         if p.kind == "signal":
             continue
         if p.default is not None:
             continue
-        if p.key not in overrides:
-            missing.append(p.key)
+        if p.key in overrides or p.key in sweep_keys:
+            continue
+        missing.append(p.key)
     if missing:
         raise MeasureBundleLoadError(
             f"{where}: template {template.name!r} requires "
@@ -410,3 +481,230 @@ def _validate_alias_suffix(where: str, raw: dict) -> str:
             f"^[A-Za-z0-9_]*$"
         )
     return value
+
+
+_OUTPUT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SIG_PLACEHOLDER = "${SIG}"
+
+_RAW_APPLY_KNOWN_KEYS = frozenset({
+    "raw_expression", "output_name", "plot", "save", "eval_type",
+})
+_RAW_EVAL_TYPES = frozenset({"point", "wave"})
+
+
+def _validate_raw_apply_entry(where: str, raw: dict) -> MeasureApply:
+    """v1.2 (f) — raw_expression apply entry.
+
+    Bypasses templates: the rendered row's expression is the literal
+    ``raw_expression`` string. Useful for one-off composite waves
+    (e.g. ``rfEdgePhaseNoise(...)``) that don't match any builtin shape.
+    """
+    unknown = set(raw.keys()) - _RAW_APPLY_KNOWN_KEYS
+    if unknown:
+        raise MeasureBundleLoadError(
+            f"{where}: raw_expression entry has unknown keys: "
+            f"{sorted(unknown)}"
+        )
+
+    expr = raw["raw_expression"]
+    if not isinstance(expr, str) or expr == "":
+        raise MeasureBundleLoadError(
+            f"{where}: 'raw_expression' must be a non-empty string"
+        )
+
+    if "output_name" not in raw:
+        raise MeasureBundleLoadError(
+            f"{where}: raw_expression entry requires 'output_name'"
+        )
+    output_name = raw["output_name"]
+    if not isinstance(output_name, str) or output_name == "":
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_name' must be a non-empty string"
+        )
+    if _SIG_PLACEHOLDER in output_name:
+        raise MeasureBundleLoadError(
+            f"{where}: raw_expression 'output_name' must not contain "
+            f"${{SIG}} — no signal context in raw entries"
+        )
+    if not _OUTPUT_NAME_RE.match(output_name):
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_name' {output_name!r} must match "
+            f"^[A-Za-z_][A-Za-z0-9_]*$"
+        )
+
+    plot = _validate_bool(where, raw, "plot", default=True)
+    save = _validate_bool(where, raw, "save", default=False)
+    eval_type = raw.get("eval_type", "point")
+    if eval_type not in _RAW_EVAL_TYPES:
+        raise MeasureBundleLoadError(
+            f"{where}: 'eval_type' must be one of "
+            f"{sorted(_RAW_EVAL_TYPES)} (got {eval_type!r})"
+        )
+
+    return MeasureApply(
+        template=None,
+        raw_expression=expr,
+        output_name=output_name,
+        raw_plot=plot,
+        raw_save=save,
+        raw_eval_type=eval_type,
+    )
+
+
+def _validate_bool(where: str, raw: dict, key: str, *, default: bool) -> bool:
+    if key not in raw:
+        return default
+    v = raw[key]
+    if not isinstance(v, bool):
+        raise MeasureBundleLoadError(
+            f"{where}: {key!r} must be true or false (got {type(v).__name__})"
+        )
+    return v
+
+
+def _validate_output_name(
+    where: str, raw: dict, template: Template
+) -> Optional[str]:
+    """v1.2 (a) — apply-entry-level output_name override.
+
+    When present, the rendered output name is exactly this string (no
+    short_alias / alias_suffix / basename concatenation). The literal
+    ``${SIG}`` is the only placeholder; it expands to the signal basename
+    at render time and is only legal when the template has a signal-kind
+    param.
+    """
+    if "output_name" not in raw:
+        return None
+    value = raw["output_name"]
+    if not isinstance(value, str) or value == "":
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_name' must be a non-empty string"
+        )
+    has_sig = _SIG_PLACEHOLDER in value
+    signal_param = template.signal_param()
+    if has_sig and signal_param is None:
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_name' uses ${{SIG}} but template "
+            f"{template.name!r} has no signal-kind param"
+        )
+    # Strip the placeholder before character-set validation so e.g.
+    # "Rtime_${SIG}" passes — the ${} braces are otherwise rejected.
+    bare = value.replace(_SIG_PLACEHOLDER, "X") if has_sig else value
+    if not _OUTPUT_NAME_RE.match(bare):
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_name' {value!r} must match "
+            f"^[A-Za-z_][A-Za-z0-9_]*$ (after ${{SIG}} substitution)"
+        )
+    return value
+
+
+def _validate_param_sweep(
+    where: str,
+    raw: dict,
+    template: Template,
+    overrides: dict[str, str],
+    output_name: Optional[str],
+) -> tuple[Optional[dict[str, tuple[str, ...]]], Optional[tuple[str, ...]]]:
+    """v1.2 (e) — single-axis param_sweep + parallel output_names list.
+
+    An entry that declares ``param_sweep`` expands into N rendered rows
+    where N is the length of the sweep's value array (and of the
+    ``output_names`` array). The sweep key must:
+
+    * be a declared template param that is *not* signal-kind;
+    * not appear in ``param_overrides`` (no contradiction);
+    * be exactly one key (multi-axis sweep is deferred to v1.3).
+    """
+    has_sweep = "param_sweep" in raw
+    has_names = "output_names" in raw
+    if has_sweep != has_names:
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep' and 'output_names' must appear "
+            f"together (one without the other is invalid)"
+        )
+    if not has_sweep:
+        return None, None
+
+    if output_name is not None:
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_name' and 'output_names' are mutually "
+            f"exclusive — use the latter for swept entries"
+        )
+
+    sweep_raw = raw["param_sweep"]
+    if not isinstance(sweep_raw, dict) or not sweep_raw:
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep' must be a non-empty JSON object"
+        )
+    if len(sweep_raw) != 1:
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep' must declare exactly one axis "
+            f"(multi-axis is a future feature); got "
+            f"{sorted(sweep_raw.keys())}"
+        )
+    sweep_key, sweep_values = next(iter(sweep_raw.items()))
+    if not isinstance(sweep_key, str):
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep' key must be a string"
+        )
+
+    declared = {p.key: p for p in template.params}
+    if sweep_key not in declared:
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep' key {sweep_key!r} is not declared "
+            f"in template {template.name!r}"
+        )
+    if declared[sweep_key].kind == "signal":
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep' cannot sweep a signal-kind param "
+            f"({sweep_key!r}); use a signal_group with multiple signals "
+            f"instead"
+        )
+    if sweep_key in overrides:
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep' key {sweep_key!r} is also listed "
+            f"in 'param_overrides' — pick one"
+        )
+
+    if not isinstance(sweep_values, list) or not sweep_values:
+        raise MeasureBundleLoadError(
+            f"{where}: 'param_sweep[{sweep_key!r}]' must be a non-empty "
+            f"JSON array"
+        )
+    for j, v in enumerate(sweep_values):
+        if not isinstance(v, str):
+            raise MeasureBundleLoadError(
+                f"{where}: 'param_sweep[{sweep_key!r}][{j}]' must be a "
+                f"string (got {type(v).__name__})"
+            )
+
+    names_raw = raw["output_names"]
+    if not isinstance(names_raw, list) or not names_raw:
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_names' must be a non-empty JSON array"
+        )
+    if len(names_raw) != len(sweep_values):
+        raise MeasureBundleLoadError(
+            f"{where}: 'output_names' has {len(names_raw)} entries but "
+            f"'param_sweep[{sweep_key!r}]' has {len(sweep_values)} "
+            f"(parallel arrays must match length)"
+        )
+    signal_param = template.signal_param()
+    for j, name in enumerate(names_raw):
+        if not isinstance(name, str) or name == "":
+            raise MeasureBundleLoadError(
+                f"{where}: 'output_names[{j}]' must be a non-empty string"
+            )
+        if _SIG_PLACEHOLDER in name and signal_param is None:
+            raise MeasureBundleLoadError(
+                f"{where}: 'output_names[{j}]' uses ${{SIG}} but template "
+                f"{template.name!r} has no signal-kind param"
+            )
+        bare = name.replace(_SIG_PLACEHOLDER, "X")
+        if not _OUTPUT_NAME_RE.match(bare):
+            raise MeasureBundleLoadError(
+                f"{where}: 'output_names[{j}]' {name!r} must match "
+                f"^[A-Za-z_][A-Za-z0-9_]*$ (after ${{SIG}} substitution)"
+            )
+
+    return ({sweep_key: tuple(sweep_values)}, tuple(names_raw))

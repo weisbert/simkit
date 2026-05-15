@@ -856,3 +856,33 @@ _Date: 2026-05-14_
 - Cross-project sharing via `~/.simkit/templates/`. Rejected: P3B spec §3.5 already defers it to v2; install-builtins keeps templates project-local (which is the right scope for editing/branching them per project).
 - Conditional rendering (e.g. optionally drop a `* $MUL` multiplier when `MUL=1`). Rejected: dumb-textual substitution is intentional per DECISIONS #41 — conditional logic in template bodies leaks the render contract into every consumer.
 - Shipping a "rise time with explicit-rail" `i_avg_window_scaled` variant. Rejected after user feedback ("感觉没什么道理，碰巧相同"): the multiplier appeared in 10 source rows but the multiplier value (2) was coincidence across unrelated devices, not a generic idiom.
+
+---
+
+## #44 — Phase 3B v1.2: output_name override + raw_expression + param_sweep + _full rise/fall variants
+_Date: 2026-05-15_
+
+**Decision:** Close six v1.1 → v1.2 friction points surfaced by the 2026-05-15 dogfood against live `fnxSession0`. Two are polish, four extend the bundle expressiveness. Bumps `measure_schema_version` to 2 (v1 bundles still load; v2-only fields rejected in v1 with a "bump to 2" error).
+
+**The six items, in dependency order:**
+
+1. **(c) implicit `signal_group: null`** — When the apply-entry template declares no signal-kind param, omitting `signal_group` is now equivalent to explicit null. v1.1 required the field even when meaningless. Schema-version-neutral (relaxation).
+2. **(d) `list-bundles` STATUS column** — Parse-failure status now reads `ERR: <reason>` with the leading bundle path stripped (the path is already in the `path` column). Polish.
+3. **(a) `output_name` override + `${SIG}` placeholder** — apply entry gains optional `output_name` field that *fully* replaces the `<short_alias><alias_suffix>[_<basename>]` concat scheme. `${SIG}` is the lone placeholder, substituted to the signal basename when the template has a signal-kind param. v2-only.
+4. **(b) Four `_full` rise/fall builtins** — `rise_time_auto_full` / `rise_time_fixed_full` / `fall_time_auto_full` / `fall_time_fixed_full` mirror the `i_avg_window` / `i_avg_full` precedent. Drop the `clip(... t_1 t_2)` wrap and the `T_START` / `T_END` params; expressions are otherwise identical. The live `fnxSession0` Rtime_clkout is byte-identical to `rise_time_fixed_full` with default rails. Library grows 17 → 21. Schema-version-neutral.
+5. **(f) `raw_expression` entry kind** — New apply-entry shape `{raw_expression, output_name, plot?, save?, eval_type?}` peer to the template entry. Schema enforces exactly-one-of `{template, raw_expression}`. Render path: literal pass-through, no substitution. Required for round-tripping composite waves (e.g. `rfEdgePhaseNoise(...)` for `PN_wave`) that no builtin can express. v2-only.
+6. **(e) `param_sweep` + `output_names`** — Single-axis sweep: apply entry gains `param_sweep: {KEY: [v1, v2, …]}` + parallel `output_names: [n1, n2, …]` arrays. Equal-length enforced; sweep key must be a declared non-signal-kind template param and not collide with `param_overrides`. Multi-axis is deferred to v1.3 (DECISIONS will get a follow-on entry). With signal_group, `${SIG}` in each name slot expands to basename — yielding `N×M` rows in `(sweep, signal)` order. v2-only.
+
+**Critical design choice — why no CLIP parameter on rise/fall:** First-pass proposal added a `CLIP` boolean param to the four existing builtins, requiring a new conditional-render engine (`expression_when` alternatives). User pushed back: the existing convention already distinguishes window vs. non-window by *name* (`i_avg_window` / `i_avg_full`). Adding CLIP-as-param would have introduced a *second* mechanism for the same semantic distinction. Variant route is consistent, cheaper, and keeps each template expression simple. **Rule:** the library uses naming, not parameters, to switch between windowed / unwindowed shapes.
+
+**Dogfood proof:** A 3-entry bundle (`measurements/dogfood_v2.measure.json`) describes the 7 expr rows of live `fnxSession0` exactly: 1 `raw_expression` entry for `PN_wave`, 1 `param_sweep` entry over `value_at` for the 5 `PN_*` spot frequencies, 1 template entry with `output_name` override for `Rtime_clkout`. `pvt measure apply --replace` on live → pull → diff vs. pre-apply baseline.snapshot.json: 11/11 rows byte-identical (4 net + 7 expr).
+
+**Output-name precedence rule:** If `output_name` is set on an apply entry, it fully shadows the concat scheme. `${SIG}` placeholder is only substituted; no other text rewriting. Collisions (two entries producing the same name) raise `RenderError` at render time. For sweep entries, each `output_names[i]` follows the same rule per swept iteration.
+
+**Test coverage:** 35 new cases across `test_measure_bundle.py` (load-time validation), `test_template_render.py` (render expansion), `test_builtins.py` (4 new builtins), `test_cli_measure.py` (count bump 17→21, STATUS column). Python suite 602 → 662 / 0. Live verification against `fnxSession0` clean.
+
+**Alternatives considered:**
+- `CLIP` boolean param + `expression_when` conditional render engine for rise/fall. Rejected (user feedback): inconsistent with `i_avg_window`/`i_avg_full` convention already in the library.
+- Sum-type split `TemplateApply | RawApply` for `raw_expression`. Rejected: single `MeasureApply` dataclass with `template: Optional[Template]` + raw fields is simpler; loader enforces exclusivity.
+- Pattern-based naming for `param_sweep` (`output_name_pattern: "PN_{X_LABEL}"`). Rejected (user pick): parallel `output_names` array is explicit, no name-derivation guesswork.
+- Multi-axis sweep in v1.2. Rejected: scope creep; the single-axis case covers the dominant idiom (one scalar varies, output name encodes the variant). Multi-axis follows once a real "freq × temperature" 2-D matrix case appears.

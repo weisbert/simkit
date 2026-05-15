@@ -900,13 +900,27 @@ def _summarise_bundle(path: Path, project: PvtProject) -> dict:
     except MeasureBundleError as exc:
         return {
             "name": name, "path": str(path),
-            "test": None, "apply": None, "status": str(exc),
+            "test": None, "apply": None,
+            "status": f"ERR: {_strip_path_prefix(str(exc), path)}",
         }
     return {
         "name": b.name, "path": str(path),
         "test": b.test_name, "apply": len(b.apply),
         "status": "OK",
     }
+
+
+def _strip_path_prefix(msg: str, path: Path) -> str:
+    """Remove a redundant ``<path>: `` head from an error message.
+
+    The bundle path already appears in the listing's ``path`` column;
+    repeating it inside the STATUS cell wastes width and truncates the
+    actually-useful suffix.
+    """
+    prefix = f"{path}: "
+    if msg.startswith(prefix):
+        return msg[len(prefix):]
+    return msg
 
 
 # --------------------------------------------------------------------------

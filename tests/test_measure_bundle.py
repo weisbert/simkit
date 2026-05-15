@@ -117,9 +117,11 @@ def _voltage_outs_doc() -> dict:
     }
 
 
-def _min_bundle(name: str = "voltage_outs_rise") -> dict:
+def _min_bundle(
+    name: str = "voltage_outs_rise", *, schema_version: int = 2,
+) -> dict:
     return {
-        "measure_schema_version": 1,
+        "measure_schema_version": schema_version,
         "name": name,
         "project": "my_block",
         "testbench_id": "MY_LIB/my_block_tb/schematic",
@@ -227,6 +229,321 @@ class HappyPathTests(ProjectFixtureMixin, unittest.TestCase):
         b = load_measure_bundle(path, project=self.project)
         self.assertIsNone(b.apply[0].signal_group)
 
+    def test_no_signal_apply_omits_signal_group_implicitly(self):
+        # v1.2 (c): when template has no signal-kind param, omitting
+        # 'signal_group' is equivalent to explicit null.
+        self._write_template(_no_signal_template_doc(), name="pn_at_freq")
+        doc = _min_bundle()
+        doc["apply"] = [{
+            "template": "pn_at_freq",
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+        }]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertIsNone(b.apply[0].signal_group)
+
+    def test_signal_template_omitting_signal_group_still_errors(self):
+        # v1.2 (c) inverse: template with signal-kind param + omitted
+        # signal_group must still surface a load error.
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        doc = _min_bundle()
+        del doc["apply"][0]["signal_group"]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"missing 'signal_group'"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    # v1.2 (a) — output_name override load-time validation -----------------
+
+    def test_output_name_override_accepted(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"][0]["output_name"] = "MyRtime_${SIG}"
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].output_name, "MyRtime_${SIG}")
+
+    def test_output_name_default_none_when_omitted(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        path = self._write_bundle(_min_bundle(), name="voltage_outs_rise")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertIsNone(b.apply[0].output_name)
+
+    def test_output_name_empty_string_rejected(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"][0]["output_name"] = ""
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"non-empty string"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_output_name_sig_placeholder_without_signal_template_rejected(self):
+        self._write_template(_no_signal_template_doc(), name="pn_at_freq")
+        doc = _min_bundle()
+        doc["apply"] = [{
+            "template": "pn_at_freq",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "output_name": "PN_${SIG}",
+        }]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"no signal-kind param"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_output_name_bad_chars_rejected(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"][0]["output_name"] = "has space"
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(MeasureBundleLoadError, r"must match"):
+            load_measure_bundle(path, project=self.project)
+
+
+class ParamSweepApplyTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.2 (e) — single-axis param_sweep with parallel output_names."""
+
+    def _make_value_at_bundle(self, sweep_doc: dict) -> Path:
+        self._write_template(
+            _no_signal_template_doc(name="value_at"), name="value_at"
+        )
+        doc = _min_bundle()
+        doc["apply"] = [sweep_doc]
+        return self._write_bundle(doc, name="voltage_outs_rise")
+
+    def test_sweep_loads(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1000000", "3000000", "10000000"]},
+            "output_names": ["PN_1M", "PN_3M", "PN_10M"],
+        })
+        b = load_measure_bundle(path, project=self.project)
+        e = b.apply[0]
+        self.assertEqual(
+            e.param_sweep, {"FREQ": ("1000000", "3000000", "10000000")}
+        )
+        self.assertEqual(e.output_names, ("PN_1M", "PN_3M", "PN_10M"))
+
+    def test_sweep_without_names_rejected(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1e6"]},
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"must appear together"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_names_without_sweep_rejected(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave", "FREQ": "1e6"},
+            "output_names": ["X"],
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"must appear together"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_length_mismatch_rejected(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1e6", "3e6", "10e6"]},
+            "output_names": ["PN_1M", "PN_3M"],
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"parallel arrays must match length"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_multi_axis_sweep_rejected(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {
+                "FREQ": ["1e6"],
+                "OUT_NAME": ["X"],
+            },
+            "output_names": ["X"],
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"exactly one axis"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_unknown_sweep_key_rejected(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave", "FREQ": "1e6"},
+            "param_sweep": {"NO_SUCH": ["1"]},
+            "output_names": ["X"],
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"not declared in template"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_sweep_signal_kind_rejected(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"] = [{
+            "template": "rise_time_threshold",
+            "signal_group": "voltage_outs",
+            "param_sweep": {"SIG": ["/Vout", "/AVDD"]},
+            "output_names": ["X", "Y"],
+        }]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"cannot sweep a signal-kind param"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_sweep_key_collision_with_overrides_rejected(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave", "FREQ": "1e6"},
+            "param_sweep": {"FREQ": ["1e6", "3e6"]},
+            "output_names": ["A", "B"],
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"also listed in 'param_overrides'"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_sweep_with_output_name_rejected(self):
+        path = self._make_value_at_bundle({
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1e6"]},
+            "output_names": ["A"],
+            "output_name": "Z",
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"mutually exclusive"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+
+class RawExpressionApplyTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.2 (f) — raw_expression apply entries bypass templates."""
+
+    def _bundle_with_raw(self, raw_entry: dict) -> Path:
+        # No template needed — but the bundle still validates against the
+        # project, so seed one signal_group so unrelated cases stay simple.
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"] = [raw_entry]
+        return self._write_bundle(doc, name="voltage_outs_rise")
+
+    def test_raw_entry_loads(self):
+        path = self._bundle_with_raw({
+            "raw_expression": "rfEdgePhaseNoise(?result \"pnoise_sample_pm0\")",
+            "output_name": "PN_wave",
+            "plot": True,
+            "save": False,
+        })
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(len(b.apply), 1)
+        self.assertIsNone(b.apply[0].template)
+        self.assertEqual(
+            b.apply[0].raw_expression,
+            "rfEdgePhaseNoise(?result \"pnoise_sample_pm0\")",
+        )
+        self.assertEqual(b.apply[0].output_name, "PN_wave")
+        self.assertTrue(b.apply[0].raw_plot)
+        self.assertFalse(b.apply[0].raw_save)
+
+    def test_raw_entry_plot_save_defaults(self):
+        path = self._bundle_with_raw({
+            "raw_expression": "noise(\"dB10\" 1e6)",
+            "output_name": "Noise_1M",
+        })
+        b = load_measure_bundle(path, project=self.project)
+        self.assertTrue(b.apply[0].raw_plot)
+        self.assertFalse(b.apply[0].raw_save)
+
+    def test_raw_entry_requires_output_name(self):
+        path = self._bundle_with_raw({
+            "raw_expression": "x",
+        })
+        with self.assertRaisesRegex(MeasureBundleLoadError, r"output_name"):
+            load_measure_bundle(path, project=self.project)
+
+    def test_raw_entry_rejects_empty_expression(self):
+        path = self._bundle_with_raw({
+            "raw_expression": "",
+            "output_name": "X",
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"non-empty string"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_raw_entry_rejects_sig_placeholder(self):
+        path = self._bundle_with_raw({
+            "raw_expression": "x",
+            "output_name": "PN_${SIG}",
+        })
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"\$\{SIG\}.*no signal context"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_raw_entry_rejects_unknown_keys(self):
+        path = self._bundle_with_raw({
+            "raw_expression": "x",
+            "output_name": "X",
+            "signal_group": "voltage_outs",
+        })
+        with self.assertRaisesRegex(MeasureBundleLoadError, r"unknown keys"):
+            load_measure_bundle(path, project=self.project)
+
+    def test_raw_entry_and_template_mutually_exclusive(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"] = [{
+            "template": "rise_time_threshold",
+            "signal_group": "voltage_outs",
+            "raw_expression": "x",
+            "output_name": "X",
+        }]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"both 'template' and 'raw_expression'"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_apply_entry_with_neither_kind_rejected(self):
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"] = [{"output_name": "X"}]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"'template' or 'raw_expression'"
+        ):
+            load_measure_bundle(path, project=self.project)
+
 
 class SchemaVersionTests(ProjectFixtureMixin, unittest.TestCase):
 
@@ -246,6 +563,58 @@ class SchemaVersionTests(ProjectFixtureMixin, unittest.TestCase):
         doc["measure_schema_version"] = 99
         path = self._write_bundle(doc, name="voltage_outs_rise")
         with self.assertRaises(MeasureBundleSchemaVersionError):
+            load_measure_bundle(path, project=self.project)
+
+    def test_v1_bundle_loads_without_v2_fields(self):
+        # A vanilla v1 bundle that doesn't touch any v1.2 feature still
+        # loads cleanly under the bumped schema range.
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle(schema_version=1)
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.measure_schema_version, 1)
+
+    def test_v1_bundle_with_output_name_rejected(self):
+        # v1.2 (a) output_name is a v2-only field; v1 bundles using it
+        # must surface a "bump to 2" error rather than silently accepting.
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle(schema_version=1)
+        doc["apply"][0]["output_name"] = "X"
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"require 'measure_schema_version': 2"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_v1_bundle_with_raw_expression_rejected(self):
+        doc = _min_bundle(schema_version=1)
+        doc["apply"] = [
+            {"raw_expression": "x", "output_name": "X"},
+        ]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"require 'measure_schema_version': 2"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_v1_bundle_with_param_sweep_rejected(self):
+        self._write_template(
+            _no_signal_template_doc(name="value_at"), name="value_at"
+        )
+        doc = _min_bundle(schema_version=1)
+        doc["apply"] = [{
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1e6"]},
+            "output_names": ["X"],
+        }]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"require 'measure_schema_version': 2"
+        ):
             load_measure_bundle(path, project=self.project)
 
 
