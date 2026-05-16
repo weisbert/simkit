@@ -886,3 +886,35 @@ _Date: 2026-05-15_
 - Sum-type split `TemplateApply | RawApply` for `raw_expression`. Rejected: single `MeasureApply` dataclass with `template: Optional[Template]` + raw fields is simpler; loader enforces exclusivity.
 - Pattern-based naming for `param_sweep` (`output_name_pattern: "PN_{X_LABEL}"`). Rejected (user pick): parallel `output_names` array is explicit, no name-derivation guesswork.
 - Multi-axis sweep in v1.2. Rejected: scope creep; the single-axis case covers the dominant idiom (one scalar varies, output name encodes the variant). Multi-axis follows once a real "freq × temperature" 2-D matrix case appears.
+
+---
+
+## #45 — Phase 3B v1.3: spec passthrough at bundle apply entry layer
+_Date: 2026-05-15_
+
+**Decision:** Add an optional ``spec`` field to bundle apply entries (template, raw, and sweep kinds alike). The string is Cadence-native — exactly what Maestro's Outputs CSV shows in the Spec column (e.g. ``<100p``, ``> -140``, ``range -150 -100``, ``[2.4G:2.6G]``, ``tol 0.05``). SKILL push parses it and dispatches to ``axlAddSpecToOutput`` with the appropriate exclusive keyword (``?lt`` / ``?gt`` / ``?min`` / ``?max`` / ``?range`` / ``?tol``). Closes the silent v1.0–v1.2 gap where the framework pulled the Spec column on pull but discarded it on push, so any pass/fail criteria the user had hand-edited in Maestro got wiped on the next ``apply``.
+
+**Why this layer and not the template:** Pinned via the AskUserQuestion design fork. Spec is design-specific, not formula-specific — the same ``rise_time_fixed_full`` template lands ``<100p`` for clkA and ``<200p`` for clkB depending on the testbench. Putting spec on the template would either force per-template-per-design library proliferation or push the variation into ``param_overrides``, neither of which earns its weight. The apply-entry layer is the natural carrier.
+
+**Why "Cadence-native string" and not structured JSON:** User pick on the syntax fork. Bundles store exactly the string the user already knows from the Maestro GUI ("<100p"). The SKILL side parses it; Python is just a transport with a light prefix sanity check. Trade-off accepted: bundle files don't help validate semantic errors (the framework can't tell that "range -100 -200" is degenerate); Cadence raises at apply time. Acceptable because the GUI-typed-string idiom is what users already think in.
+
+**Round-trip is semantic, not byte-identical.** Cadence normalises on the way in: ``<100p`` becomes ``< 1e-10`` after push+pull, and ``<-100`` becomes ``< -100``. The operator is space-separated and SI suffixes resolve to scientific notation. A pull-after-apply produces a snapshot whose spec strings differ textually from the bundle's spec strings, but the semantics are preserved. ``pvt measure restore`` (which uses ``axlOutputsImportFromFile`` and carries the spec column natively through Maestro) round-trips byte-identical, so the snapshot→snapshot loop is bit-clean — only the bundle→snapshot direction normalises.
+
+**SKILL gotcha — uncatchable evalstring errors.** Verified live 2026-05-15 that ``(errset (evalstring "abc") t)`` does NOT catch the "unbound variable" error path: it leaks past errset and aborts the enclosing call. The parser hand-checks the character set before each evalstring (``_pvtMeasureSafeEvalNumber``) using a manual scan instead of relying on errset. Cadence's ``rexCompile`` syntax is also too restrictive for a single-pattern validator (no ``?`` quantifier, no ``()`` groups), which is why the check is a per-char loop over a static charset. Documented inline; no externally observable symptom but worth knowing for future "tiny SKILL parser" work.
+
+**Push-failure semantics:** ``axlAddOutputExpr`` succeeding plus ``axlAddSpecToOutput`` failing does NOT downgrade the row's primary status to "failed". The per-row result table now carries an optional ``spec_status`` field — ``"ok"`` / ``"failed: <reason>"`` / ``"would_apply: <str>"`` / absent — so the caller can decide what's fatal. Rationale: the user mostly cares "did the measurement go in"; spec is metadata. A bad spec string should surface as a per-row warning, not abort the whole apply batch.
+
+**Test coverage:** SKILL Tier-1 +15 cases on ``_pvtMeasureParseSpec`` + ``_pvtMeasureSafeEvalNumber`` (lt/gt/inclusive-min/max/range-keyword/range-bracket/tol, plus garbage/non-numeric/empty/embedded-letter rejection). Python +16 cases across ``test_measure_bundle.py`` (load-time validation on three entry kinds + v1-schema gate) and ``test_template_render.py`` (spec propagates through template / raw / multi-signal / param-sweep render paths) and ``test_cli_measure.py`` (rendered.csv gains a trailing ``spec`` column). Python suite 662 → 678 / 0. SKILL Tier-1 347 → 376 / 1 (baseline FAIL unchanged).
+
+**Live dogfood:** ``measurements/dogfood_v3.measure.json`` adds spec to the v1.2 7-entry bundle: 5 PN_* rows get ``<-100`` (pulled back as ``< -100``), Rtime_clkout gets ``<100p`` (pulled back as ``< 1e-10``), PN_wave keeps no spec. Apply --replace → pull → spec strings observed verbatim from Cadence's normalisation. fnxSession0 restored to spec-clean baseline after.
+
+**Deferred to v1.4:**
+- Per-iteration spec on sweep entries (currently a single spec applies to all swept rows uniformly).
+- ``axlGetSpecData`` / ``axlGetSpecWeight`` capture on pull — pull already records the Spec column string; the structured ?weight / ?info side metadata is lost.
+- Dotted ``X..Y`` range form (parseString uses single-char delimiters, ambiguous with the dot in numeric literals).
+- Spec status surfaced in the apply CLI summary (currently captured in the SKILL report but not printed; need to wire through PvtMeasurePushReport decoding).
+
+**Alternatives considered:**
+- Structured ``{op, value}`` JSON form. Rejected on user pick: passthrough is simpler and bundle files store what the user types.
+- Switch the whole apply path to ``axlOutputsImportFromFile`` (gets spec "for free" because Maestro parses the CSV). Rejected: would lose the per-row added/replaced report that the user has been using to verify what landed. Per-row dispatch + new axlAddSpecToOutput call keeps that report and adds spec_status as a separate signal.
+- Lock spec to v3 schema (separate version bump). Rejected: spec is additive on top of v1.2 fields; keeping ``measure_schema_version: 2`` lets users upgrade by adding the one field without re-deciding what their existing bundles mean.

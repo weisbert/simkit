@@ -242,3 +242,87 @@
           (pvtAssert (pvtIsErr r) t "missing-file load returns :err"))
         (t
           (pvtAssert (pvtIsErr r) t "missing-file load returns :err"))))))
+
+
+;; ---------- v1.3 _pvtMeasureParseSpec --------------------------------------
+
+(pvtTestRegister "measure/parseSpec/lt-with-si"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "<100p")))
+      (pvtAssert (pvtIsOk r) t "<100p parses ok")
+      (pvtAssert (pvtUnwrap r) '("lt" 1e-10) "<100p -> (lt 1e-10)"))))
+
+(pvtTestRegister "measure/parseSpec/lt-with-space"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "< 100p")))
+      (pvtAssert (pvtUnwrap r) '("lt" 1e-10) "< 100p -> (lt 1e-10)"))))
+
+(pvtTestRegister "measure/parseSpec/gt-negative-no-space"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec ">-140")))
+      (pvtAssert (pvtUnwrap r) '("gt" -140) ">-140 -> (gt -140)"))))
+
+(pvtTestRegister "measure/parseSpec/inclusive-max"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "<= 1e-10")))
+      (pvtAssert (pvtUnwrap r) '("max" 1e-10) "<= maps to ?max"))))
+
+(pvtTestRegister "measure/parseSpec/inclusive-min"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec ">=0")))
+      (pvtAssert (pvtUnwrap r) '("min" 0) ">= maps to ?min"))))
+
+(pvtTestRegister "measure/parseSpec/range-keyword"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "range -150 -100")))
+      (pvtAssert (pvtUnwrap r) '("range" -150 -100) "range keyword form"))))
+
+(pvtTestRegister "measure/parseSpec/range-bracket"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "[2.4G:2.6G]")))
+      (pvtAssert (pvtUnwrap r) '("range" 2400000000.0 2600000000.0)
+                 "bracket form with SI suffixes"))))
+
+(pvtTestRegister "measure/parseSpec/tol"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "tol 0.05")))
+      (pvtAssert (pvtUnwrap r) '("tol" 0.05) "tol keyword form"))))
+
+(pvtTestRegister "measure/parseSpec/garbage-rejected"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "garbage")))
+      (pvtAssertErrCategory r 'pvt_validation "unrecognised form -> err"))))
+
+(pvtTestRegister "measure/parseSpec/non-numeric-tail-rejected"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "< abc")))
+      (pvtAssertErrCategory r 'pvt_validation "non-numeric value -> err"))))
+
+(pvtTestRegister "measure/parseSpec/empty-string-rejected"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "")))
+      (pvtAssertErrCategory r 'pvt_validation "empty -> err"))))
+
+
+;; ---------- v1.3 _pvtMeasureSafeEvalNumber ---------------------------------
+
+(pvtTestRegister "measure/safeEval/integer"
+  (lambda ()
+    (pvtAssert (pvtUnwrap (_pvtMeasureSafeEvalNumber "100")) 100 "100 -> 100")))
+
+(pvtTestRegister "measure/safeEval/si-pico"
+  (lambda ()
+    (pvtAssert (pvtUnwrap (_pvtMeasureSafeEvalNumber "100p")) 1e-10
+               "100p -> 1e-10")))
+
+(pvtTestRegister "measure/safeEval/letters-rejected"
+  (lambda ()
+    (pvtAssertErrCategory (_pvtMeasureSafeEvalNumber "abc")
+                          'pvt_validation
+                          "letters -> err (errset cannot catch this!)")))
+
+(pvtTestRegister "measure/safeEval/embedded-letter-rejected"
+  (lambda ()
+    (pvtAssertErrCategory (_pvtMeasureSafeEvalNumber "1+x")
+                          'pvt_validation
+                          "1+x -> err — x would be unbound")))

@@ -444,6 +444,82 @@ class ParamSweepApplyTests(ProjectFixtureMixin, unittest.TestCase):
             load_measure_bundle(path, project=self.project)
 
 
+class SpecPassthroughTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.3 — Cadence-native spec string on bundle apply entries."""
+
+    def _bundle_with_spec(self, *, spec: object, raw_entry: bool = False) -> Path:
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        if raw_entry:
+            doc["apply"] = [{
+                "raw_expression": "rfEdgePhaseNoise(?result \"pn\")",
+                "output_name": "PN_wave",
+                "spec": spec,
+            }]
+        else:
+            doc["apply"][0]["spec"] = spec
+        return self._write_bundle(doc, name="voltage_outs_rise")
+
+    def test_spec_loads_lt(self):
+        path = self._bundle_with_spec(spec="<100p")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].spec, "<100p")
+
+    def test_spec_loads_range_bracket(self):
+        path = self._bundle_with_spec(spec="[2.4G:2.6G]")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].spec, "[2.4G:2.6G]")
+
+    def test_spec_loads_range_keyword(self):
+        path = self._bundle_with_spec(spec="range -150 -100")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].spec, "range -150 -100")
+
+    def test_spec_null_means_none(self):
+        path = self._bundle_with_spec(spec=None)
+        b = load_measure_bundle(path, project=self.project)
+        self.assertIsNone(b.apply[0].spec)
+
+    def test_spec_empty_string_rejected(self):
+        path = self._bundle_with_spec(spec="")
+        with self.assertRaisesRegex(MeasureBundleLoadError, "non-empty"):
+            load_measure_bundle(path, project=self.project)
+
+    def test_spec_whitespace_only_rejected(self):
+        path = self._bundle_with_spec(spec="   ")
+        with self.assertRaisesRegex(MeasureBundleLoadError, "non-empty"):
+            load_measure_bundle(path, project=self.project)
+
+    def test_spec_bad_prefix_rejected(self):
+        path = self._bundle_with_spec(spec="probably_not_a_spec")
+        with self.assertRaisesRegex(MeasureBundleLoadError, "does not look"):
+            load_measure_bundle(path, project=self.project)
+
+    def test_spec_non_string_rejected(self):
+        path = self._bundle_with_spec(spec=42)
+        with self.assertRaisesRegex(MeasureBundleLoadError, "string"):
+            load_measure_bundle(path, project=self.project)
+
+    def test_spec_on_raw_entry(self):
+        path = self._bundle_with_spec(spec=">-140", raw_entry=True)
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].spec, ">-140")
+        self.assertIsNone(b.apply[0].template)
+
+    def test_spec_v1_bundle_rejected(self):
+        # v1.3 (1) gated by measure_schema_version: 2 like other v2-only fields.
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle(schema_version=1)
+        doc["apply"][0]["spec"] = "<100p"
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"require 'measure_schema_version': 2"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+
 class RawExpressionApplyTests(ProjectFixtureMixin, unittest.TestCase):
     """v1.2 (f) — raw_expression apply entries bypass templates."""
 

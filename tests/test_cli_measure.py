@@ -110,8 +110,10 @@ def _seed_bundle(
             {"template": "rise_time_threshold",
              "signal_group": "voltage_outs"},
         ]
+    # v1.2 default: bundles use schema_version 2 so v2-only fields
+    # (output_name, raw_expression, param_sweep, spec, …) are accepted.
     body = {
-        "measure_schema_version": 1,
+        "measure_schema_version": 2,
         "name": name,
         "project": project,
         "testbench_id": "fnxLib/my_block_tb/schematic",
@@ -678,8 +680,32 @@ class RenderCliTests(unittest.TestCase):
         csv_path = self.tmp / "measurements" / "voltage_outs_rise.rendered.csv"
         self.assertTrue(csv_path.is_file())
         text = csv_path.read_text()
-        self.assertIn("test,output_name,expression,eval_type,plot,save", text)
+        # v1.3 — header gained the trailing `spec` column.
+        self.assertIn("test,output_name,expression,eval_type,plot,save,spec", text)
         self.assertIn("Rtime_Vout", text)
+
+    def test_render_spec_column_carries_through(self):
+        # Re-seed a bundle that sets a spec on its single apply entry, and
+        # verify the spec column lands in the rendered CSV verbatim.
+        _seed_bundle(self.tmp, apply_entries=[
+            {
+                "template": "rise_time_threshold",
+                "signal_group": "voltage_outs",
+                "spec": "<100p",
+            },
+        ])
+        rc, out, err = _run(
+            "measure", "render", str(self.bundle),
+            "--project", str(self.pvtproject),
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        csv_path = self.tmp / "measurements" / "voltage_outs_rise.rendered.csv"
+        text = csv_path.read_text()
+        # The last comma-separated cell on the data row should be "<100p"
+        # (no quoting needed: no commas / quotes / newlines).
+        data_lines = [ln for ln in text.splitlines() if ln and not ln.startswith("test,")]
+        self.assertTrue(any(ln.endswith(",<100p") for ln in data_lines),
+                        f"no row carries the spec: {data_lines!r}")
 
     def test_render_json(self):
         rc, out, err = _run(

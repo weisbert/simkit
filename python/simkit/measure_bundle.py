@@ -49,6 +49,8 @@ _V2_ONLY_APPLY_FIELDS = frozenset({
     "plot",
     "save",
     "eval_type",
+    # v1.3 spec passthrough — still under schema_version: 2 (additive).
+    "spec",
 })
 
 _DEFAULT_TEMPLATES_DIR = "templates"
@@ -94,6 +96,12 @@ class MeasureApply:
     raw_plot: bool = True
     raw_save: bool = False
     raw_eval_type: str = "point"
+    # v1.3 — Cadence-native spec string passthrough (e.g. "<100p", "> -140",
+    # "range -150 -100"). SKILL push parses via evalstring + dispatches to
+    # axlAddSpecToOutput's exclusive ?lt/?gt/?range/?min/?max/?tol keyword.
+    # A single spec string applies uniformly to every row the entry yields
+    # (sweep × signal_group expansion all share it).
+    spec: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -401,6 +409,7 @@ def _validate_apply_entry(
     sweep, sweep_names = _validate_param_sweep(
         where, raw, template, param_overrides, output_name
     )
+    spec = _validate_spec(where, raw)
 
     return MeasureApply(
         template=template,
@@ -410,6 +419,7 @@ def _validate_apply_entry(
         output_name=output_name,
         param_sweep=sweep,
         output_names=sweep_names,
+        spec=spec,
     )
 
 
@@ -487,7 +497,7 @@ _OUTPUT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SIG_PLACEHOLDER = "${SIG}"
 
 _RAW_APPLY_KNOWN_KEYS = frozenset({
-    "raw_expression", "output_name", "plot", "save", "eval_type",
+    "raw_expression", "output_name", "plot", "save", "eval_type", "spec",
 })
 _RAW_EVAL_TYPES = frozenset({"point", "wave"})
 
@@ -540,6 +550,7 @@ def _validate_raw_apply_entry(where: str, raw: dict) -> MeasureApply:
             f"{where}: 'eval_type' must be one of "
             f"{sorted(_RAW_EVAL_TYPES)} (got {eval_type!r})"
         )
+    spec = _validate_spec(where, raw)
 
     return MeasureApply(
         template=None,
@@ -548,6 +559,7 @@ def _validate_raw_apply_entry(where: str, raw: dict) -> MeasureApply:
         raw_plot=plot,
         raw_save=save,
         raw_eval_type=eval_type,
+        spec=spec,
     )
 
 
@@ -708,3 +720,48 @@ def _validate_param_sweep(
             )
 
     return ({sweep_key: tuple(sweep_values)}, tuple(names_raw))
+
+
+# v1.3 — bundle-side spec validation. We accept the Cadence-native string
+# forms verified live against fnxSession0 (see DECISIONS #45):
+#   "<X"     → strict less-than           → SKILL ?lt
+#   ">X"     → strict greater-than        → SKILL ?gt
+#   "<=X"    → inclusive upper bound      → SKILL ?max
+#   ">=X"    → inclusive lower bound      → SKILL ?min
+#   "range X Y" or "[X:Y]" or "X..Y"      → SKILL ?range
+#   "tol X"  → tolerance form             → SKILL ?tol
+# The framework only does light prefix sanity at load time. The number tokens
+# (e.g. "100p", "2.4G") are passed opaque to SKILL, which uses evalstring to
+# resolve SI suffixes against Cadence's native parser.
+_SPEC_PREFIX_RE = re.compile(
+    r"^\s*("
+    r"<=|>=|<|>|"           # comparison operators
+    r"range\b|tol\b|"        # named forms
+    r"\[|[-+0-9.]"            # bracket form or naked number
+    r")"
+)
+
+
+def _validate_spec(where: str, raw: dict) -> Optional[str]:
+    """v1.3 — optional Cadence-native spec passthrough string on an apply entry."""
+    if "spec" not in raw:
+        return None
+    value = raw["spec"]
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise MeasureBundleLoadError(
+            f"{where}: 'spec' must be a string or null "
+            f"(got {type(value).__name__})"
+        )
+    if value.strip() == "":
+        raise MeasureBundleLoadError(
+            f"{where}: 'spec' must be a non-empty string when present "
+            f"(omit the field or set null for no spec)"
+        )
+    if not _SPEC_PREFIX_RE.match(value):
+        raise MeasureBundleLoadError(
+            f"{where}: 'spec' {value!r} does not look like a Cadence spec — "
+            f"expected start with one of: < > <= >= range tol [ digit"
+        )
+    return value

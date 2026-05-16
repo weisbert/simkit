@@ -304,6 +304,77 @@ class OutputNameOverrideTests(ProjectFixtureMixin, unittest.TestCase):
             render_bundle(bundle)
 
 
+class SpecRenderTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.3 — spec field propagates through every render path."""
+
+    def test_spec_carried_on_template_entry(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "voltage_outs",
+            "spec": "<100p",
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(rows[0].spec, "<100p")
+
+    def test_spec_uniform_across_multi_signal_expansion(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        sg = {
+            "signal_group_schema_version": 1,
+            "name": "two_rails",
+            "signals": ["/Vout", "/AVDD"],
+        }
+        self._write_signal_group(sg, name="two_rails")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "two_rails",
+            "spec": "<100p",
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual([r.spec for r in rows], ["<100p", "<100p"])
+
+    def test_spec_carried_on_raw_entry(self):
+        doc = _bundle_doc(apply=[{
+            "raw_expression": "rfEdgePhaseNoise(?result \"pn\")",
+            "output_name": "PN_wave",
+            "spec": "range -150 -100",
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(rows[0].spec, "range -150 -100")
+
+    def test_spec_uniform_across_sweep_expansion(self):
+        self._write_template(
+            _no_signal_template_doc(name="value_at"), name="value_at"
+        )
+        doc = _bundle_doc(apply=[{
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1e6", "3e6", "10e6"]},
+            "output_names": ["PN_1M", "PN_3M", "PN_10M"],
+            "spec": "<-100",
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual([r.spec for r in rows], ["<-100", "<-100", "<-100"])
+
+    def test_no_spec_renders_empty_string(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        bundle_path = self._write_bundle(_bundle_doc(), name="voltage_outs_rise")
+        bundle = load_measure_bundle(bundle_path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(rows[0].spec, "")
+
+
 class ParamSweepRenderTests(ProjectFixtureMixin, unittest.TestCase):
     """v1.2 (e) — param_sweep expansion at render time."""
 

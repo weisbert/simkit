@@ -47,6 +47,7 @@ class RenderedRow:
     eval_type: str
     plot: bool
     save: bool
+    spec: str = ""  # v1.3 — empty string == no spec on this row
 
 
 def render_bundle(bundle: MeasureBundle) -> list[RenderedRow]:
@@ -82,6 +83,7 @@ def _find_index(bundle: MeasureBundle, target: MeasureApply) -> int:
 
 
 def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
+    spec = entry.spec or ""
     # v1.2 (f) — raw_expression entries bypass the template machinery.
     if entry.template is None:
         assert entry.raw_expression is not None
@@ -92,6 +94,7 @@ def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
             eval_type=entry.raw_eval_type,
             plot=entry.raw_plot,
             save=entry.raw_save,
+            spec=spec,
         )]
 
     # v1.2 (e) — param_sweep expands into N rendered rows in parallel with
@@ -114,6 +117,7 @@ def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
                 eval_type=template.eval_type,
                 plot=template.plot,
                 save=template.save,
+                spec=spec,
             )
         )
         return out
@@ -138,6 +142,7 @@ def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
                 eval_type=template.eval_type,
                 plot=template.plot,
                 save=template.save,
+                spec=spec,
             )
         )
     return out
@@ -214,6 +219,7 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
     assert entry.param_sweep is not None
     assert entry.output_names is not None
     template = entry.template
+    spec = entry.spec or ""
     (sweep_key, sweep_values), = entry.param_sweep.items()
     signal_param = template.signal_param()
     rows: list[RenderedRow] = []
@@ -233,6 +239,7 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
                 eval_type=template.eval_type,
                 plot=template.plot,
                 save=template.save,
+                spec=spec,
             ))
             continue
 
@@ -253,5 +260,6 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
                 eval_type=template.eval_type,
                 plot=template.plot,
                 save=template.save,
+                spec=spec,
             ))
     return rows

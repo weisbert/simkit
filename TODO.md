@@ -153,12 +153,31 @@ Dogfood-driven follow-on. fnxSession0's 11-row baseline (4 nets + 7 expr) couldn
 - [x] Python suite 602 → 662 / 0 (+60 cases across measure_bundle / template_render / builtins / cli_measure)
 - [x] DECISIONS #44
 
-### Deferred from Phase 3B v1.2 → v1.3 (do NOT block next phase):
+### Phase 3B v1.3 — Spec passthrough (DONE 2026-05-15)
 
-- **Per-signal alias map** (to absorb the user's `Iavg_1, Iavg_2, …` hand-numbering idiom on supplies whose paths share basenames). v1.1 walkthrough pinned the collision; v1.2 didn't change the underlying signal-group shape so the gap remains.
-- **Multi-axis param_sweep** — v1.2 enforces single-axis. A real "freq × temperature" 2-D matrix case would justify lifting it.
+User pointed out v1.2 silently discarded the Maestro Spec column on apply, even though pull captured it. v1.3 closes the gap:
+
+- [x] `MeasureApply.spec: Optional[str]` field accepted on template / raw / sweep entries
+- [x] Loader prefix sanity check (`<`, `>`, `<=`, `>=`, `range`, `tol`, `[`, digit/sign/dot)
+- [x] `RenderedRow.spec` propagated through all three entry kinds; uniform across signal-group + sweep expansion
+- [x] `rendered.csv` gains a trailing `spec` column
+- [x] JSON envelope passes `spec` field down to SKILL
+- [x] `skill/pvtMeasure.il` — `_pvtMeasureSafeEvalNumber` (char-set guard before evalstring because errset CANNOT catch unbound-var errors from evalstring) + `_pvtMeasureParseSpec` (Cadence-native strings to tagged op + value tuples) + `_pvtMeasureApplyParsedSpec` (dispatch to `axlAddSpecToOutput` with the exclusive `?lt`/`?gt`/`?min`/`?max`/`?range`/`?tol` keyword) + sdb plumbed through `_pvtMeasurePushOne`
+- [x] Per-row `spec_status` field on the push report (separate from the primary `added`/`replaced` signal — spec failure does NOT abort the batch)
+- [x] SKILL Tier-1 +15 cases (`measure/parseSpec/*` + `measure/safeEval/*`); Tier-1 347 → 376 / 1 (baseline FAIL unchanged)
+- [x] Python +16 cases across `test_measure_bundle.py` (load + v1-schema gate), `test_template_render.py` (3 entry kinds × signal + sweep paths), `test_cli_measure.py` (rendered.csv spec column). Suite 662 → 678 / 0
+- [x] **Live dogfood** `measurements/dogfood_v3.measure.json` — 5×PN_* with `<-100` + Rtime_clkout with `<100p`. Cadence normalises on store: `<100p` → `< 1e-10`, `<-100` → `< -100`. Round-trip is semantic, not byte-identical
+- [x] DECISIONS #45
+
+### Deferred from Phase 3B v1.3 → v1.4 (do NOT block next phase):
+
+- **Per-iteration spec on sweep entries** — currently single spec applies uniformly to N swept rows. Per-row spec (e.g. PN @ 1MHz < -100, PN @ 100MHz < -140) needs a parallel `specs: [...]` array alongside `output_names`.
+- **`axlGetSpecData` / `axlGetSpecWeight` on pull** — pull captures the spec string but loses the structured `?weight` / `?info` side metadata.
+- **Dotted `X..Y` range form in spec parser** — parseString uses single-char delimiters so `..` is ambiguous with the dot inside numeric literals. Bracket `[X:Y]` + `range X Y` cover the cases; revisit if needed.
+- **Spec status in apply CLI summary** — pushReport captures `spec_status` per row but the CLI doesn't surface it. Need to extend PvtMeasurePushReport decoding + table formatter.
+- **Per-signal alias map** — v1.1 walkthrough pinned the collision (`/VDD` × 4 supplies share basename). Signal group needs to declare `aliases: {"path": "label"}`.
+- **Multi-axis param_sweep** — v1.2 enforces single-axis. Real `freq × temperature` 2-D matrix case would justify lifting it.
 - Multi-signal templates (v1 enforces ≤1 `signal`-kind param per template; edge_delay uses 1 signal + 1 string ref as the workaround).
 - Cross-project template sharing (user-home `~/.simkit/templates/`).
 - Snapshot template match-back (reverse-engineer a pulled snapshot into bundle + parameters).
-- Specs via `axlAddSpecToOutput` and user-defined Output columns.
 - Offline acceptance gates M2 + M3 (currently live-verified; would need captured fixture pair like Phase 2 Gate U1).

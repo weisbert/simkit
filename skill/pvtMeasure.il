@@ -237,21 +237,219 @@
 )
 
 
-(procedure (_pvtMeasureMakeRowResult name status reason)
-  "Build a per-row outcome table { name, status [, reason] } for the push
-   report. `reason` may be nil (omitted)."
+(procedure (_pvtMeasureMakeRowResult name status reason @optional (specStatus nil))
+  "Build a per-row outcome table { name, status [, reason] [, spec_status] }
+   for the push report. `reason` may be nil (omitted). v1.3: optional
+   `specStatus` field carries the outcome of the per-row axlAddSpecToOutput
+   call (one of \"ok\" / \"skipped\" / \"failed:<reason>\")."
   (prog (tab keys)
     (setq tab (makeTable 'pvtMeasureRowResult PVT_JSON_NULL))
     (setarray tab "name"   name)
     (setarray tab "status" status)
+    (setq keys (list "name" "status"))
     (cond
       (reason
         (setarray tab "reason" reason)
-        (setq keys (list "name" "status" "reason")))
-      (t
-        (setq keys (list "name" "status"))))
+        (setq keys (append keys (list "reason")))))
+    (cond
+      (specStatus
+        (setarray tab "spec_status" specStatus)
+        (setq keys (append keys (list "spec_status")))))
     (setarray tab _PVT_JSON_KEYS_PROP keys)
     (return tab)
+  )
+)
+
+
+;; --------------------------------------------------------------------------
+;; v1.3 — guard for evalstring on numeric tokens. errset does NOT catch
+;; "unbound variable" errors raised inside evalstring, so we have to vet
+;; the token shape before handing it off (confirmed live 2026-05-15 via
+;; the _pvtTestEvalstring probe). Pattern matches optional sign, mandatory
+;; digits, optional fractional + exponent, optional single SI suffix.
+;; --------------------------------------------------------------------------
+(defvar _PVT_MEASURE_NUM_CHARS "0123456789+-.eE")
+(defvar _PVT_MEASURE_SI_SUFFIXES "fpnumkMGT")
+
+
+(procedure (_pvtMeasureSafeEvalNumber tok)
+  "Return (pvtOk number) | pvtErr for a single numeric token (optional SI
+   suffix). Vets the character set first because errset cannot catch
+   evalstring's unbound-variable error path (confirmed live 2026-05-15).
+   Classic SKILL rexCompile lacks ? and () so we hand-roll the check."
+  (prog (rv stripped lastCh i ch)
+    (cond
+      ((or (null tok) (not (stringp tok)) (equal tok ""))
+        (return (pvtErr 'pvt_validation "empty numeric token" tok))))
+    (setq stripped tok)
+    ;; Peel a single trailing SI-suffix char if present.
+    (setq lastCh (substring tok (strlen tok) 1))
+    (cond
+      ((index _PVT_MEASURE_SI_SUFFIXES lastCh)
+        (setq stripped (substring tok 1 (sub1 (strlen tok))))))
+    (cond
+      ((equal stripped "")
+        (return (pvtErr 'pvt_validation
+                  (strcat "not a numeric token: " tok) tok))))
+    ;; Every remaining char must be a number char.
+    (setq i 1)
+    (while (leqp i (strlen stripped))
+      (setq ch (substring stripped i 1))
+      (cond
+        ((null (index _PVT_MEASURE_NUM_CHARS ch))
+          (return (pvtErr 'pvt_validation
+                    (strcat "not a numeric token: " tok) tok))))
+      (setq i (add1 i)))
+    (setq rv (errset (evalstring tok) t))
+    (cond
+      ((or (null rv) (not (numberp (car rv))))
+        (return (pvtErr 'pvt_validation
+                  (strcat "evalstring produced non-number for: " tok) tok))))
+    (return (pvtOk (car rv)))
+  )
+)
+
+
+;; --------------------------------------------------------------------------
+;; v1.3 — Cadence-native spec string parser.
+;;
+;; Accepts the same forms Cadence emits in CSV (verified live 2026-05-15
+;; against fnxSession0; see DECISIONS #45):
+;;   "<X"       /  "<X"     /  "< X"   → ("lt"    X_eval)
+;;   ">X"       /  "> X"               → ("gt"    X_eval)
+;;   "<=X"      /  "<= X"              → ("max"   X_eval)        [inclusive]
+;;   ">=X"      /  ">= X"              → ("min"   X_eval)        [inclusive]
+;;   "range X Y"                       → ("range" X_eval Y_eval)
+;;   "[X:Y]"                           → ("range" X_eval Y_eval)
+;;   "X..Y"                            → ("range" X_eval Y_eval)
+;;   "tol X"                           → ("tol"   X_eval)
+;;
+;; SI suffixes (100p, 2.4G, …) work for free — evalstring resolves them via
+;; Cadence's native reader. Returns (pvtOk (kindStr val1 [val2])) on success,
+;; pvtErr on bad syntax / non-numeric value.
+;; --------------------------------------------------------------------------
+(procedure (_pvtMeasureParseSpec specStr)
+  "Parse a Cadence-style spec string into a tagged value list.
+   Returns pvtOk (list kindStr v1 [v2]) | pvtErr."
+  (prog (s op rest parts v1 v2)
+    (cond
+      ((or (null specStr) (not (stringp specStr)))
+        (return (pvtErr 'pvt_validation
+                  "spec must be a non-empty string" specStr))))
+    ;; Strip leading/trailing whitespace via a poor-man trim. Classic SKILL
+    ;; has no built-in strip, so peel manually.
+    (setq s specStr)
+    (while (and (greaterp (strlen s) 0)
+                (member (substring s 1 1) (list " " "\t" "\n")))
+      (setq s (substring s 2)))
+    (while (and (greaterp (strlen s) 0)
+                (member (substring s (strlen s) 1)
+                        (list " " "\t" "\n")))
+      (setq s (substring s 1 (sub1 (strlen s)))))
+    (cond
+      ((equal s "")
+        (return (pvtErr 'pvt_validation "spec is empty after trim" specStr))))
+
+    ;; Bracket range form: "[X:Y]"
+    (cond
+      ((and (greaterp (strlen s) 2)
+            (equal (substring s 1 1) "[")
+            (equal (substring s (strlen s) 1) "]"))
+        (setq rest (substring s 2 (difference (strlen s) 2)))
+        (setq parts (parseString rest ":"))
+        (cond
+          ((not (equal (length parts) 2))
+            (return (pvtErr 'pvt_validation
+                      (strcat "spec bracket form must be [X:Y], got: " specStr)
+                      specStr))))
+        (setq v1 (_pvtMeasureSafeEvalNumber (car parts)))
+        (cond ((pvtIsErr v1) (return v1)))
+        (setq v2 (_pvtMeasureSafeEvalNumber (cadr parts)))
+        (cond ((pvtIsErr v2) (return v2)))
+        (return (pvtOk (list "range" (pvtUnwrap v1) (pvtUnwrap v2))))))
+
+    ;; (Dotted "X..Y" range form is intentionally NOT supported in v1.3 —
+    ;; parseString uses single-char delimiters which makes "..", ambiguous
+    ;; with single dots inside numeric literals. Use bracket [X:Y] or the
+    ;; explicit "range X Y" form instead.)
+
+    ;; Comparison operators — handle the 2-char ones first (<=, >=) then 1-char.
+    (cond
+      ((and (greaterp (strlen s) 2) (equal (substring s 1 2) "<="))
+        (setq op "max") (setq rest (substring s 3)))
+      ((and (greaterp (strlen s) 2) (equal (substring s 1 2) ">="))
+        (setq op "min") (setq rest (substring s 3)))
+      ((and (greaterp (strlen s) 1) (equal (substring s 1 1) "<"))
+        (setq op "lt") (setq rest (substring s 2)))
+      ((and (greaterp (strlen s) 1) (equal (substring s 1 1) ">"))
+        (setq op "gt") (setq rest (substring s 2)))
+      (t (setq op nil)))
+
+    (cond
+      (op
+        ;; The op suffix may have leading whitespace ("< 100p" form). Trim
+        ;; before vetting.
+        (while (and (greaterp (strlen rest) 0)
+                    (equal (substring rest 1 1) " "))
+          (setq rest (substring rest 2)))
+        (setq v1 (_pvtMeasureSafeEvalNumber rest))
+        (cond ((pvtIsErr v1) (return v1)))
+        (return (pvtOk (list op (pvtUnwrap v1))))))
+
+    ;; Keyword forms: "range X Y" / "tol X"
+    (setq parts (parseString s " \t"))
+    (cond
+      ((and (equal (car parts) "range") (equal (length parts) 3))
+        (setq v1 (_pvtMeasureSafeEvalNumber (cadr  parts)))
+        (cond ((pvtIsErr v1) (return v1)))
+        (setq v2 (_pvtMeasureSafeEvalNumber (caddr parts)))
+        (cond ((pvtIsErr v2) (return v2)))
+        (return (pvtOk (list "range" (pvtUnwrap v1) (pvtUnwrap v2)))))
+      ((and (equal (car parts) "tol") (equal (length parts) 2))
+        (setq v1 (_pvtMeasureSafeEvalNumber (cadr parts)))
+        (cond ((pvtIsErr v1) (return v1)))
+        (return (pvtOk (list "tol" (pvtUnwrap v1))))))
+
+    (return (pvtErr 'pvt_validation
+              (strcat "unrecognised spec form: " specStr) specStr))
+  )
+)
+
+
+;; --------------------------------------------------------------------------
+;; v1.3 — dispatch a parsed spec to axlAddSpecToOutput with the correct
+;; mutually-exclusive keyword. Returns t on success, string reason on fail.
+;; --------------------------------------------------------------------------
+(procedure (_pvtMeasureApplyParsedSpec sdb testName outName parsed)
+  "Call axlAddSpecToOutput with the keyword arg implied by the parsed tag.
+   `parsed` is the (kindStr v1 [v2]) list produced by _pvtMeasureParseSpec.
+   Returns t on success, a string reason on failure."
+  (prog (kind v1 v2 rv)
+    (setq kind (car parsed))
+    (setq v1   (cadr parsed))
+    (setq v2   (caddr parsed))
+    (setq rv
+      (cond
+        ((equal kind "lt")
+          (errset (axlAddSpecToOutput sdb testName outName ?lt v1) nil))
+        ((equal kind "gt")
+          (errset (axlAddSpecToOutput sdb testName outName ?gt v1) nil))
+        ((equal kind "min")
+          (errset (axlAddSpecToOutput sdb testName outName ?min v1) nil))
+        ((equal kind "max")
+          (errset (axlAddSpecToOutput sdb testName outName ?max v1) nil))
+        ((equal kind "range")
+          (errset (axlAddSpecToOutput sdb testName outName
+                                      ?range (list v1 v2)) nil))
+        ((equal kind "tol")
+          (errset (axlAddSpecToOutput sdb testName outName ?tol v1) nil))
+        (t nil)))
+    (cond
+      ((null rv)
+        (return (sprintf nil "axlAddSpecToOutput threw for kind=%s" kind)))
+      ((null (car rv))
+        (return (sprintf nil "axlAddSpecToOutput returned nil for kind=%s" kind)))
+      (t (return t)))
   )
 )
 
@@ -402,11 +600,15 @@
 )
 
 
-(procedure (_pvtMeasurePushOne sess testName rowObj dryRun replace)
+(procedure (_pvtMeasurePushOne sess sdb testName rowObj dryRun replace)
   "Push (or simulate pushing) one rendered row.
-   Returns a per-row outcome table from _pvtMeasureMakeRowResult."
-  ;; Ref: axlDeleteOutput adexlSKILLref.pdf p.245 ; axlAddOutputExpr p.239.
-  (prog (name expr evalType plotV saveV existedBefore addRv delRv status reason)
+   Returns a per-row outcome table from _pvtMeasureMakeRowResult.
+   v1.3: `sdb` is the setup-database handle from axlGetMainSetupDB —
+   required when a row carries a non-empty `spec`. May be nil in dry-run."
+  ;; Ref: axlDeleteOutput adexlSKILLref.pdf p.245 ; axlAddOutputExpr p.239 ;
+  ;;      axlAddSpecToOutput p.299.
+  (prog (name expr evalType plotV saveV specStr existedBefore addRv delRv
+         status reason specStatus parsed applyRv)
     (cond
       ((not (tablep rowObj))
         (return (_pvtMeasureMakeRowResult ""
@@ -419,6 +621,7 @@
                      (arrayref rowObj "plot") t))    ; default true (per spec §3.2)
     (setq saveV    (_pvtMeasureBoolFromJson
                      (arrayref rowObj "save") nil))  ; default false
+    (setq specStr  (_pvtMeasureRowField rowObj "spec" ""))
 
     (cond
       ((or (null name) (not (stringp name)) (equal name ""))
@@ -434,7 +637,10 @@
       (dryRun
         (return (_pvtMeasureMakeRowResult name
                   (cond (replace "would_replace") (t "would_add"))
-                  nil))))
+                  nil
+                  (cond ((and specStr (not (equal specStr "")))
+                          (sprintf nil "would_apply: %s" specStr))
+                        (t nil))))))
 
     ;; Replace: try deleting first; treat "no such output" as benign.
     ;; axlDeleteOutput returns t on success / t_error on failure. We ignore
@@ -473,7 +679,31 @@
         (setq status "failed")
         (setq reason (sprintf nil "axlAddOutputExpr returned %L" (car addRv)))))
 
-    (return (_pvtMeasureMakeRowResult name status reason))
+    ;; v1.3 — only attempt the spec push when the output add succeeded AND
+    ;; the row carries a non-empty spec. Spec failure does NOT down-grade
+    ;; the row's primary status (added/replaced); the spec_status field
+    ;; carries that signal separately so callers can decide what's fatal.
+    (setq specStatus nil)
+    (cond
+      ((and (or (equal status "added") (equal status "replaced"))
+            (stringp specStr) (not (equal specStr "")))
+        (cond
+          ((null sdb)
+            (setq specStatus "failed: no sdb handle"))
+          (t
+            (setq parsed (_pvtMeasureParseSpec specStr))
+            (cond
+              ((pvtIsErr parsed)
+                (setq specStatus
+                  (strcat "failed: " (pvtErrMessage parsed))))
+              (t
+                (setq applyRv (_pvtMeasureApplyParsedSpec
+                                sdb testName name (pvtUnwrap parsed)))
+                (cond
+                  ((equal applyRv t) (setq specStatus "ok"))
+                  (t (setq specStatus (strcat "failed: " applyRv))))))))))
+
+    (return (_pvtMeasureMakeRowResult name status reason specStatus))
   )
 )
 
@@ -488,7 +718,7 @@
    carrying the full report in its source slot for caller inspection."
   (prog (loadResult triple test rowsArr sessResult resolvedSess
          rowOutcomes rowResult rowFailed nPushed report
-         effectiveTest dryRunSess)
+         effectiveTest dryRunSess sdbHandle)
     ;; Default test name first so the JSON load can fall back to it.
     (setq effectiveTest (or testName _PVT_MEASURE_DEFAULT_TEST))
 
@@ -517,12 +747,20 @@
       (t
         (setq resolvedSess dryRunSess)))
 
+    ;; v1.3 — resolve the setup DB handle once per push call. Required by
+    ;; axlAddSpecToOutput when a row carries a non-empty `spec`. May be nil
+    ;; in dry-run; pushOne tolerates that.
+    (cond
+      (dryRun (setq sdbHandle nil))
+      (t
+        (setq sdbHandle (car (errset (axlGetMainSetupDB resolvedSess) nil)))))
+
     (setq rowOutcomes nil)
     (setq rowFailed   nil)
     (setq nPushed     0)
     (foreach rowObj rowsArr
       (setq rowResult
-        (_pvtMeasurePushOne resolvedSess test rowObj dryRun replace))
+        (_pvtMeasurePushOne resolvedSess sdbHandle test rowObj dryRun replace))
       (setq rowOutcomes (cons rowResult rowOutcomes))
       (cond
         ((member (arrayref rowResult "status")

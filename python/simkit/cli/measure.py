@@ -1040,8 +1040,11 @@ def _rendered_row_to_dict(row: RenderedRow, test_name: str) -> dict:
 
 
 def _render_to_csv(rows: list[RenderedRow], test_name: str) -> str:
-    """Six-column CSV — debug / inspection only, NOT consumed by Maestro."""
-    lines = ["test,output_name,expression,eval_type,plot,save"]
+    """Seven-column CSV — debug / inspection only, NOT consumed by Maestro.
+
+    v1.3 added the ``spec`` column (Cadence-native passthrough string).
+    """
+    lines = ["test,output_name,expression,eval_type,plot,save,spec"]
     for r in rows:
         lines.append(
             ",".join((
@@ -1051,6 +1054,7 @@ def _render_to_csv(rows: list[RenderedRow], test_name: str) -> str:
                 r.eval_type,
                 "t" if r.plot else "",
                 "t" if r.save else "",
+                _csv_escape(r.spec or ""),
             ))
         )
     return "\n".join(lines) + "\n"
@@ -1084,6 +1088,7 @@ def _render_to_envelope(
                 "eval_type": r.eval_type,
                 "plot": r.plot,
                 "save": r.save,
+                "spec": r.spec or "",
             }
             for r in rendered
         ],
