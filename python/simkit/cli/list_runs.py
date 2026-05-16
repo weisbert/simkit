@@ -34,6 +34,9 @@ _COL_WIDTHS = {
     "testbench": 22,
     "label": 14,
     "note": 30,
+    # v1.4 — spec verdict aggregate, fixed-width "PPP/HHH" (pass/has_spec)
+    # or "—" when the run has no specs at all.
+    "specs": 9,
 }
 
 
@@ -62,6 +65,13 @@ def add_subparser(sub) -> None:
     p.add_argument(
         "--limit", type=int, default=None,
         help="Show at most N rows.",
+    )
+    p.add_argument(
+        "--failed-only", dest="failed_only", action="store_true",
+        help=(
+            "Show only runs with at least one spec failure "
+            "(v1.4; needs schema v2+ data)."
+        ),
     )
     p.add_argument(
         "--db", type=Path, default=None,
@@ -108,6 +118,7 @@ def run(args) -> int:
             project=args.project,
             slice_only=args.slice_only,
             limit=args.limit,
+            failed_only=args.failed_only,
         )
     finally:
         con.close()
@@ -120,7 +131,12 @@ def run(args) -> int:
 
 
 def _print_table(rows: List[RunRow]) -> None:
-    headers = ("run_id", "timestamp", "project", "testbench", "label", "note")
+    # v1.4 — only render the "specs" column if any run has specs. Keeps
+    # the table compact for pre-v2 / spec-less data.
+    show_specs = any(r.n_has_spec > 0 for r in rows)
+    headers = ["run_id", "timestamp", "project", "testbench", "label", "note"]
+    if show_specs:
+        headers.append("specs")
     widths = [_COL_WIDTHS[h] for h in headers]
     sep = "  "
 
@@ -133,15 +149,32 @@ def _print_table(rows: List[RunRow]) -> None:
         return
 
     for r in rows:
-        cells = (
+        cells = [
             r.run_id[:8],
             _trunc(r.timestamp, widths[1]),
             _trunc(r.project_id, widths[2]),
             _trunc(r.testbench_alias or r.testbench_id, widths[3]),
             _trunc(r.label or "", widths[4]),
             _trunc(r.note or "", widths[5]),
-        )
+        ]
+        if show_specs:
+            cells.append(_format_specs(r))
         print(sep.join(c.ljust(w) for c, w in zip(cells, widths)))
+
+
+def _format_specs(r: RunRow) -> str:
+    """Render the per-run spec verdict cell.
+
+    * No specs on this run -> "—"
+    * All pass            -> "<n>/<n>"  (green-equivalent, no decoration)
+    * Any fail            -> "<pass>/<has_spec> FAIL"
+    """
+    if r.n_has_spec == 0:
+        return "—"
+    base = f"{r.n_pass}/{r.n_has_spec}"
+    if r.n_fail > 0:
+        return f"{base} FAIL"
+    return base
 
 
 def _trunc(s: str, width: int) -> str:

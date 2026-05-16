@@ -178,7 +178,7 @@
       (when (pvtIsOk envR)
         (let ((env (pvtUnwrap envR)))
           (pvtAssert (pvtJsonObjectKeys env)
-                     '("schema_version" "run" "results" "artifacts")
+                     '("schema_version" "run" "results" "artifacts" "output_specs")
                      "envelope keys in canonical order"))))))
 
 (pvtTestRegister "collect/envelope-schema-version-int"
@@ -186,7 +186,7 @@
     (let ((envR (_pvtCollBuildEnvelope (_pvtCollTestSampleRunMeta) nil nil nil)))
       (when (pvtIsOk envR)
         (let ((env (pvtUnwrap envR)))
-          (pvtAssert (arrayref env "schema_version") 1 "schema_version == 1")
+          (pvtAssert (arrayref env "schema_version") 2 "schema_version == 2")
           (pvtAssert (integerp (arrayref env "schema_version")) t
                      "schema_version is integer"))))))
 
@@ -225,6 +225,60 @@
             (pvtAssert (pvtJsonNullp (arrayref run "netlist_path")) t
                        "netlist_path stays null when nil supplied")))))))
 
+;; v1.4 — output_specs field. Builder accepts nil → emits "{}" via a fresh
+;; empty table. Populated table flows through as-is.
+(pvtTestRegister "collect/envelope-output-specs-default-is-empty-object"
+  (lambda ()
+    (let ((envR (_pvtCollBuildEnvelope (_pvtCollTestSampleRunMeta) nil nil nil)))
+      (when (pvtIsOk envR)
+        (let ((env (pvtUnwrap envR)))
+          (pvtAssert (tablep (arrayref env "output_specs")) t
+                     "output_specs defaults to a (empty) table"))))))
+
+(pvtTestRegister "collect/envelope-output-specs-passed-through"
+  (lambda ()
+    (let ((specs (makeTable 'pvtCollOutputSpecs PVT_JSON_NULL))
+          (testTab (makeTable 'pvtCollTestSpecs PVT_JSON_NULL)))
+      (setarray testTab "Rtime_clkout" "< 1e-10")
+      (setarray testTab _PVT_JSON_KEYS_PROP '("Rtime_clkout"))
+      (setarray specs "Test" testTab)
+      (setarray specs _PVT_JSON_KEYS_PROP '("Test"))
+      (let ((envR (_pvtCollBuildEnvelope (_pvtCollTestSampleRunMeta)
+                                         nil nil nil specs)))
+        (when (pvtIsOk envR)
+          (let ((env (pvtUnwrap envR)))
+            (let ((got (arrayref env "output_specs")))
+              (pvtAssert (eq got specs) t
+                         "output_specs preserved through builder")
+              (pvtAssert (arrayref (arrayref got "Test") "Rtime_clkout")
+                         "< 1e-10"
+                         "Test/Rtime_clkout spec round-trips"))))))))
+
+;; v1.4 — CSV splitter preserves empty fields (Maestro CSV emits trailing
+;; empties when no spec / no plot / no save). Mirrors pvtMeasure's split
+;; semantics (same shape, separate copy for load-order independence).
+(pvtTestRegister "collect/splitOnComma-empty-trailing"
+  (lambda ()
+    (let ((parts (_pvtCollSplitOnComma "Test,,net,/Vin,t,,")))
+      (pvtAssert (length parts) 7 "empty-fields preserved → 7 parts")
+      (pvtAssert (nthelem 2 parts) "" "name col is empty string"))))
+
+(pvtTestRegister "collect/splitOnComma-no-comma"
+  (lambda ()
+    (let ((parts (_pvtCollSplitOnComma "single")))
+      (pvtAssert (length parts) 1 "no comma → 1 part")
+      (pvtAssert (car parts) "single" "value preserved"))))
+
+(pvtTestRegister "collect/splitOnComma-empty-string"
+  (lambda ()
+    (let ((parts (_pvtCollSplitOnComma "")))
+      (pvtAssert (length parts) 1 "empty input → singleton list with empty"))))
+
+(pvtTestRegister "collect/splitOnComma-only-commas"
+  (lambda ()
+    (let ((parts (_pvtCollSplitOnComma ",,,")))
+      (pvtAssert (length parts) 4 "three commas → 4 empties"))))
+
 
 ;; --------------------------------------------------------------------------
 ;; WriteRunJson: produce a file, re-parse via pvtJsonParseFile, assert keys
@@ -248,9 +302,9 @@
                   (when (pvtIsOk parsed)
                     (let ((env (pvtUnwrap parsed)))
                       (pvtAssert (pvtJsonObjectKeys env)
-                                 '("schema_version" "run" "results" "artifacts")
+                                 '("schema_version" "run" "results" "artifacts" "output_specs")
                                  "round-trip key order")
-                      (pvtAssert (arrayref env "schema_version") 1
+                      (pvtAssert (arrayref env "schema_version") 2
                                  "round-trip schema_version int"))))))))))))
 
 (pvtTestRegister "collect/writeRunJson-validates-via-python"

@@ -93,6 +93,7 @@ class DiffTestBase(unittest.TestCase):
         netlist_text: Optional[str] = "* netlist v1\n",
         timestamp: str = "2026-05-10T12:00:00+08:00",
         label: Optional[str] = None,
+        output_specs: Optional[Dict[str, Dict[str, str]]] = None,
     ):
         dump = copy.deepcopy(_BASE_DUMP)
         dump["run"]["run_id"] = run_id
@@ -100,6 +101,10 @@ class DiffTestBase(unittest.TestCase):
         dump["results"] = rows
         if netlist_text is None:
             dump["run"]["netlist_path"] = None
+        # v1.4 — if output_specs is provided, lift the dump to schema_version=2.
+        if output_specs is not None:
+            dump["schema_version"] = 2
+            dump["output_specs"] = output_specs
         run_dir = self.runs_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         if netlist_text is not None:
@@ -277,6 +282,60 @@ class ResultsDiffTests(DiffTestBase):
         )
         keys = [(r.test, r.corner, r.point, r.output) for r in d]
         self.assertEqual(keys, sorted(keys))
+
+    # v1.4 — spec_status flip detection
+    def test_spec_status_carried_per_slice(self):
+        # Same numeric value; same spec; both slices pass → spec_changed False.
+        self._ingest_dump(
+            _RUN_A_ID, [_row("T", "TT", 0, "v", 50.0)],
+            output_specs={"T": {"v": "< 100"}},
+        )
+        self._ingest_dump(
+            _RUN_B_ID, [_row("T", "TT", 0, "v", 50.0)],
+            output_specs={"T": {"v": "< 100"}},
+        )
+        d = compute_results_diff(
+            self.con,
+            slice_a_run_id=_RUN_A_ID, slice_b_run_id=_RUN_B_ID,
+        )
+        self.assertEqual(d[0].spec_status_a, "pass")
+        self.assertEqual(d[0].spec_status_b, "pass")
+        self.assertFalse(d[0].spec_changed)
+
+    def test_spec_changed_true_when_verdict_flips(self):
+        # Value drifts; same spec; pass→fail.
+        self._ingest_dump(
+            _RUN_A_ID, [_row("T", "TT", 0, "v", 50.0)],
+            output_specs={"T": {"v": "< 100"}},
+        )
+        self._ingest_dump(
+            _RUN_B_ID, [_row("T", "TT", 0, "v", 150.0)],
+            output_specs={"T": {"v": "< 100"}},
+        )
+        d = compute_results_diff(
+            self.con,
+            slice_a_run_id=_RUN_A_ID, slice_b_run_id=_RUN_B_ID,
+        )
+        self.assertEqual(d[0].spec_status_a, "pass")
+        self.assertEqual(d[0].spec_status_b, "fail")
+        self.assertTrue(d[0].spec_changed)
+
+    def test_spec_changed_false_when_one_side_missing(self):
+        # v1 slice + v2 slice — verdict undefined on the v1 side.
+        # spec_changed must NOT report a flip just because one side has
+        # spec_status = None.
+        self._ingest_dump(_RUN_A_ID, [_row("T", "TT", 0, "v", 50.0)])
+        self._ingest_dump(
+            _RUN_B_ID, [_row("T", "TT", 0, "v", 50.0)],
+            output_specs={"T": {"v": "< 100"}},
+        )
+        d = compute_results_diff(
+            self.con,
+            slice_a_run_id=_RUN_A_ID, slice_b_run_id=_RUN_B_ID,
+        )
+        self.assertIsNone(d[0].spec_status_a)
+        self.assertEqual(d[0].spec_status_b, "pass")
+        self.assertFalse(d[0].spec_changed)
 
 
 class NetlistDiffTests(DiffTestBase):

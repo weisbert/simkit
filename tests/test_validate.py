@@ -435,8 +435,16 @@ class TopLevelTests(unittest.TestCase):
     def setUp(self):
         self.dump = _good_dump()
 
-    def test_i23_schema_version_2(self):
+    def test_i23_schema_version_2_accepted(self):
+        # v1.4: schema_version 2 is now supported (adds optional
+        # output_specs). No I23 violation expected.
         self.dump["schema_version"] = 2
+        v = validate_dump(self.dump)
+        self.assertNotIn("I23", _codes(v))
+
+    def test_i23_schema_version_99_rejected(self):
+        # Any version outside {1, 2} still trips I23.
+        self.dump["schema_version"] = 99
         v = validate_dump(self.dump)
         self.assertIn("I23", _codes(v))
 

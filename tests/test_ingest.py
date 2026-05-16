@@ -243,8 +243,9 @@ class SchemaVersionTests(unittest.TestCase):
     def tearDown(self):
         self.con.close()
 
-    def test_schema_version_2_rejected(self):
-        with self.assertRaises(SchemaVersionError):
+    def test_unsupported_schema_version_rejected(self):
+        # Fixture now carries schema_version=99 (v1.4 accepts {1, 2}).
+        with self.assertRaises((SchemaVersionError, ValidationError)):
             ingest_run_json(self.con, _BAD_VERSION)
 
     def test_schema_version_missing_rejected(self):
@@ -670,6 +671,148 @@ class SyntheticMessyTests(unittest.TestCase):
         self.assertEqual(d["failed"], 1)
         self.assertEqual(d["running"], 1)
         self.assertEqual(d["no_convergence"], 1)
+
+
+# ----------------------------------------------------------------------
+# v1.4 — spec / spec_status columns from output_specs envelope field
+# ----------------------------------------------------------------------
+
+class SpecIngestTests(unittest.TestCase):
+    """v1.4 (#1b): the collector now dumps per-output spec strings in a
+    top-level ``output_specs`` map. The ingester denormalises them onto
+    every result row and computes spec_status via simkit.spec_eval."""
+
+    def setUp(self):
+        self.con = _fresh_db()
+
+    def tearDown(self):
+        self.con.close()
+
+    def _v2_dump_with_specs(
+        self,
+        result_value: float,
+        spec_string: str | None,
+    ) -> dict:
+        """Build a single-result v2 dump with one (test, output) and an
+        optional spec set for it."""
+        return {
+            "schema_version": 2,
+            "run": {
+                "run_id": "deadbeef-dead-4eef-8eef-deadbeefdead",
+                "project_id": "synthetic_v14",
+                "testbench_id": "lib/cell/view",
+                "testbench_alias": None,
+                "timestamp": "2026-05-16T15:00:00+08:00",
+                "author": "tester",
+                "label": None,
+                "note": None,
+                "netlist_path": "input.scs",
+                "history_name": "synthetic_v14",
+            },
+            "results": [
+                {
+                    "point": 1,
+                    "corner": "TT",
+                    "test": "Test",
+                    "output": "Rtime_clkout",
+                    "value": result_value,
+                    "status": "ok",
+                    "sweep": {},
+                    "corner_vars": {"temperature": "27"},
+                    "test_note": None,
+                }
+            ],
+            "artifacts": [],
+            "output_specs": (
+                {"Test": {"Rtime_clkout": spec_string}}
+                if spec_string is not None else {}
+            ),
+        }
+
+    def _ingest_dict(self, dump: dict) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            _write_dump(d, dump)
+            ingest_run_json(self.con, d / "run.json")
+
+    def _spec_cols(self) -> tuple:
+        return self.con.execute(
+            "SELECT spec, spec_status FROM results "
+            "WHERE run_id = 'deadbeef-dead-4eef-8eef-deadbeefdead'"
+        ).fetchone()
+
+    def test_pass_verdict_lt(self):
+        # value 5e-11 < 1e-10 → pass
+        self._ingest_dict(self._v2_dump_with_specs(5e-11, "< 1e-10"))
+        self.assertEqual(self._spec_cols(), ("< 1e-10", "pass"))
+
+    def test_fail_verdict_lt(self):
+        # value 2e-10 ≥ 1e-10 → fail
+        self._ingest_dict(self._v2_dump_with_specs(2e-10, "< 1e-10"))
+        self.assertEqual(self._spec_cols(), ("< 1e-10", "fail"))
+
+    def test_minimize_form_evaluated(self):
+        # Maestro normalises ?min → 'minimize X'. pass if value ≤ X.
+        self._ingest_dict(self._v2_dump_with_specs(50, "minimize 100"))
+        self.assertEqual(self._spec_cols(), ("minimize 100", "pass"))
+
+    def test_no_spec_when_output_specs_absent(self):
+        # v2 envelope but with empty output_specs — every row → no_spec.
+        self._ingest_dict(self._v2_dump_with_specs(5e-11, None))
+        spec, status = self._spec_cols()
+        self.assertIsNone(spec)
+        self.assertEqual(status, "no_spec")
+
+    def test_v1_envelope_back_compat(self):
+        # An old v1 envelope has no output_specs at all → every row gets
+        # spec=NULL, spec_status=NULL ("unknown, predates spec capture",
+        # distinct from v2's 'no_spec' = "checked and there's no spec").
+        dump = self._v2_dump_with_specs(5e-11, None)
+        dump["schema_version"] = 1
+        del dump["output_specs"]
+        self._ingest_dict(dump)
+        spec, status = self._spec_cols()
+        self.assertIsNone(spec)
+        self.assertIsNone(status)
+
+    def test_no_value_when_status_is_eval_err(self):
+        # When a result fails to compute (DECISIONS #35), the collector
+        # emits status='eval_err' with value=null. Such rows can't be
+        # compared against a spec — evaluator returns 'no_value' rather
+        # than crashing on the spec or pretending it passed.
+        dump = self._v2_dump_with_specs(0.0, "< 1e-10")
+        dump["results"][0]["status"] = "eval_err"
+        dump["results"][0]["value"] = None  # I14 contract for eval_err
+        self._ingest_dict(dump)
+        spec, status = self._spec_cols()
+        self.assertEqual(spec, "< 1e-10")
+        self.assertEqual(status, "no_value")
+
+    def test_parse_err_on_malformed_spec(self):
+        # Spec string that defies the parser — verdict is parse_err, not
+        # a hard ingest failure (collector should never emit such a string
+        # but we want to land it for debugging rather than abort).
+        self._ingest_dict(self._v2_dump_with_specs(50, "garbage_spec"))
+        spec, status = self._spec_cols()
+        self.assertEqual(spec, "garbage_spec")
+        self.assertEqual(status, "parse_err")
+
+    def test_real_run_fixture_back_compat(self):
+        # The 42-row real-run fixture is v1 and has no output_specs. All
+        # 42 rows land with spec=NULL, spec_status=NULL ("predates spec
+        # capture"); they are NOT marked 'no_spec' (= "checked and none").
+        ingest_run_json(self.con, _REAL_RUN)
+        rows = self.con.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN spec IS NULL THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN spec_status IS NULL THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN spec_status = 'no_spec' THEN 1 ELSE 0 END) "
+            "FROM results"
+        ).fetchone()
+        self.assertEqual(rows[0], 42)
+        self.assertEqual(rows[1], 42)
+        self.assertEqual(rows[2], 42)
+        self.assertEqual(rows[3], 0)
 
 
 if __name__ == "__main__":

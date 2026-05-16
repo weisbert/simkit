@@ -89,12 +89,16 @@ class CliDiffBase(unittest.TestCase):
         *,
         netlist_text: Optional[str] = "net v1\n",
         label: Optional[str] = None,
+        output_specs: Optional[Dict[str, Dict[str, str]]] = None,
     ):
         dump = copy.deepcopy(_BASE)
         dump["run"]["run_id"] = run_id
         dump["results"] = rows
         if netlist_text is None:
             dump["run"]["netlist_path"] = None
+        if output_specs is not None:
+            dump["schema_version"] = 2
+            dump["output_specs"] = output_specs
         run_dir = self.runs_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         if netlist_text is not None:
@@ -198,6 +202,53 @@ class CliDiffTableTests(CliDiffBase):
         )
         self.assertEqual(rc, 0)
         self.assertIn("files identical", out)
+
+    # v1.4 — --spec-changes filter
+    def test_spec_changes_shows_only_flipped_rows(self):
+        # Two rows: one whose verdict flips (pass→fail), one whose verdict
+        # stays pass. --spec-changes should hide the unchanged one and
+        # surface only the flipped row.
+        self._ingest(
+            _RUN_A, [
+                _row("T", "TT", 0, "v_flip", 50.0),
+                _row("T", "TT", 0, "v_stay", 50.0),
+            ],
+            label="a",
+            output_specs={"T": {"v_flip": "< 100", "v_stay": "< 100"}},
+        )
+        self._ingest(
+            _RUN_B, [
+                _row("T", "TT", 0, "v_flip", 150.0),  # now fails
+                _row("T", "TT", 0, "v_stay", 50.0),
+            ],
+            label="b",
+            output_specs={"T": {"v_flip": "< 100", "v_stay": "< 100"}},
+        )
+        rc, out, err = _run(
+            "diff", "a", "b", "--spec-changes", "--db", str(self.db),
+        )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertIn("v_flip", out)
+        self.assertNotIn("v_stay", out)
+        self.assertIn("--spec-changes", out)
+        # spec column header is included
+        self.assertIn("spec_a", out)
+        self.assertIn("spec_b", out)
+
+    def test_spec_changes_empty_when_no_flips(self):
+        self._ingest(
+            _RUN_A, [_row("T", "TT", 0, "v", 50.0)], label="a",
+            output_specs={"T": {"v": "< 100"}},
+        )
+        self._ingest(
+            _RUN_B, [_row("T", "TT", 0, "v", 60.0)], label="b",
+            output_specs={"T": {"v": "< 100"}},
+        )
+        rc, out, _err = _run(
+            "diff", "a", "b", "--spec-changes", "--db", str(self.db),
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("(no rows)", out)
 
 
 class CliDiffJsonTests(CliDiffBase):

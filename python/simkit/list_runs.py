@@ -27,6 +27,13 @@ class RunRow:
     history_name: str
     schema_version: int
     ingested_at: str  # ISO-formatted
+    # v1.4 — per-run spec verdict aggregate. Both default to 0 for runs
+    # whose results table has no spec_status column (impossible after the
+    # v2 migration) OR whose results carry only 'no_spec' verdicts. The
+    # CLI shows "<passed>/<has_spec>" when has_spec > 0.
+    n_pass: int = 0
+    n_fail: int = 0
+    n_has_spec: int = 0  # pass + fail + unsupported + parse_err + no_value
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -38,14 +45,18 @@ def list_runs(
     project: Optional[str] = None,
     slice_only: bool = False,
     limit: Optional[int] = None,
+    failed_only: bool = False,
 ) -> List[RunRow]:
     """Return runs from the DB, ordered by ``timestamp DESC``.
 
     Filters:
 
-    * ``project``    — exact match on ``runs.project_id``.
-    * ``slice_only`` — only ``label IS NOT NULL`` rows.
-    * ``limit``      — top-N cutoff.
+    * ``project``     — exact match on ``runs.project_id``.
+    * ``slice_only``  — only ``label IS NOT NULL`` rows.
+    * ``limit``       — top-N cutoff.
+    * ``failed_only`` — only runs whose results contain at least one
+      ``spec_status='fail'`` row. Useful for the v1.4 "which corners
+      failed spec?" question. Implicit no-op against v1 data.
     """
     where: list[str] = []
     params: list[Any] = []
@@ -54,21 +65,44 @@ def list_runs(
         params.append(project)
     if slice_only:
         where.append("label IS NOT NULL")
+    if failed_only:
+        where.append(
+            "EXISTS (SELECT 1 FROM results r "
+            "WHERE r.run_id = runs.run_id AND r.spec_status = 'fail')"
+        )
 
     # CAST the TIMESTAMPTZ columns to VARCHAR at the DuckDB layer so we
     # never trigger the pytz code path in the Python binding. DuckDB
     # emits a deterministic ISO-like string (e.g. "2026-05-12 06:30:00+08").
+    #
+    # v1.4 — JOIN spec-aggregate counts so the CLI table can show a
+    # "<pass>/<has_spec>" column without a second round-trip. LEFT JOIN
+    # because pre-v2 runs may have zero rows with spec_status set.
     sql = """
         SELECT
-          run_id, project_id, testbench_id, testbench_alias,
-          CAST(timestamp AS VARCHAR), author, label, note,
-          netlist_path, history_name, schema_version,
-          CAST(ingested_at AS VARCHAR)
+          runs.run_id, runs.project_id, runs.testbench_id, runs.testbench_alias,
+          CAST(runs.timestamp AS VARCHAR), runs.author, runs.label, runs.note,
+          runs.netlist_path, runs.history_name, runs.schema_version,
+          CAST(runs.ingested_at AS VARCHAR),
+          COALESCE(spec_agg.n_pass, 0),
+          COALESCE(spec_agg.n_fail, 0),
+          COALESCE(spec_agg.n_has_spec, 0)
         FROM runs
+        LEFT JOIN (
+          SELECT
+            run_id,
+            SUM(CASE WHEN spec_status = 'pass' THEN 1 ELSE 0 END) AS n_pass,
+            SUM(CASE WHEN spec_status = 'fail' THEN 1 ELSE 0 END) AS n_fail,
+            SUM(CASE WHEN spec_status IS NOT NULL
+                          AND spec_status <> 'no_spec'
+                     THEN 1 ELSE 0 END) AS n_has_spec
+          FROM results
+          GROUP BY run_id
+        ) spec_agg ON spec_agg.run_id = runs.run_id
     """
     if where:
         sql += "WHERE " + " AND ".join(where) + " "
-    sql += "ORDER BY timestamp DESC, run_id "
+    sql += "ORDER BY runs.timestamp DESC, runs.run_id "
     if limit is not None:
         sql += f" LIMIT {int(limit)}"
 
@@ -90,6 +124,9 @@ def _row_to_runrow(r: tuple) -> RunRow:
         history_name=r[9],
         schema_version=int(r[10]),
         ingested_at=_isofmt(r[11]),
+        n_pass=int(r[12]),
+        n_fail=int(r[13]),
+        n_has_spec=int(r[14]),
     )
 
 

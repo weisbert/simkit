@@ -65,17 +65,36 @@ class BootstrapTests(unittest.TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row[0], str(DB_SCHEMA_VERSION))
 
-    def test_bootstrap_does_not_overwrite_meta_version(self):
+    def test_bootstrap_refuses_future_schema_version(self):
+        # v1.4 (DECISIONS #47): bootstrap is now migration-aware. A DB
+        # marked at a future schema_version means "opened by a newer simkit
+        # build" — refuse rather than corrupt.
         bootstrap(self.con)
-        # Force a different version, re-bootstrap, expect no overwrite.
         self.con.execute(
             "UPDATE simkit_meta SET value = '99' WHERE key = 'db_schema_version'"
+        )
+        with self.assertRaisesRegex(RuntimeError, "newer than this simkit"):
+            bootstrap(self.con)
+
+    def test_bootstrap_migrates_v1_to_v2(self):
+        # v1.4: a DB previously bootstrapped at v1 should pick up the v2
+        # additive columns (results.spec, results.spec_status) on next
+        # bootstrap, and have its meta version updated.
+        bootstrap(self.con)
+        self.con.execute(
+            "UPDATE simkit_meta SET value = '1' WHERE key = 'db_schema_version'"
         )
         bootstrap(self.con)
         row = self.con.execute(
             "SELECT value FROM simkit_meta WHERE key = 'db_schema_version'"
         ).fetchone()
-        self.assertEqual(row[0], "99")
+        self.assertEqual(row[0], str(DB_SCHEMA_VERSION))
+        # The migration is additive — both new columns exist.
+        cols = {r[1] for r in self.con.execute(
+            "PRAGMA table_info('results')"
+        ).fetchall()}
+        self.assertIn("spec", cols)
+        self.assertIn("spec_status", cols)
 
 
 class TransactionTests(unittest.TestCase):

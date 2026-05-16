@@ -1102,21 +1102,174 @@
 
 
 ;; ============================================================================
-;; Helper: _pvtCollBuildEnvelope  (S3_DESIGN §7)
+;; v1.4 — Spec capture helpers (DECISIONS #46, #47).
 ;;
-;; Pure construction. Output table has exactly four keys in order:
-;;   schema_version, run, results, artifacts
+;; The collector predates spec passthrough. Without these, every result row
+;; lands with status="ok" but no answer to "did this corner pass spec?". The
+;; capture path piggybacks on the same axlOutputsExportToFile CSV that
+;; pvtMeasurePull uses, so we get spec strings in the same Maestro-normalised
+;; form the user sees in the GUI (e.g. "< 1e-10", "minimize 0", "range 1 2").
+;;
+;; Pass/fail eval happens in Python at ingest time, NOT here — there is no
+;; Maestro public API for spec eval, and Python already has a parser to
+;; reuse (python/simkit/spec_eval.py).
+;;
+;; Helper kept local (mini CSV splitter inlined) so pvtCollect.il stays
+;; loadable standalone — no dependency on pvtMeasure.il being present.
 ;; ============================================================================
 
-(procedure (_pvtCollBuildEnvelope runMeta results netlistPath artifacts)
+;; _pvtCollSplitOnComma: split a string on every literal comma, preserving
+;; empty fields (Maestro emits trailing empties for the Spec column when no
+;; spec is set). Identical semantics to _pvtMeasureSplitOnComma; duplicated
+;; to keep this file self-contained.
+(procedure (_pvtCollSplitOnComma s)
+  (prog (tokens i n start ch)
+    (cond
+      ((null s)         (return (list "")))
+      ((not (stringp s)) (return (list "")))
+      ((equal s "")     (return (list ""))))
+    (setq n (strlen s))
+    (setq i 1)
+    (setq start 1)
+    (setq tokens nil)
+    (while (leqp i n)
+      (setq ch (substring s i 1))
+      (cond
+        ((equal ch ",")
+          (cond
+            ((lessp start i)
+              (setq tokens (cons (substring s start (difference i start)) tokens)))
+            (t
+              (setq tokens (cons "" tokens))))
+          (setq start (plus i 1))))
+      (setq i (plus i 1)))
+    (cond
+      ((leqp start n)
+        (setq tokens (cons (substring s start (difference (plus n 1) start)) tokens)))
+      (t
+        (setq tokens (cons "" tokens))))
+    (return (reverse tokens))
+  )
+)
+
+
+(defvar _PVT_COLL_CSV_NCOLS 7)
+(defvar _PVT_COLL_CSV_SPEC_COL 7)
+
+
+;; _pvtCollCaptureSpecs(sess):
+;;
+;;   Exports the active session's Outputs table to a tmp CSV, parses each
+;;   row, and returns a nested table:
+;;
+;;     specs["<testName>"]["<outputName>"] = "<specString>"
+;;
+;;   ONLY rows whose Spec column is non-empty are recorded — the ingester
+;;   treats absence as `spec_status='no_spec'`, so the table stays small.
+;;
+;;   Returns (pvtOk specsTable) on success — possibly empty if no spec is
+;;   set on any output. Returns pvtErr 'pvt_collect_specs only on hard
+;;   failures (export call returned nil, tmp file inaccessible). Per-row
+;;   parse errors are swallowed: a malformed row simply doesn't contribute
+;;   a spec, but the rest of the capture proceeds.
+(procedure (_pvtCollCaptureSpecs sess)
+  (prog (tmpPath rv port portR line lineRaw fields testName outName specStr
+         specs specsKeys testTab testKeys testKeysList)
+    (setq tmpPath (sprintf nil "/tmp/_pvtCollSpecs_%d.csv" (random 1000000000)))
+    (setq rv (errset (axlOutputsExportToFile sess tmpPath) nil))
+    (cond
+      ((null rv)
+        (return (pvtErr 'pvt_collect_specs
+                        "axlOutputsExportToFile failed" sess))))
+    (setq portR (errset (infile tmpPath) nil))
+    (setq port (cond ((listp portR) (car portR)) (t nil)))
+    (cond
+      ((null port)
+        ;; Cleanup tmp (may not exist if export silently failed) before bail.
+        (errset (deleteFile tmpPath) nil)
+        (return (pvtErr 'pvt_collect_specs
+                  (sprintf nil "could not open %L for reading" tmpPath)
+                  tmpPath))))
+    ;; Outer specs table (test -> testTab) + sidecar key list. Tracking
+    ;; insertion order in a parallel list because the JSON emitter
+    ;; (pvtJsonEmitObject) iterates strictly via _PVT_JSON_KEYS_PROP and
+    ;; treats absent sidecar as "empty object". See pvtJson.il §emit objects.
+    (setq specs (makeTable 'pvtCollOutputSpecs PVT_JSON_NULL))
+    (setq specsKeys nil)
+    ;; testKeysList is an alist (testName . orderedKeyList) so we can append
+    ;; a new output to the right test's sidecar in O(1) per test.
+    (setq testKeysList nil)
+    ;; Skip the header line; if absent (empty file) the loop simply ends.
+    (gets lineRaw port)
+    (while (gets lineRaw port)
+      ;; Strip trailing newline (gets returns it per sklangref p.420)
+      (setq line lineRaw)
+      (cond
+        ((and (stringp line)
+              (greaterp (strlen line) 0)
+              (equal (substring line (strlen line) 1) "\n"))
+          (setq line (substring line 1 (difference (strlen line) 1)))))
+      (cond
+        ((and (stringp line) (not (equal line "")))
+          (setq fields (_pvtCollSplitOnComma line))
+          (cond
+            ((equal (length fields) _PVT_COLL_CSV_NCOLS)
+              (setq testName (nthelem 1 fields))
+              (setq outName  (nthelem 2 fields))
+              (setq specStr  (nthelem _PVT_COLL_CSV_SPEC_COL fields))
+              (cond
+                ((and (stringp specStr) (not (equal specStr "")))
+                  (setq testTab (arrayref specs testName))
+                  ;; arrayref returns the table's default value (PVT_JSON_NULL)
+                  ;; when testName isn't yet stored. Bootstrap a real sub-table
+                  ;; on first sight; pvtJsonNullp catches the sentinel cleanly.
+                  (cond
+                    ((or (null testTab) (pvtJsonNullp testTab) (not (tablep testTab)))
+                      (setq testTab (makeTable 'pvtCollTestSpecs PVT_JSON_NULL))
+                      (setarray specs testName testTab)
+                      (setq specsKeys (append specsKeys (list testName)))
+                      (setq testKeysList
+                            (cons (cons testName nil) testKeysList))))
+                  (setarray testTab outName specStr)
+                  ;; Append outName to this test's sidecar key list.
+                  (let ((entry (assoc testName testKeysList)))
+                    (when entry
+                      (rplacd entry (append (cdr entry) (list outName)))))))))))
+    )
+    (close port)
+    (errset (deleteFile tmpPath) nil)
+    ;; Stamp the JSON-emit sidecar on the outer table and every test sub-table.
+    (setarray specs _PVT_JSON_KEYS_PROP specsKeys)
+    (foreach entry testKeysList
+      (let ((tn (car entry))
+            (kl (cdr entry)))
+        (setarray (arrayref specs tn) _PVT_JSON_KEYS_PROP kl)))
+    (return (pvtOk specs))
+  )
+)
+
+
+;; ============================================================================
+;; Helper: _pvtCollBuildEnvelope  (S3_DESIGN §7)
+;;
+;; Pure construction. v1.4 — schema_version bumped 1 → 2; new optional
+;; ``output_specs`` slot carries the per-(test, output) spec strings the
+;; Python ingester needs to compute spec_status verdicts.
+;;
+;; Old v1 envelopes (no output_specs) still ingest cleanly — every result
+;; row resolves to spec_status='no_spec' in that case.
+;; ============================================================================
+
+(procedure (_pvtCollBuildEnvelope runMeta results netlistPath artifacts
+                                  @optional (outputSpecs nil))
   (prog (env keys)
     ;; Overwrite the pre-populated netlist_path slot if a copy succeeded.
     (cond
       ((and netlistPath (stringp netlistPath))
         (setarray runMeta "netlist_path" netlistPath)))
     (setq env (makeTable 'pvtEnvelope PVT_JSON_NULL))
-    (setq keys (list "schema_version" "run" "results" "artifacts"))
-    (setarray env "schema_version" 1)            ; INTEGER, not "1"
+    (setq keys (list "schema_version" "run" "results" "artifacts" "output_specs"))
+    (setarray env "schema_version" 2)            ; v1.4 bump (was 1)
     (setarray env "run"            runMeta)
     ;; results: empty list -> emit "[]" via the empty-array sentinel; non-
     ;; empty list emits as a JSON array natively.
@@ -1124,6 +1277,13 @@
               (cond ((null results) PVT_JSON_EMPTY_ARRAY) (t results)))
     (setarray env "artifacts"
               (cond ((null artifacts) PVT_JSON_EMPTY_ARRAY) (t artifacts)))
+    ;; output_specs: empty / nil → emit "{}" (empty object); a populated
+    ;; table emits as nested JSON. Use PVT_JSON_NULL semantics on a fresh
+    ;; empty table so the JSON layer renders an empty object.
+    (setarray env "output_specs"
+              (cond ((null outputSpecs)
+                      (makeTable 'pvtEmptySpecs nil))
+                    (t outputSpecs)))
     (setarray env _PVT_JSON_KEYS_PROP keys)
     (return (pvtOk env)))
 )
@@ -1171,7 +1331,8 @@
                         (captureScreenshot nil))
   (prog (projR proj sessR sessTuple sess hsdb histID resolvedName
          captR runMeta iterR iterPair firstTest results
-         runDirR runDir netlistPath envR envelope writeR)
+         runDirR runDir netlistPath specsR outputSpecs
+         envR envelope writeR)
     ;; --- 1. project
     (setq projR (pvtLoadPvtProject))
     (cond ((pvtIsErr projR) (return projR)))
@@ -1207,8 +1368,22 @@
     (setq netlistPath
           (_pvtCollCopyNetlist sess histID firstTest runDir))
     (_pvtCollCaptureScreenshot runDir captureScreenshot)
+    ;; --- 5b. v1.4 — capture per-output spec strings. Non-fatal: if the
+    ;;        export fails we fall through with no specs (envelope still
+    ;;        valid; every result row will resolve to spec_status='no_spec'
+    ;;        at ingest). The capture path predates the rdb walk, so
+    ;;        ordering here matters only insofar as the session must still
+    ;;        be alive — which it is, since iterate just succeeded above.
+    (setq specsR (_pvtCollCaptureSpecs sess))
+    (setq outputSpecs
+          (cond ((pvtIsErr specsR)
+                  (warn "PvtSave: spec capture failed (%L), continuing without specs\n"
+                        (pvtErrMessage specsR))
+                  nil)
+                (t (pvtUnwrap specsR))))
     ;; --- 6. envelope
-    (setq envR (_pvtCollBuildEnvelope runMeta results netlistPath nil))
+    (setq envR (_pvtCollBuildEnvelope runMeta results netlistPath nil
+                                       outputSpecs))
     (cond ((pvtIsErr envR) (return envR)))
     (setq envelope (pvtUnwrap envR))
     ;; --- 7. write

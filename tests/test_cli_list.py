@@ -130,6 +130,70 @@ class CliListTests(unittest.TestCase):
         self.assertEqual(rc, 3, f"err={err}")
         self.assertIn("DB not found", err)
 
+    # v1.4 — spec-aware list surface.
+    def test_v1_only_data_does_not_show_specs_column(self):
+        # The two fixtures are pre-v2 (no output_specs). The table should
+        # NOT include the "specs" column header to keep the v1 view clean.
+        rc, out, _err = _run("list", "--db", str(self.db))
+        self.assertEqual(rc, 0)
+        self.assertNotIn("specs", out)
+
+    def _ingest_v2_into(self, run_uuid: str, spec: str, value: float) -> None:
+        from datetime import datetime, timezone
+        dump = {
+            "schema_version": 2,
+            "run": {
+                "run_id": run_uuid, "project_id": "v14",
+                "testbench_id": "lib/cell/view", "testbench_alias": None,
+                "timestamp": "2026-05-16T15:00:00+08:00",
+                "author": "tester", "label": None, "note": None,
+                "netlist_path": "input.scs",
+                "history_name": f"v14_{run_uuid[:8]}",
+            },
+            "results": [{
+                "point": 1, "corner": "TT", "test": "Test",
+                "output": "X", "value": value, "status": "ok",
+                "sweep": {}, "corner_vars": {"temp": "27"},
+                "test_note": None,
+            }],
+            "artifacts": [],
+            "output_specs": {"Test": {"X": spec}},
+        }
+        path = self.tmp / f"v14_{run_uuid[:8]}.json"
+        path.write_text(json.dumps(dump))
+        con = connect(self.db)
+        try:
+            ingest_run_json(con, path)
+        finally:
+            con.close()
+
+    def test_specs_column_shown_when_v2_data_present(self):
+        self._ingest_v2_into("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                              "< 1e-10", 5e-11)
+        rc, out, _err = _run("list", "--db", str(self.db))
+        self.assertEqual(rc, 0)
+        self.assertIn("specs", out)
+        self.assertIn("1/1", out)
+        self.assertNotIn("FAIL", out)  # passing run
+
+    def test_specs_column_marks_failing_runs(self):
+        self._ingest_v2_into("bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+                              "< 1e-10", 2e-10)
+        rc, out, _err = _run("list", "--db", str(self.db))
+        self.assertEqual(rc, 0)
+        self.assertIn("0/1 FAIL", out)
+
+    def test_failed_only_filters(self):
+        self._ingest_v2_into("aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+                              "< 1e-10", 5e-11)
+        self._ingest_v2_into("bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+                              "< 1e-10", 2e-10)
+        rc, out, _err = _run("list", "--db", str(self.db), "--failed-only")
+        self.assertEqual(rc, 0)
+        # Only the failing run id shows up.
+        self.assertIn("bbbbbbbb", out)
+        self.assertNotIn("aaaaaaaa", out)
+
 
 if __name__ == "__main__":
     unittest.main()

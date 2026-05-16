@@ -1,10 +1,10 @@
 """DuckDB DDL constants for the simkit data layer.
 
-Single source of truth for the v1 schema. Pure string constants — no
+Single source of truth for the schema. Pure string constants — no
 ``duckdb`` import — so unit tests can assert DDL text equality without
 spinning up a connection.
 
-See ``docs/schema.md`` §3 for column documentation. Two deviations from
+See ``docs/schema.md`` §3 for column documentation. Three deviations from
 the spec:
 
 - ``runs.netlist_path`` is nullable here. Spec declares NOT NULL; collector
@@ -12,12 +12,18 @@ the spec:
   warning when null. (DECISIONS #18.)
 - ``simkit_meta`` table is added (key/value) for tracking the DB-side
   schema_version. Not part of the public schema spec. (DECISIONS #19.)
+- v1.4 (DECISIONS #46/#47): added ``results.spec`` (Cadence-native string
+  captured from ``axlOutputsExportToFile``) + ``results.spec_status`` (enum
+  computed at ingest time by :mod:`simkit.spec_eval`). Both nullable; old
+  v1 envelopes ingest as ``spec=NULL, spec_status='no_spec'``.
 """
 
 from __future__ import annotations
 
 
-DB_SCHEMA_VERSION = 1
+# v1.4 bump: schema_version 1 → 2. Migration in ``simkit.db.bootstrap``
+# adds the two new columns when an existing v1 DB is opened.
+DB_SCHEMA_VERSION = 2
 
 
 RUNS_DDL = """
@@ -50,9 +56,22 @@ CREATE TABLE IF NOT EXISTS results (
   status      VARCHAR NOT NULL,
   sweep       JSON NOT NULL,
   corner_vars JSON NOT NULL,
-  test_note   VARCHAR
+  test_note   VARCHAR,
+  spec        VARCHAR,
+  spec_status VARCHAR
 )
 """.strip()
+
+
+# v1.4 — migration steps for already-bootstrapped v1 databases. Executed by
+# ``simkit.db.bootstrap`` when ``simkit_meta.db_schema_version='1'``. Each
+# step is a single ALTER; ordering matters only insofar as repeated bootstrap
+# on an already-migrated DB must be idempotent — which DuckDB's
+# ``ADD COLUMN IF NOT EXISTS`` (≥0.9) handles cleanly.
+V2_MIGRATION_DDL = (
+    "ALTER TABLE results ADD COLUMN IF NOT EXISTS spec VARCHAR",
+    "ALTER TABLE results ADD COLUMN IF NOT EXISTS spec_status VARCHAR",
+)
 # NOTE: spec writes ``run_id ... REFERENCES runs(run_id)`` but DuckDB
 # enforces FKs per-statement (no within-transaction relaxation), so a
 # delete-then-reinsert ``replace`` flow against an FK-protected child

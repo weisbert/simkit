@@ -94,7 +94,15 @@ VALID_ARTIFACT_TYPES = frozenset({
 })
 VALID_ARTIFACT_SOURCES = frozenset({"auto", "manual"})
 
-_TOP_LEVEL_KEYS = frozenset({"schema_version", "run", "results", "artifacts"})
+# v1.4: schema_version 2 adds optional top-level ``output_specs`` (a
+# {test: {output: spec_string}} nested object). v1 envelopes omit it.
+_TOP_LEVEL_KEYS_REQUIRED = frozenset({"schema_version", "run", "results", "artifacts"})
+_TOP_LEVEL_KEYS_OPTIONAL = frozenset({"output_specs"})
+_TOP_LEVEL_KEYS = _TOP_LEVEL_KEYS_REQUIRED | _TOP_LEVEL_KEYS_OPTIONAL
+
+# Schema versions this validator accepts. Kept in sync with
+# ingest._INGESTER_SUPPORTED_DUMP_VERSIONS.
+_SUPPORTED_DUMP_VERSIONS = frozenset({1, 2})
 
 _RUN_REQUIRED = (
     "run_id", "project_id", "testbench_id", "testbench_alias",
@@ -182,7 +190,7 @@ def validate_dump_file(path: Path) -> List[Violation]:
 # ----------------------------------------------------------------------
 
 def _check_top_level(dump: dict, violations: List[Violation]) -> None:
-    # I23: schema_version == 1 (integer, not string, not bool).
+    # I23: schema_version is an accepted integer (v1.4 bump: now {1, 2}).
     if "schema_version" not in dump:
         violations.append(Violation(
             "I23", "error", "schema_version",
@@ -193,17 +201,19 @@ def _check_top_level(dump: dict, violations: List[Violation]) -> None:
         if isinstance(sv, bool) or not isinstance(sv, int):
             violations.append(Violation(
                 "I23", "error", "schema_version",
-                f"must be integer 1, got {type(sv).__name__}: {sv!r}",
+                f"must be integer, got {type(sv).__name__}: {sv!r}",
             ))
-        elif sv != 1:
+        elif sv not in _SUPPORTED_DUMP_VERSIONS:
             violations.append(Violation(
                 "I23", "error", "schema_version",
-                f"unsupported schema_version {sv}; v1 expects 1",
+                f"unsupported schema_version {sv}; this build supports "
+                f"{sorted(_SUPPORTED_DUMP_VERSIONS)}",
             ))
 
-    # I24: top-level keys exactly {schema_version, run, results, artifacts}.
+    # I24: top-level keys are the required set, plus zero or more optional
+    # keys (v1.4 adds optional ``output_specs``). Unknown keys still error.
     keys = set(dump.keys())
-    missing = _TOP_LEVEL_KEYS - keys
+    missing = _TOP_LEVEL_KEYS_REQUIRED - keys
     extra = keys - _TOP_LEVEL_KEYS
     for k in sorted(missing):
         violations.append(Violation(
@@ -213,8 +223,9 @@ def _check_top_level(dump: dict, violations: List[Violation]) -> None:
     for k in sorted(extra):
         violations.append(Violation(
             "I24", "error", k,
-            f"unknown top-level key '{k}'; expected exactly "
-            f"{sorted(_TOP_LEVEL_KEYS)}",
+            f"unknown top-level key '{k}'; expected required "
+            f"{sorted(_TOP_LEVEL_KEYS_REQUIRED)} plus optional "
+            f"{sorted(_TOP_LEVEL_KEYS_OPTIONAL)}",
         ))
 
     # Type checks for each top-level value (as far as we can tell here).

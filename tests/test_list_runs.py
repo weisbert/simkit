@@ -104,5 +104,98 @@ class ListRunsTests(unittest.TestCase):
             con.close()
 
 
+# ----------------------------------------------------------------------
+# v1.4 — spec aggregate + --failed-only filter
+# ----------------------------------------------------------------------
+
+class SpecAggregateTests(unittest.TestCase):
+    """v1.4: list_runs JOINs a spec verdict aggregate (n_pass / n_fail /
+    n_has_spec) and accepts a ``failed_only=True`` filter."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_list_v14_"))
+        self.db = self.tmp / "simkit.duckdb"
+        self.con = connect(self.db)
+        bootstrap(self.con)
+        # Pre-v2 fixture; all rows ingest as spec_status='no_spec', so
+        # n_has_spec == 0 across the run.
+        ingest_run_json(self.con, _SYN_MIN)
+
+    def tearDown(self):
+        self.con.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ingest_v2(self, run_uuid: str, spec: str, value: float) -> None:
+        """Hand-inject a v2 envelope into the DB to exercise the aggregate."""
+        import json
+        dump = {
+            "schema_version": 2,
+            "run": {
+                "run_id": run_uuid,
+                "project_id": "v14_spec",
+                "testbench_id": "lib/cell/view",
+                "testbench_alias": None,
+                "timestamp": "2026-05-16T15:00:00+08:00",
+                "author": "tester",
+                "label": None, "note": None,
+                "netlist_path": "input.scs",
+                "history_name": f"v14_spec_{run_uuid[:8]}",
+            },
+            "results": [{
+                "point": 1, "corner": "TT", "test": "Test",
+                "output": "X", "value": value, "status": "ok",
+                "sweep": {}, "corner_vars": {"temp": "27"},
+                "test_note": None,
+            }],
+            "artifacts": [],
+            "output_specs": {"Test": {"X": spec}},
+        }
+        path = self.tmp / f"run_{run_uuid[:8]}.json"
+        path.write_text(json.dumps(dump))
+        ingest_run_json(self.con, path)
+
+    # Deterministic UUIDv4-shaped ids for the v1.4 tests.
+    _UUID_PASS = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa"
+    _UUID_FAIL = "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb"
+
+    def test_v1_run_has_zero_aggregates(self):
+        rows = list_runs(self.con)
+        row = next(r for r in rows if r.project_id == "synthetic")
+        self.assertEqual(row.n_pass, 0)
+        self.assertEqual(row.n_fail, 0)
+        self.assertEqual(row.n_has_spec, 0)
+
+    def test_v2_pass_run_aggregate(self):
+        # 5e-11 < 1e-10 → pass
+        self._ingest_v2(self._UUID_PASS, "< 1e-10", 5e-11)
+        rows = list_runs(self.con, project="v14_spec")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].n_pass, 1)
+        self.assertEqual(rows[0].n_fail, 0)
+        self.assertEqual(rows[0].n_has_spec, 1)
+
+    def test_v2_fail_run_aggregate(self):
+        # 2e-10 > 1e-10 → fail
+        self._ingest_v2(self._UUID_FAIL, "< 1e-10", 2e-10)
+        rows = list_runs(self.con, project="v14_spec")
+        self.assertEqual(rows[0].n_pass, 0)
+        self.assertEqual(rows[0].n_fail, 1)
+        self.assertEqual(rows[0].n_has_spec, 1)
+
+    def test_failed_only_filters_to_runs_with_a_fail(self):
+        # Setup: one passing v2 + one failing v2 + one pre-v2 (zero specs).
+        self._ingest_v2(self._UUID_PASS, "< 1e-10", 5e-11)
+        self._ingest_v2(self._UUID_FAIL, "< 1e-10", 2e-10)
+        rows = list_runs(self.con, failed_only=True)
+        # Only the failing run should remain.
+        self.assertEqual(len(rows), 1)
+        self.assertGreater(rows[0].n_fail, 0)
+
+    def test_failed_only_returns_empty_on_v1_only(self):
+        # synthetic_minimal is v1 / no specs → no failures possible.
+        rows = list_runs(self.con, failed_only=True)
+        self.assertEqual(rows, [])
+
+
 if __name__ == "__main__":
     unittest.main()

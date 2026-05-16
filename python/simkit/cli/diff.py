@@ -68,6 +68,14 @@ def add_subparser(sub) -> None:
         help="Include __sim_status__ sentinel rows in the output.",
     )
     p.add_argument(
+        "--spec-changes", dest="spec_changes_only", action="store_true",
+        help=(
+            "Show only rows whose spec verdict (pass/fail/...) differs "
+            "between the two slices. v1.4; needs schema v2+ on both "
+            "slices. Overrides --threshold."
+        ),
+    )
+    p.add_argument(
         "--json", dest="as_json", action="store_true",
         help=(
             "Emit a JSON object instead of the default table. Includes "
@@ -137,6 +145,7 @@ def run(args) -> int:
             result,
             threshold=args.threshold,
             include_status=args.include_status,
+            spec_changes_only=args.spec_changes_only,
         )
     return 0
 
@@ -153,10 +162,16 @@ def _print_table(
     *,
     threshold: float,
     include_status: bool,
+    spec_changes_only: bool = False,
 ) -> None:
-    headers = ("test", "corner", "point", "output",
-               "value_a", "value_b", "dAbs", "dRel")
-    widths = [_COL[h] for h in headers]
+    # v1.4 — --spec-changes adds a spec_a/spec_b column pair and overrides
+    # the threshold filter (only rows whose spec_status actually flipped
+    # are shown).
+    headers = ["test", "corner", "point", "output",
+               "value_a", "value_b", "dAbs", "dRel"]
+    if spec_changes_only:
+        headers += ["spec_a", "spec_b"]
+    widths = [_COL.get(h, 12) for h in headers]
     sep = "  "
 
     print(
@@ -167,6 +182,8 @@ def _print_table(
         f"#      slice_b={result.slice_b_identifier!r} "
         f"(run_id={result.slice_b_run_id})"
     )
+    if spec_changes_only:
+        print("# --spec-changes: only rows whose spec verdict flipped")
     print()
     print(sep.join(h.ljust(w) for h, w in zip(headers, widths)))
     print(sep.join("-" * w for w in widths))
@@ -174,15 +191,21 @@ def _print_table(
     shown = 0
     hidden_threshold = 0
     hidden_sentinel = 0
+    hidden_no_flip = 0
     for r in result.rows:
         if r.is_sentinel and not include_status:
             hidden_sentinel += 1
             continue
-        if r.kind == "match" and r.rel_delta is not None:
-            if abs(r.rel_delta) <= threshold:
-                hidden_threshold += 1
+        if spec_changes_only:
+            if not r.spec_changed:
+                hidden_no_flip += 1
                 continue
-        _print_row(r, widths, sep)
+        else:
+            if r.kind == "match" and r.rel_delta is not None:
+                if abs(r.rel_delta) <= threshold:
+                    hidden_threshold += 1
+                    continue
+        _print_row(r, widths, sep, with_spec=spec_changes_only)
         shown += 1
 
     if shown == 0:
@@ -197,6 +220,10 @@ def _print_table(
         notes.append(
             f"{hidden_sentinel} __sim_status__ rows hidden "
             "(--include-status to show)"
+        )
+    if hidden_no_flip:
+        notes.append(
+            f"{hidden_no_flip} rows hidden (spec verdict unchanged)"
         )
     if notes:
         print()
@@ -217,8 +244,10 @@ def _print_table(
         sys.stdout.write(result.netlist.diff_text)
 
 
-def _print_row(r: DiffRow, widths: List[int], sep: str) -> None:
-    cells = (
+def _print_row(
+    r: DiffRow, widths: List[int], sep: str, *, with_spec: bool = False,
+) -> None:
+    cells = [
         _trunc(r.test, widths[0]),
         _trunc(r.corner, widths[1]),
         str(r.point),
@@ -227,7 +256,10 @@ def _print_row(r: DiffRow, widths: List[int], sep: str) -> None:
         _fmt_value(r.value_b),
         _fmt_signed(r.abs_delta),
         _fmt_pct(r.rel_delta),
-    )
+    ]
+    if with_spec:
+        cells.append(_fmt_spec_cell(r.spec_a, r.spec_status_a, widths[8]))
+        cells.append(_fmt_spec_cell(r.spec_b, r.spec_status_b, widths[9]))
     print(sep.join(c.ljust(w) for c, w in zip(cells, widths)))
     if r.kind in ("only_a", "only_b", "status_mismatch"):
         tag = {
@@ -238,6 +270,14 @@ def _print_row(r: DiffRow, widths: List[int], sep: str) -> None:
             ),
         }[r.kind]
         print(" " * (widths[0] + len(sep)) + tag)
+
+
+def _fmt_spec_cell(spec: Optional[str], status: Optional[str], width: int) -> str:
+    if spec is None and status is None:
+        return "—"
+    status_part = (status or "?")[:4].upper()
+    spec_part = _trunc(spec or "", max(1, width - len(status_part) - 1))
+    return f"{status_part}:{spec_part}"
 
 
 def _fmt_value(v) -> str:

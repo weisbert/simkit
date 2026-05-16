@@ -45,7 +45,10 @@ from simkit.validate import validate_dump
 _LOG = logging.getLogger("simkit.ingest")
 
 
-_INGESTER_SUPPORTED_DUMP_VERSIONS = frozenset({1})
+# v1.4 — schema_version 2 adds the optional top-level ``output_specs`` map
+# carrying per-(test, output) spec strings from the collector. v1 envelopes
+# still ingest cleanly; their result rows get spec=NULL, spec_status='no_spec'.
+_INGESTER_SUPPORTED_DUMP_VERSIONS = frozenset({1, 2})
 
 _OnConflict = Literal["error", "skip", "replace"]
 _OnWarning = Literal["log", "ignore"]
@@ -127,6 +130,15 @@ def ingest_run_json(
     run_id = run["run_id"]
     results = dump["results"]
     artifacts = dump["artifacts"]
+    # v1.4 — output_specs is v2-only. For v1 envelopes we leave the new
+    # spec / spec_status columns NULL (= "unknown, predates spec capture").
+    # For v2 envelopes we always run evaluate_spec — when the envelope's
+    # output_specs is empty / missing the per-output spec, the verdict
+    # lands as 'no_spec' (= "checked and there's no spec").
+    dump_schema_version = int(dump["schema_version"])
+    output_specs = (
+        dump.get("output_specs") or {} if dump_schema_version >= 2 else None
+    )
 
     now_fn = now if now is not None else (lambda: datetime.now(timezone.utc))
     ingested_at = _isoformat(now_fn())
@@ -170,7 +182,7 @@ def ingest_run_json(
             action = "inserted"
 
         _insert_run_row(con, run, ingested_at, dump["schema_version"])
-        _insert_results(con, run_id, results)
+        _insert_results(con, run_id, results, output_specs)
         _insert_artifacts(con, run_id, artifacts)
 
     return IngestResult(
@@ -417,32 +429,65 @@ def _insert_results(
     con: duckdb.DuckDBPyConnection,
     run_id: str,
     results: list,
+    output_specs: dict | None = None,
 ) -> None:
+    """Insert one run's result rows. v1.4 — also computes spec_status per row.
+
+    ``output_specs`` semantics:
+
+    * ``None``   — pre-v2 envelope (collector predates spec capture). Every
+      row's spec / spec_status columns land as NULL ("unknown").
+    * ``{}``     — v2 envelope with zero specs set. Every row resolves to
+      spec_status='no_spec' ("checked, no spec on this output").
+    * populated — v2 envelope; per-row spec string looked up by
+      ``{<test>: {<output>: <spec>}}``. Verdict computed via
+      :mod:`simkit.spec_eval`.
+
+    Sentinel output names (``__sim_status__``) and rows whose ``value`` was
+    a non-number (eval_err, sim_err) automatically land in the 'no_value'
+    verdict branch via ``evaluate_spec``.
+    """
     if not results:
         return
     rows = []
-    for r in results:
-        value_num, value_str = _split_value(r.get("value"))
-        rows.append([
-            run_id,
-            r["point"],
-            r["corner"],
-            r["test"],
-            r["output"],
-            value_num,
-            value_str,
-            r["status"],
-            json.dumps(r["sweep"]),
-            json.dumps(r["corner_vars"]),
-            r.get("test_note"),
-        ])
+    if output_specs is None:
+        # v1: every row gets NULL/NULL — no eval, no allocation.
+        for r in results:
+            value_num, value_str = _split_value(r.get("value"))
+            rows.append([
+                run_id, r["point"], r["corner"], r["test"], r["output"],
+                value_num, value_str, r["status"],
+                json.dumps(r["sweep"]),
+                json.dumps(r["corner_vars"]),
+                r.get("test_note"),
+                None, None,
+            ])
+    else:
+        from simkit.spec_eval import evaluate_spec
+        for r in results:
+            value_num, value_str = _split_value(r.get("value"))
+            test_name = r["test"]
+            out_name = r["output"]
+            spec_str = (output_specs.get(test_name) or {}).get(out_name)
+            if isinstance(spec_str, str) and spec_str.strip() == "":
+                spec_str = None
+            spec_status = evaluate_spec(spec_str, value_num)
+            rows.append([
+                run_id, r["point"], r["corner"], test_name, out_name,
+                value_num, value_str, r["status"],
+                json.dumps(r["sweep"]),
+                json.dumps(r["corner_vars"]),
+                r.get("test_note"),
+                spec_str, spec_status,
+            ])
     con.executemany(
         """
         INSERT INTO results (
           run_id, point, corner, test, output,
           value_num, value_str, status,
-          sweep, corner_vars, test_note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sweep, corner_vars, test_note,
+          spec, spec_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )

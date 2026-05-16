@@ -41,9 +41,30 @@ class DiffRow:
     rel_delta: Optional[float]
     kind: str  # "match" | "only_a" | "only_b" | "status_mismatch"
     is_sentinel: bool
+    # v1.4 — spec verdict + string per slice. Both default to None for v1
+    # data (no spec captured) so callers / serialisers see "missing", not
+    # a false "no_spec" claim.
+    spec_a: Optional[str] = None
+    spec_b: Optional[str] = None
+    spec_status_a: Optional[str] = None
+    spec_status_b: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    @property
+    def spec_changed(self) -> bool:
+        """True iff both slices captured spec_status and the verdicts differ.
+
+        Filtering on this in the CLI surfaces only the rows whose pass/fail
+        outcome flipped between the two slices — the main use case for
+        regression triage after a spec change or a netlist change.
+        """
+        return (
+            self.spec_status_a is not None
+            and self.spec_status_b is not None
+            and self.spec_status_a != self.spec_status_b
+        )
 
 
 @dataclass(frozen=True)
@@ -151,10 +172,11 @@ def compute_results_diff(
 
     keys = sorted(set(a.keys()) | set(b.keys()))
     out: List[DiffRow] = []
+    _empty = (None, None, None, None)
     for k in keys:
         test, corner, point, output = k
-        va, sa = a.get(k, (None, None))
-        vb, sb = b.get(k, (None, None))
+        va, sa, spec_a, spec_status_a = a.get(k, _empty)
+        vb, sb, spec_b, spec_status_b = b.get(k, _empty)
         in_a = k in a
         in_b = k in b
 
@@ -175,22 +197,33 @@ def compute_results_diff(
             abs_delta=abs_delta, rel_delta=rel_delta,
             kind=kind,
             is_sentinel=(output == "__sim_status__"),
+            spec_a=spec_a, spec_b=spec_b,
+            spec_status_a=spec_status_a, spec_status_b=spec_status_b,
         ))
     return out
 
 
 def _load_results_keyed(
     con: duckdb.DuckDBPyConnection, run_id: str,
-) -> Dict[_Key, Tuple[Any, str]]:
+) -> Dict[_Key, Tuple[Any, str, Optional[str], Optional[str]]]:
+    """Return ``{key: (value, status, spec, spec_status)}`` for one slice.
+
+    ``spec`` / ``spec_status`` are v1.4 additions and may be NULL on rows
+    ingested from a v1 envelope or from a v2 envelope whose collector
+    captured no spec for that output. Callers must treat NULL as "missing"
+    distinct from the ``'no_spec'`` enum value.
+    """
     rows = con.execute(
         """
-        SELECT test, corner, point, output, value_num, value_str, status
+        SELECT test, corner, point, output,
+               value_num, value_str, status,
+               spec, spec_status
         FROM results
         WHERE run_id = ?
         """,
         [run_id],
     ).fetchall()
-    keyed: Dict[_Key, Tuple[Any, str]] = {}
+    keyed: Dict[_Key, Tuple[Any, str, Optional[str], Optional[str]]] = {}
     for r in rows:
         key = (r[0], r[1], int(r[2]), r[3])
         value: Any
@@ -200,7 +233,7 @@ def _load_results_keyed(
             value = r[5]
         else:
             value = None
-        keyed[key] = (value, r[6])
+        keyed[key] = (value, r[6], r[7], r[8])
     return keyed
 
 
