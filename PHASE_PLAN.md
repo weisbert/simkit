@@ -10,7 +10,7 @@ This file is a **scratch pad for ideas that are NOT Phase 1**. When an idea pops
 
 Picked 2026-05-12 from the original Phase 3 candidate list; closed across §1–§6 in `TODO.md` with all four §6 gates offline-pinned. See `docs/phase2_pvt_union_spec.md` for the locked §1 spec. Motivating case (VCO LO 2026-05-11, 21 columns × 3 points = 63 corners) became the §6 Gate U2 acceptance fixture.
 
-## Phase 3B: Formula-Template Authoring — DONE 2026-05-15 (skeleton + v1.1 builtins + v1.2 expressiveness + v1.3 specs)
+## Phase 3B: Formula-Template Authoring — DONE 2026-05-16 (skeleton + v1.1 builtins + v1.2 expressiveness + v1.3 specs + v1.4 spec-capture round-trip)
 
 Picked from the candidate list below; see `TODO.md` for the breakdown and `docs/phase3b_measure_template_spec.md` for the locked §1 spec. **Goal achieved:** completed the **Define** layer of the system architecture by giving the user a way to declare "what to measure" with the same authoring economics Phase 2 gave them for "what conditions to measure under" (PVT unions). Skeleton landed 2026-05-14; v1.1 same-day added a 17-template builtins library reverse-engineered from sim_DCOBUF + `pvt measure install-builtins` CLI + walkthrough fixture. v1.2 (2026-05-15) closed 6 friction items surfaced by the live fnxSession0 dogfood: output_name override, raw_expression entry kind, single-axis param_sweep, 4 `_full` rise/fall builtins (naming precedent over CLIP parameter), implicit signal_group:null, list-bundles error display. v1.3 (2026-05-15) closed the silent pass/fail spec gap — bundle apply entries now carry an optional Cadence-native spec string; SKILL push parses + dispatches to `axlAddSpecToOutput`. Library 17 → 21. Schema v1 → v2 (v1 still loads). 678/678 Python tests + 376/1 SKILL Tier-1. Dogfood proof: live fnxSession0 11-row Outputs round-trip in one bundle, now with pass/fail specs.
 
@@ -38,18 +38,19 @@ Not "batch everything." First cut:
 
 Only after Phase 2's helper is in daily use.
 
-**Hard prerequisite from 2026-05-16 live test**: Phase 3A's value depends on the collector capturing pass/fail per result. Without it, "run 100 corners → tell me what's red" is impossible. v1.4 #1 (pass/fail capture) should land before — or as the first thing inside — Phase 3A.
+**v1.4 cleared the Phase 3A hard prerequisite**: pass/fail capture is now live end-to-end (#1 done 2026-05-16). Phase 3A can start any time.
 
-## Phase 3B v1.4 (in-place, candidate)
+## Phase 3B v1.5 (in-place, remaining candidates)
 
-If picked over Phase 3A. Items in priority order (top is highest); see TODO.md "v1.4 deferred" section for details.
+Items deferred from v1.4 or surfaced during it (top is highest priority):
 
-1. **Pass/fail capture in collector** — highest priority; surfaced by the 2026-05-16 spec dogfood. Touches pvtCollect.il + run.json schema + ingest + DuckDB DDL + CLI.
-2. Per-iteration spec on sweep entries (parallel `specs: [...]` array).
-3. `axlGetSpecData` / `?weight` / `?info` capture on measure pull.
-4. Per-signal alias map (absorb the `Iavg_1`/`Iavg_2` hand-numbering idiom from v1.1 walkthrough).
-5. Multi-axis param_sweep.
-6. Spec status surfaced in apply CLI summary (data already on the wire in pushReport, just not printed).
+1. **Spec weight pull + push round-trip** — v1.4 #3 scope-shrunk after live probe (DECISIONS #46): weight IS readable via `axlGetSpecWeight(int_handle)`, info is NOT. User confirmed they don't touch weights in practice (all default to 1.0). Promote when a real "this spec is more important" workflow surfaces.
+2. **`?min`/`?max` vs `>=`/`<=` semantic alignment** — v1.3 maps `>=X` → `?min` and `<=X` → `?max`, but Maestro stores those as `minimize X` / `maximize X` (target-style, pass = value ≤ X / value ≥ X), NOT inclusive bounds. Latent round-trip bug; v1.4 #1 dogfood didn't exercise it (only used `<`/`>`). Either change v1.3 push mapping (e.g. emit `?range X 1e30` for inclusive lower bound), or document as user-facing and rename bundle field.
+3. **Per-iteration spec on sweep entries** — parallel `specs: [...]` array alongside `output_names` (PN @ 1MHz `<-100` vs PN @ 100MHz `<-140`).
+4. **Per-signal alias map** — absorb the `Iavg_1`/`Iavg_2` hand-numbering idiom from v1.1 walkthrough.
+5. **Multi-axis param_sweep** — v1.2 enforces single-axis; promote when a real "freq × temperature" 2-D case appears.
+6. **`tolerance` spec eval** — spec_eval currently marks `tolerance X ()` as unsupported because the target lives in axlSKILL side metadata with no read accessor. If we accept a `tolerance X T` form (with explicit target), the verdict becomes computable.
+7. **Spec orphan cleanup API** — `axlDelSpecFromOutput` doesn't exist; live probes leave orphan spec records that persist until Cadence restart. Workaround: build the cleanup via output-delete + re-add. Useful for test harnesses.
 
 ---
 

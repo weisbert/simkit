@@ -1,6 +1,6 @@
 # Schema Spec
 
-**Schema version: 1** — frozen surface for Phase 1. Any breaking change requires bumping `schema_version` and appending a migration note to `DECISIONS.md`.
+**Schema version: 2** (v1.4, additive). v1 envelopes still ingest cleanly; new spec / `output_specs` fields are optional. See §2.4 and §3 for the v2 additions and DECISIONS #46 / #47 for the rationale.
 
 This document defines five things, in dependency order:
 
@@ -45,12 +45,15 @@ Top-level structure:
 
 ```
 {
-  "schema_version": 1,
-  "run": { ... run-level metadata ... },
-  "results": [ ... per-result records ... ],
-  "artifacts": [ ... initial artifact records written at dump time ... ]
+  "schema_version": 2,
+  "run":         { ... run-level metadata ... },
+  "results":     [ ... per-result records ... ],
+  "artifacts":   [ ... initial artifact records written at dump time ... ],
+  "output_specs": { ... v2-only per-(test, output) spec strings ... }
 }
 ```
+
+`output_specs` is the only v1 → v2 addition; v1 envelopes omit it entirely. See §2.4.
 
 ### 2.1 Run-level metadata (`run` object)
 
@@ -86,6 +89,48 @@ Each entry is one row of the Maestro history's cross-product of points × corner
 | `test_note` | str \| null | Maestro per-test notebook text, if any. Populated by the collector (see TODO §3); spec pins that the field exists. (#10) |
 
 **Sim-status sentinel rows.** The POC emits rows with `output == "__sim_status__"` and `value == null` to carry test-level status when no per-output result exists (e.g. a test failed before any measurement produced output). v1 preserves this convention. The ingester treats sentinel rows as test-level status rows; numeric-output queries must filter them out.
+
+### 2.4 Output specs (`output_specs` object) — v2 only
+
+v1.4 addition (DECISIONS #46 / #47). Carries the per-(test, output) Cadence-native spec strings the SKILL collector captured via `axlOutputsExportToFile` at PvtSave time. Nested keyed by test, then output. Rows whose Spec column was empty are omitted.
+
+```json
+"output_specs": {
+  "Test": {
+    "Rtime_clkout": "< 1e-10",
+    "PN_1M":        "> -150",
+    "Vout_pkpk":    "range 0.9 1.1"
+  }
+}
+```
+
+The ingester denormalises these onto every `results` row (writing the spec string into `results.spec`) and runs `simkit.spec_eval.evaluate_spec` per row to produce `results.spec_status`. v1 envelopes (which lack this field entirely) ingest as `spec=NULL, spec_status=NULL` — distinct from v2's `'no_spec'` verdict which means "checked, no spec set on this output".
+
+**Spec string forms accepted (v1.4)** — the parser handles both user-friendly bundle forms and the Maestro-normalised CSV emissions:
+
+| Form               | Pass criterion (against numeric value) |
+|--------------------|----------------------------------------|
+| `<X` / `< X`       | value < X                              |
+| `>X` / `> X`       | value > X                              |
+| `<=X` / `<= X`     | value ≤ X                              |
+| `>=X` / `>= X`     | value ≥ X                              |
+| `minimize X`       | value ≤ X  (Maestro CSV form of `?min`) |
+| `maximize X`       | value ≥ X  (Maestro CSV form of `?max`) |
+| `range X Y`        | X ≤ value ≤ Y                          |
+| `[X:Y]`            | alias for `range X Y`                  |
+| `X..Y`             | alias for `range X Y` (v1.4 addition)  |
+| `tolerance X (Y)`  | parsed but NOT evaluated (verdict `unsupported`; target lives in axlSKILL side metadata that has no read accessor) |
+| `tol X`            | alias for `tolerance` (same caveat)    |
+
+**`results.spec_status` enum** (v1.4):
+
+* `pass` — value satisfies the spec
+* `fail` — value violates the spec
+* `no_spec` — output has no spec set (v2 envelope only)
+* `no_value` — `value_num` is NULL / NaN / non-numeric (e.g. `eval_err`, `__sim_status__`)
+* `unsupported` — spec form parsed but pass/fail not computable (tolerance forms)
+* `parse_err` — spec string could not be parsed
+* `NULL` (column-level) — v1 envelope; the collector predates spec capture and we don't know
 
 ### 2.3 Artifact records (`artifacts` array)
 
@@ -132,7 +177,9 @@ results(
   status          VARCHAR NOT NULL,
   sweep           JSON NOT NULL,
   corner_vars     JSON NOT NULL,
-  test_note       VARCHAR
+  test_note       VARCHAR,
+  spec            VARCHAR,       -- v1.4 (DECISIONS #46/#47)
+  spec_status     VARCHAR        -- v1.4 enum; see §2.4 for values
 )
 
 artifacts(

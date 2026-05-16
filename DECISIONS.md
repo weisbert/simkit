@@ -918,3 +918,39 @@ _Date: 2026-05-15_
 - Structured ``{op, value}`` JSON form. Rejected on user pick: passthrough is simpler and bundle files store what the user types.
 - Switch the whole apply path to ``axlOutputsImportFromFile`` (gets spec "for free" because Maestro parses the CSV). Rejected: would lose the per-row added/replaced report that the user has been using to verify what landed. Per-row dispatch + new axlAddSpecToOutput call keeps that report and adds spec_status as a separate signal.
 - Lock spec to v3 schema (separate version bump). Rejected: spec is additive on top of v1.2 fields; keeping ``measure_schema_version: 2`` lets users upgrade by adding the one field without re-deciding what their existing bundles mean.
+
+---
+
+## #46 — Phase 3B v1.4: spec parser accepts `X..Y` dotted range; weight/info read-side scope-down
+_Date: 2026-05-16_
+
+**Decision A — dotted range form lands in SKILL parser.** v1.3 doc claimed support for `X..Y` but `_pvtMeasureParseSpec` had the branch commented out as "intentionally NOT supported". v1.4 implements it for real. The single-char-delimiter argument that blocked it before is bypassed by using classic SKILL `index(s "..")` (returns substring at first match) instead of `parseString`. Two pre-checks are mandatory: reject 3+ consecutive dots ("1...2"), otherwise it silently parses as `range(1, .2)`; reject multiple `..` occurrences ("1.5..2.5..3.5"), otherwise the rhs feeds evalstring with a malformed numeric token and the SKILL reader's error path is uncatchable per #45.
+
+**Decision B — `axlGetSpecWeight` IS readable; `info` is write-only.** Live skillbridge probe 2026-05-16 mapped the spec-data API surface end-to-end:
+
+  | API | Status | Use |
+  |---|---|---|
+  | `axlGetSpecs(sdb)` | works | returns `(sdb_handle, [<test>.<output>...])` — count + address-string list |
+  | `axlGetSpec(sdb, "<test>.<output>")` | works | returns spec INTEGER handle (NOT the un-dotted output name; that returns 0) |
+  | `axlGetSpecName / ResultName / Type / Min / Max / Tol / Weight (int_handle)` | works | per-spec accessors; values are strings |
+  | `axlGetSpecCondition(spec int_handle, field_str)` | exists | always returns 0 — different concept, not a value-getter |
+  | `axlGetSpecData(sdb, test, output, [opt])` | works | returns nil when no spec set |
+  | `axlGetSpecInfo` | DOES NOT EXIST | no read-side accessor for the `?info` field |
+  | `axlDelSpecFromOutput` / similar | DOES NOT EXIST | no spec-clear path; orphan specs persist across output deletes until session reload |
+  | `axlAddSpecToOutput ?lt + ?info` | REJECTED | "More than one spec type passed" — `?info` is treated as a mutually-exclusive spec kind, NOT a side metadata field |
+  | `axlAddSpecToOutput ?lt + ?weight` | works | weight IS write-side passable alongside an operator |
+  | `axlSpecMet / axlEvalSpec / axlGetResultPass*` | NONE EXIST | Maestro evaluates pass/fail internally for GUI dots, but does NOT expose a public eval API |
+
+**Decision C — v1.4 #3 (pull captures weight + info) deferred to v1.5.** User confirmed they don't manually touch spec weights in daily work (all specs default to weight=1.0). Implementing pull-side capture without a corresponding push-side `spec_weight` field on `MeasureApply` would yield a misleading half-feature: snapshot would show weight but bundles couldn't apply it. Either implement both sides (medium scope, low user value) or skip both. Picked skip. v1.5 candidate if a real "this spec is more important" workflow surfaces.
+
+**Decision D — pass/fail capture in collector (v1.4 #1) goes via Python, NOT a SKILL eval API.** No `axlSpecMet`/`axlEvalSpec` exists. Two paths considered: (i) capture spec strings in collector + recompute pass/fail in Python ingester from `value_num` + parsed spec; (ii) skip the collector and read pass/fail off the Maestro Results Browser (no public API). Picked (i). The Python ingester already has parser-only validation in `measure_bundle._validate_spec` — v1.4 #1 will add a small spec evaluator in Python (see follow-on decision for the eval design).
+
+**Decision E — `axlGetSpecs(sdb)` shape is `(scalar_handle, [address_list])`, scalar IS NOT a spec id.** The first element of `axlGetSpecs` looks like a count or sdb echo, NOT a spec object. Iterating it as if each integer were a spec handle leads to "Cannot find a setup database entry for handle N" errors. Always iterate the second element (list of `<test>.<output>` strings), then map each to a handle via `axlGetSpec(sdb, full_address)`.
+
+**Decision F — `axlGetSpec(sdb, name)` requires the FULL `<test>.<output>` address.** Passing just the output name (`"_probe_v14"`) returns 0 even when a spec exists; the dotted full form (`"Test._probe_v14"`) returns the actual integer handle. This is undocumented in adexlSKILLref but verified live.
+
+**Test coverage:** SKILL Tier-1 +9 cases on `_pvtMeasureParseSpec` dotted-range branch (5 happy + 4 reject), bringing Tier-1 376 → 385. Python +2 cases on `test_measure_bundle.SpecPassthroughTests` for dotted-range bundle load + negative-range bundle load.
+
+**Live verification:** Parser exercised against 16 cases on fnxSession0 — all 5 happy decimals/ints/negative/SI/whitespace yield `(range V1 V2)`; all 4 reject paths return `pvt_err pvt_validation` with informative messages; all 5 v1.3 regression cases (bracket, range-kw, lt, ge, tol) unchanged.
+
+**Owed:** fnxSession0 has one orphan spec record (`Test._probe_v14`, weight=2.5) leftover from the API probe. Output is deleted; spec entry persists in `axlGetSpecs(sdb)` because no spec-deletion API exists. Won't affect normal use (the orphan has no matching output to attach to in the snapshot); will clear on Cadence restart.
