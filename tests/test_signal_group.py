@@ -20,6 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "python"))
 
 from simkit.signal_group import (  # noqa: E402
+    Signal,
     SignalGroup,
     SignalGroupLoadError,
     SignalGroupMalformedError,
@@ -62,20 +63,23 @@ class HappyPathTests(TempDirMixin, unittest.TestCase):
         sg = load_signal_group(_EXAMPLE_FILE)
         self.assertIsInstance(sg, SignalGroup)
         self.assertEqual(sg.name, "voltage_outs")
-        self.assertEqual(sg.signals, ("/Vout",))
+        self.assertEqual([s.net for s in sg.signals], ["/Vout"])
+        self.assertEqual([s.alias for s in sg.signals], [None])
 
     def test_minimal_doc(self):
         path = self._write(_min_doc())
         sg = load_signal_group(path)
         self.assertEqual(sg.signal_group_schema_version, 1)
-        self.assertEqual(sg.signals, ("/Vout",))
+        self.assertEqual([s.net for s in sg.signals], ["/Vout"])
 
     def test_multi_signal_order_preserved(self):
         doc = _min_doc()
         doc["signals"] = ["/Vout", "/Vout2", "/buf/y"]
         path = self._write(doc)
         sg = load_signal_group(path)
-        self.assertEqual(sg.signals, ("/Vout", "/Vout2", "/buf/y"))
+        self.assertEqual(
+            [s.net for s in sg.signals], ["/Vout", "/Vout2", "/buf/y"]
+        )
 
 
 class SchemaVersionTests(TempDirMixin, unittest.TestCase):
@@ -173,6 +177,103 @@ class MalformedTests(TempDirMixin, unittest.TestCase):
     def test_not_object(self):
         path = self._write("[1, 2, 3]")
         with self.assertRaises(SignalGroupMalformedError):
+            load_signal_group(path)
+
+
+class AliasFormTests(TempDirMixin, unittest.TestCase):
+    """v2 — items may be {net, alias} objects (DECISIONS #49)."""
+
+    def _v2_doc(self, signals: list) -> dict:
+        return {
+            "signal_group_schema_version": 2,
+            "name": "outs",
+            "signals": signals,
+        }
+
+    def test_alias_form_loads(self):
+        path = self._write(self._v2_doc([
+            {"net": "/I_A/VDD", "alias": "vdd_a"},
+            {"net": "/I_B/VDD", "alias": "vdd_b"},
+        ]))
+        sg = load_signal_group(path)
+        self.assertEqual(sg.signal_group_schema_version, 2)
+        self.assertEqual(
+            [(s.net, s.alias) for s in sg.signals],
+            [("/I_A/VDD", "vdd_a"), ("/I_B/VDD", "vdd_b")],
+        )
+        self.assertEqual(sg.signals[0].output_basename, "vdd_a")
+
+    def test_alias_form_mix_with_bare_strings(self):
+        path = self._write(self._v2_doc([
+            "/Vout",
+            {"net": "/I_A/VDD", "alias": "vdd_a"},
+        ]))
+        sg = load_signal_group(path)
+        self.assertIsNone(sg.signals[0].alias)
+        self.assertEqual(sg.signals[0].output_basename, "Vout")
+        self.assertEqual(sg.signals[1].alias, "vdd_a")
+
+    def test_alias_form_rejected_in_v1(self):
+        doc = self._v2_doc([{"net": "/X", "alias": "x"}])
+        doc["signal_group_schema_version"] = 1
+        path = self._write(doc)
+        with self.assertRaisesRegex(
+            SignalGroupLoadError, r"requires 'signal_group_schema_version': 2"
+        ):
+            load_signal_group(path)
+
+    def test_alias_optional_in_dict_form(self):
+        # {net: ...} with no alias is allowed; falls back to basename.
+        path = self._write(self._v2_doc([{"net": "/Vout"}]))
+        sg = load_signal_group(path)
+        self.assertIsNone(sg.signals[0].alias)
+        self.assertEqual(sg.signals[0].output_basename, "Vout")
+
+    def test_alias_null_treated_as_missing(self):
+        path = self._write(self._v2_doc([{"net": "/Vout", "alias": None}]))
+        sg = load_signal_group(path)
+        self.assertIsNone(sg.signals[0].alias)
+
+    def test_alias_bad_identifier_rejected(self):
+        path = self._write(self._v2_doc(
+            [{"net": "/X", "alias": "1bad"}]
+        ))
+        with self.assertRaisesRegex(SignalGroupLoadError, r"alias.*must match"):
+            load_signal_group(path)
+
+    def test_alias_with_slash_rejected(self):
+        path = self._write(self._v2_doc(
+            [{"net": "/X", "alias": "a/b"}]
+        ))
+        with self.assertRaisesRegex(SignalGroupLoadError, r"alias.*must match"):
+            load_signal_group(path)
+
+    def test_alias_duplicate_rejected(self):
+        path = self._write(self._v2_doc([
+            {"net": "/I_A/VDD", "alias": "vdd"},
+            {"net": "/I_B/VDD", "alias": "vdd"},
+        ]))
+        with self.assertRaisesRegex(SignalGroupLoadError, r"duplicates earlier alias"):
+            load_signal_group(path)
+
+    def test_dict_form_missing_net_rejected(self):
+        path = self._write(self._v2_doc([{"alias": "x"}]))
+        with self.assertRaisesRegex(SignalGroupLoadError, r"'net' must be a string"):
+            load_signal_group(path)
+
+    def test_dict_form_unknown_key_rejected(self):
+        path = self._write(self._v2_doc(
+            [{"net": "/X", "alias": "x", "extra": "junk"}]
+        ))
+        with self.assertRaisesRegex(SignalGroupLoadError, r"unknown keys"):
+            load_signal_group(path)
+
+    def test_net_duplicate_across_forms_rejected(self):
+        path = self._write(self._v2_doc([
+            "/VDD",
+            {"net": "/VDD", "alias": "vdd2"},
+        ]))
+        with self.assertRaisesRegex(SignalGroupLoadError, r"duplicates earlier net"):
             load_signal_group(path)
 
 

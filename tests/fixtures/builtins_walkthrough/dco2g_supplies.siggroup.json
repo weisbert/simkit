@@ -1,5 +1,5 @@
 {
-  "_doc": "Four DCO2G supply / terminal nets from the user's DCOBUF CSV. Each gets an Iavg over the t_1..t_2 window — collapses 4 hand-written i_avg_window expressions into 1 bundle entry.",
+  "_doc": "Four DCO2G supply / terminal nets from the user's DCOBUF CSV. Each gets an Iavg over the t_1..t_2 window. Kept in v1 (string-only) form on purpose — it's the regression pin for the basename-collision case (/VDD x2, /PLUS x2 collapse to Iavg_VDD / Iavg_PLUS). The v2 alias-map form (DECISIONS #49) solves this idiom — bump schema_version to 2 and replace each entry with {\"net\": ..., \"alias\": ...} to get distinct output names.",
   "signal_group_schema_version": 1,
   "name": "dco2g_supplies",
   "signals": [

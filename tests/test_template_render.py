@@ -443,6 +443,99 @@ class ParamSweepRenderTests(ProjectFixtureMixin, unittest.TestCase):
         with self.assertRaisesRegex(RenderError, "appears twice"):
             render_bundle(bundle)
 
+    def test_sweep_per_iteration_specs(self):
+        # v1.5 #3 — each swept row carries its own spec.
+        self._write_template(
+            _no_signal_template_doc(name="value_at"), name="value_at"
+        )
+        doc = _bundle_doc(apply=[{
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1000000", "100000000"]},
+            "output_names": ["PN_1M", "PN_100M"],
+            "specs": ["<-100", "<-140"],
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual([r.output_name for r in rows], ["PN_1M", "PN_100M"])
+        self.assertEqual(rows[0].spec, "<-100")
+        self.assertEqual(rows[1].spec, "<-140")
+
+    def test_sweep_per_iteration_specs_with_nulls(self):
+        # None in specs → empty-string spec on that row (no spec).
+        self._write_template(
+            _no_signal_template_doc(name="value_at"), name="value_at"
+        )
+        doc = _bundle_doc(apply=[{
+            "template": "value_at",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1e6", "10e6"]},
+            "output_names": ["PN_1M", "PN_10M"],
+            "specs": ["<-100", None],
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(rows[0].spec, "<-100")
+        self.assertEqual(rows[1].spec, "")
+
+
+class SignalAliasRenderTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.5 #4 — signal-group items with alias (DECISIONS #49) are used
+    as the output-name basename, bypassing the basename-collision case
+    that the dco2g_supplies walkthrough hit pre-v2."""
+
+    def test_aliased_group_renders_without_collision(self):
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        sg = {
+            "signal_group_schema_version": 2,
+            "name": "supplies",
+            "signals": [
+                {"net": "/I_BUF2G/DCO2G_buf_to_adpll/VDD", "alias": "buf2g_vdd"},
+                {"net": "/I_BUF2G/I_rxbuf_lp/VDD",         "alias": "rxbuf_vdd"},
+                {"net": "/I82/L13/PLUS",                    "alias": "L13"},
+                {"net": "/I82/L0/PLUS",                     "alias": "L0"},
+            ],
+        }
+        self._write_signal_group(sg, name="supplies")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "supplies",
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        # Without aliases this would collide on Rtime_VDD x2 and Rtime_PLUS x2.
+        self.assertEqual([r.output_name for r in rows], [
+            "Rtime_buf2g_vdd", "Rtime_rxbuf_vdd", "Rtime_L13", "Rtime_L0",
+        ])
+        # Net path still appears verbatim in the expression (alias only
+        # affects the output name).
+        self.assertIn("/I_BUF2G/DCO2G_buf_to_adpll/VDD", rows[0].expression)
+
+    def test_bare_string_signals_unchanged(self):
+        # v1 / no-alias path keeps signal_basename semantics.
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        sg = {
+            "signal_group_schema_version": 1,
+            "name": "two_rails",
+            "signals": ["/Vout", "/AVDD"],
+        }
+        self._write_signal_group(sg, name="two_rails")
+        doc = _bundle_doc(apply=[{
+            "template": "rise_time_threshold",
+            "signal_group": "two_rails",
+        }])
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        bundle = load_measure_bundle(path, project=self.project)
+        rows = render_bundle(bundle)
+        self.assertEqual(
+            [r.output_name for r in rows], ["Rtime_Vout", "Rtime_AVDD"]
+        )
+
 
 class RawExpressionRenderTests(ProjectFixtureMixin, unittest.TestCase):
     """v1.2 (f) — raw_expression entries render to literal expression."""

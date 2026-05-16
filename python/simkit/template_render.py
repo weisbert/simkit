@@ -29,7 +29,6 @@ from typing import Optional
 
 from simkit.errors import SimkitError
 from simkit.measure_bundle import MeasureApply, MeasureBundle
-from simkit.signal_group import signal_basename
 from simkit.template import Template
 
 
@@ -131,9 +130,9 @@ def _render_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
 
     for sig in entry.signal_group.signals:
         expression = _substitute(
-            template, entry.param_overrides, signal_value=sig, idx=idx
+            template, entry.param_overrides, signal_value=sig.net, idx=idx
         )
-        basename = signal_basename(sig)
+        basename = sig.output_basename
         output_name = _resolve_output_name(entry, basename=basename)
         out.append(
             RenderedRow(
@@ -214,12 +213,16 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
     a row named by ``output_names[i]``. Mirrors the no-sweep branches for
     {signal-bound, signal-less} templates but folds the per-i override
     into the substitution map.
+
+    v1.5 #3 — when ``entry.specs`` is set (parallel to ``output_names``),
+    each row gets its own spec from ``specs[i]`` (None → empty). Otherwise
+    every row falls back to the uniform ``entry.spec``.
     """
     assert entry.template is not None
     assert entry.param_sweep is not None
     assert entry.output_names is not None
     template = entry.template
-    spec = entry.spec or ""
+    uniform_spec = entry.spec or ""
     (sweep_key, sweep_values), = entry.param_sweep.items()
     signal_param = template.signal_param()
     rows: list[RenderedRow] = []
@@ -228,6 +231,9 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
         merged = dict(entry.param_overrides)
         merged[sweep_key] = value
         name_tpl = entry.output_names[i]
+        row_spec = (
+            (entry.specs[i] or "") if entry.specs is not None else uniform_spec
+        )
 
         if signal_param is None:
             expr = _substitute(
@@ -239,7 +245,7 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
                 eval_type=template.eval_type,
                 plot=template.plot,
                 save=template.save,
-                spec=spec,
+                spec=row_spec,
             ))
             continue
 
@@ -250,9 +256,9 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
             )
         for sig in entry.signal_group.signals:
             expr = _substitute(
-                template, merged, signal_value=sig, idx=idx
+                template, merged, signal_value=sig.net, idx=idx
             )
-            basename = signal_basename(sig)
+            basename = sig.output_basename
             out_name = name_tpl.replace(_SIG_PLACEHOLDER, basename)
             rows.append(RenderedRow(
                 output_name=out_name,
@@ -260,6 +266,6 @@ def _render_swept_entry(idx: int, entry: MeasureApply) -> list[RenderedRow]:
                 eval_type=template.eval_type,
                 plot=template.plot,
                 save=template.save,
-                spec=spec,
+                spec=row_spec,
             ))
     return rows

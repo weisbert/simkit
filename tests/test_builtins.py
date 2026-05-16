@@ -19,7 +19,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "python"))
 
 from simkit.measure_bundle import MeasureApply, MeasureBundle  # noqa: E402
-from simkit.signal_group import SignalGroup  # noqa: E402
+from simkit.signal_group import Signal, SignalGroup  # noqa: E402
 from simkit.template import (  # noqa: E402
     TEMPLATE_FILE_SUFFIX,
     Template,
@@ -70,7 +70,7 @@ def _render_once(
         SignalGroup(
             signal_group_schema_version=1,
             name="probe",
-            signals=(signal,),
+            signals=(Signal(net=signal),),
             source_path=Path("-"),
         )
         if has_sig

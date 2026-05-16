@@ -51,6 +51,8 @@ _V2_ONLY_APPLY_FIELDS = frozenset({
     "eval_type",
     # v1.3 spec passthrough — still under schema_version: 2 (additive).
     "spec",
+    # v1.5 #3 per-iteration specs on sweep entries — also v2-only.
+    "specs",
 })
 
 _DEFAULT_TEMPLATES_DIR = "templates"
@@ -107,6 +109,11 @@ class MeasureApply:
     # A single spec string applies uniformly to every row the entry yields
     # (sweep × signal_group expansion all share it).
     spec: Optional[str] = None
+    # v1.5 #3 — per-iteration specs on sweep entries. Parallel to output_names:
+    # specs[i] applies to the i-th swept row. None entries == "no spec on
+    # this row". Mutually exclusive with `spec` (single uniform spec). Only
+    # valid when param_sweep is set. See DECISIONS #48.
+    specs: Optional[tuple[Optional[str], ...]] = None
 
 
 @dataclass(frozen=True)
@@ -415,6 +422,7 @@ def _validate_apply_entry(
         where, raw, template, param_overrides, output_name
     )
     spec = _validate_spec(where, raw)
+    specs = _validate_specs(where, raw, sweep_names)
 
     return MeasureApply(
         template=template,
@@ -425,6 +433,7 @@ def _validate_apply_entry(
         param_sweep=sweep,
         output_names=sweep_names,
         spec=spec,
+        specs=specs,
     )
 
 
@@ -770,3 +779,61 @@ def _validate_spec(where: str, raw: dict) -> Optional[str]:
             f"expected start with one of: < > <= >= range tol [ digit"
         )
     return value
+
+
+def _validate_specs(
+    where: str,
+    raw: dict,
+    sweep_names: Optional[tuple[str, ...]],
+) -> Optional[tuple[Optional[str], ...]]:
+    """v1.5 #3 — per-iteration specs on sweep entries.
+
+    Parallel to ``output_names``: ``specs[i]`` applies to the i-th swept row.
+    None entries mean "no spec on this row". Mutually exclusive with the
+    uniform ``spec`` field, and only valid when ``param_sweep`` is set.
+    """
+    if "specs" not in raw:
+        return None
+    if sweep_names is None:
+        raise MeasureBundleLoadError(
+            f"{where}: 'specs' (parallel per-row array) only applies to "
+            f"swept entries — use 'spec' for a uniform per-entry spec"
+        )
+    if raw.get("spec") is not None:
+        raise MeasureBundleLoadError(
+            f"{where}: 'spec' and 'specs' are mutually exclusive — pick one"
+        )
+    arr = raw["specs"]
+    if not isinstance(arr, list):
+        raise MeasureBundleLoadError(
+            f"{where}: 'specs' must be a JSON array "
+            f"(got {type(arr).__name__})"
+        )
+    if len(arr) != len(sweep_names):
+        raise MeasureBundleLoadError(
+            f"{where}: 'specs' has {len(arr)} entries but 'output_names' "
+            f"has {len(sweep_names)} (parallel arrays must match length)"
+        )
+    out: list[Optional[str]] = []
+    for i, item in enumerate(arr):
+        if item is None:
+            out.append(None)
+            continue
+        if not isinstance(item, str):
+            raise MeasureBundleLoadError(
+                f"{where}: 'specs[{i}]' must be a string or null "
+                f"(got {type(item).__name__})"
+            )
+        if item.strip() == "":
+            raise MeasureBundleLoadError(
+                f"{where}: 'specs[{i}]' must be a non-empty string when "
+                f"present (use null for no spec on this row)"
+            )
+        if not _SPEC_PREFIX_RE.match(item):
+            raise MeasureBundleLoadError(
+                f"{where}: 'specs[{i}]' {item!r} does not look like a "
+                f"Cadence spec — expected start with one of: "
+                f"< > <= >= range tol [ digit"
+            )
+        out.append(item)
+    return tuple(out)

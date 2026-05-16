@@ -129,9 +129,9 @@ Filename basename (sans extension) must equal the file's `name` field. Load erro
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `signal_group_schema_version` | int | yes | Pinned to `1`. |
+| `signal_group_schema_version` | int | yes | `1` (string-only items) or `2` (items may be `{net, alias}` objects — DECISIONS #49). |
 | `name` | str | yes | Match `^[a-z][a-z0-9_]*$`. |
-| `signals` | array[str] | yes | One or more paths. Each must start with `/`. Order preserved (deterministic apply ordering). Duplicates rejected. |
+| `signals` | array | yes | One or more entries. v1: each is a path string starting with `/`. v2: each is either a path string OR a `{"net": "<path>", "alias": "<short>"}` object. ``alias`` (when present) replaces the basename in rendered output names — solves the "four `/VDD` rails collide on `Iavg_VDD`" idiom. Alias must match `^[A-Za-z][A-Za-z0-9_]*$` and be unique within the group. Nets unique within the group regardless of form. Order preserved. |
 
 ### 3.4 Measurement bundle object
 

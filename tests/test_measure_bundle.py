@@ -534,6 +534,93 @@ class SpecPassthroughTests(ProjectFixtureMixin, unittest.TestCase):
             load_measure_bundle(path, project=self.project)
 
 
+class PerIterationSpecsTests(ProjectFixtureMixin, unittest.TestCase):
+    """v1.5 #3 — `specs` parallel array on sweep entries."""
+
+    def _make_pn_sweep_bundle(self, sweep_extra: dict) -> Path:
+        self._write_template(
+            _no_signal_template_doc(name="pn_at_freq"), name="pn_at_freq"
+        )
+        entry = {
+            "template": "pn_at_freq",
+            "signal_group": None,
+            "param_overrides": {"OUT_NAME": "PN_wave"},
+            "param_sweep": {"FREQ": ["1000000", "100000000"]},
+            "output_names": ["PN_1M", "PN_100M"],
+        }
+        entry.update(sweep_extra)
+        doc = _min_bundle()
+        doc["apply"] = [entry]
+        return self._write_bundle(doc, name="voltage_outs_rise")
+
+    def test_specs_parallel_loads(self):
+        path = self._make_pn_sweep_bundle({"specs": ["<-100", "<-140"]})
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].specs, ("<-100", "<-140"))
+        self.assertIsNone(b.apply[0].spec)
+
+    def test_specs_with_nulls_preserved(self):
+        path = self._make_pn_sweep_bundle({"specs": ["<-100", None]})
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].specs, ("<-100", None))
+
+    def test_specs_mutex_with_spec(self):
+        path = self._make_pn_sweep_bundle(
+            {"spec": "<-100", "specs": ["<-100", "<-140"]}
+        )
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"mutually exclusive"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_specs_length_mismatch_rejected(self):
+        path = self._make_pn_sweep_bundle({"specs": ["<-100"]})
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"specs.*has 1 entries.*has 2"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_specs_bad_entry_rejected(self):
+        path = self._make_pn_sweep_bundle({"specs": ["<-100", "garbage"]})
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"specs\[1\].*does not look"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_specs_non_string_entry_rejected(self):
+        path = self._make_pn_sweep_bundle({"specs": ["<-100", 42]})
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"specs\[1\].*string or null"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_specs_empty_string_rejected(self):
+        path = self._make_pn_sweep_bundle({"specs": ["<-100", "   "]})
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"specs\[1\].*non-empty"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_specs_only_on_sweep_entries(self):
+        # No param_sweep + has 'specs' → rejected
+        self._write_template(_rise_template_doc(), name="rise_time_threshold")
+        self._write_signal_group(_voltage_outs_doc(), name="voltage_outs")
+        doc = _min_bundle()
+        doc["apply"][0]["specs"] = ["<100p"]
+        path = self._write_bundle(doc, name="voltage_outs_rise")
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"only applies to swept entries"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+    def test_specs_must_be_array(self):
+        path = self._make_pn_sweep_bundle({"specs": "<-100"})
+        with self.assertRaisesRegex(
+            MeasureBundleLoadError, r"'specs' must be a JSON array"
+        ):
+            load_measure_bundle(path, project=self.project)
+
+
 class RawExpressionApplyTests(ProjectFixtureMixin, unittest.TestCase):
     """v1.2 (f) — raw_expression apply entries bypass templates."""
 

@@ -975,3 +975,41 @@ Also renamed SKILL parser tags `"min"` → `"ge"`, `"max"` → `"le"` to match P
 **Test coverage:** SKILL Tier-1 2 cases retagged (`measure/parseSpec/inclusive-{upper,lower}` from `inclusive-{max,min}`); count 394/1 unchanged.
 
 **Live verification:** On fnxSession0, `>= 1e-10` on `Rtime_clkout` → CSV shows `range 1e-10 1e+30`; `<= -100` on `PN_1M` → `range -1e+30 -100`. Python `spec_eval.evaluate_spec` classifies 2.13e-11 vs `range 1e-10 1e+30` as `fail` and -167 vs `range -1e+30 -100` as `pass` — both correct under the inclusive-bound intent. Cleanup via overwrite-import (#46 G); fnxSession0 restored to 11-row baseline.
+
+---
+
+## #48 — Phase 3B v1.5 #3: per-iteration specs on sweep entries
+_Date: 2026-05-16_
+
+**Decision:** Add an optional `specs: list[str | null]` field on `MeasureApply` for sweep entries, parallel to `output_names`. Each `specs[i]` applies to the i-th swept row; `null` entries mean "no spec on this row". Mutually exclusive with the existing single uniform `spec` field; only valid when `param_sweep` is set; length must match `output_names`. Each non-null entry passes the same `_SPEC_PREFIX_RE` sanity that the uniform `spec` does.
+
+Motivating case: phase-noise spot-frequency sweeps — `PN @ 1MHz < -100` vs `PN @ 100MHz < -140`. Pre-v1.5 a user had to pick between (a) one sweep entry with a single uniform spec (loses per-frequency tightness) or (b) N hand-written entries (loses the sweep economics). The parallel array recovers both.
+
+**Renderer:** `_render_swept_entry` checks `entry.specs is not None` per iteration; if set, uses `entry.specs[i] or ""` as the per-row spec (None → empty string == no spec). Falls back to `entry.spec or ""` otherwise. No change to non-sweep render paths.
+
+**SKILL push:** Unchanged. The per-row spec was already plumbed end-to-end via `RenderedRow.spec`; this decision just changes how that field gets populated at the Python boundary.
+
+**Schema gating:** Added to `_V2_ONLY_APPLY_FIELDS`. v1 bundles touching `specs` raise the same "require 'measure_schema_version': 2" error as other v2-only fields.
+
+**Test coverage:** 9 new Python cases in `test_measure_bundle.PerIterationSpecsTests` (happy + nulls + mutex + length + bad syntax + non-string element + empty element + non-sweep + non-array). 2 new render-side cases in `test_template_render.ParamSweepRenderTests` (per-row distinct specs, mix with None). Python 773 → 784.
+
+**Not done:** No live skillbridge verification — this is a pure Python loader + renderer change; the SKILL surface is unchanged and was already live-verified in v1.3/v1.4. Future bundle dogfood with mixed-spec sweep will exercise it organically.
+
+---
+
+## #49 — Phase 3B v1.5 #4: signal-group alias map (siggroup schema v2)
+_Date: 2026-05-16_
+
+**Decision:** Bump `signal_group_schema_version` accepted set to `{1, 2}`. v2 lets each item in `signals[]` be either a bare net-path string (v1 form) OR a `{"net": "<path>", "alias": "<short>"}` object. When `alias` is present, the renderer uses it as the output-name basename in place of `signal_basename(net)`. Aliases must match `^[A-Za-z][A-Za-z0-9_]*$` and be unique within the group. Nets are unique within the group regardless of form. v1 sidecars are unaffected.
+
+Motivating case: the v1.1 walkthrough's `dco2g_supplies.siggroup.json` — four nets whose basenames collide (`/I_BUF2G/DCO2G_buf_to_adpll/VDD`, `/I_BUF2G/I_rxbuf_lp/VDD`, `/I82/L13/PLUS`, `/I82/L0/PLUS` → `VDD/VDD/PLUS/PLUS` → render-time output-name collision → `RenderError`). Pre-v2 workaround was N hand-written `MeasureApply` entries with `output_name` overrides, which loses the "one entry + one group" economics. v2 alias absorbs the idiom natively.
+
+**Dataclass change:** New `Signal(net: str, alias: Optional[str])` with a derived `output_basename` property. `SignalGroup.signals` is now `tuple[Signal, ...]` (was `tuple[str, ...]`). v1 bare-string items normalise to `Signal(net=str, alias=None)` at load time.
+
+**Breaking-change blast radius:** 2 production callsites (`template_render._render_entry` line 132, `_render_swept_entry` line 251) + 3 test files. All updated. `cli/measure.py:739` uses `len(sg.signals)` which still works.
+
+**Walkthrough fixture left alone:** `dco2g_supplies.siggroup.json` stays in v1 form as the regression pin for `test_supply_group_collides_under_v1_naming`. Its `_doc` field now points at this decision so future readers know the v2 alias form is the resolution. `test_template_render.SignalAliasRenderTests` carries the v2-form happy path with the same 4-supply pattern.
+
+**Test coverage:** 11 new cases in `test_signal_group.AliasFormTests` (happy / mixed-with-strings / v1-rejects-alias / null-alias / optional-alias / bad-identifier / slash-in-alias / duplicate-alias / missing-net / unknown-key / cross-form-net-collision). 2 new cases in `test_template_render.SignalAliasRenderTests` (aliased group renders cleanly + bare-string regression). Python 784 → 797.
+
+**Not done:** No live skillbridge verification — pure-Python loader + renderer change; net paths reach SKILL identical to today (only output_name strings differ, which the SKILL push side has always treated opaquely).
