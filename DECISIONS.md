@@ -936,7 +936,7 @@ _Date: 2026-05-16_
   | `axlGetSpecCondition(spec int_handle, field_str)` | exists | always returns 0 — different concept, not a value-getter |
   | `axlGetSpecData(sdb, test, output, [opt])` | works | returns nil when no spec set |
   | `axlGetSpecInfo` | DOES NOT EXIST | no read-side accessor for the `?info` field |
-  | `axlDelSpecFromOutput` / similar | DOES NOT EXIST | no spec-clear path; orphan specs persist across output deletes until session reload |
+  | `axlDelSpecFromOutput` / similar | DOES NOT EXIST | no per-spec API. Bulk spec clear goes via `axlOutputsImportFromFile ?operation "overwrite"` with blank Spec columns (see Decision G); the same path `pvt measure restore` already uses |
   | `axlAddSpecToOutput ?lt + ?info` | REJECTED | "More than one spec type passed" — `?info` is treated as a mutually-exclusive spec kind, NOT a side metadata field |
   | `axlAddSpecToOutput ?lt + ?weight` | works | weight IS write-side passable alongside an operator |
   | `axlSpecMet / axlEvalSpec / axlGetResultPass*` | NONE EXIST | Maestro evaluates pass/fail internally for GUI dots, but does NOT expose a public eval API |
@@ -949,8 +949,8 @@ _Date: 2026-05-16_
 
 **Decision F — `axlGetSpec(sdb, name)` requires the FULL `<test>.<output>` address.** Passing just the output name (`"_probe_v14"`) returns 0 even when a spec exists; the dotted full form (`"Test._probe_v14"`) returns the actual integer handle. This is undocumented in adexlSKILLref but verified live.
 
+**Decision G — spec cleanup goes via `axlOutputsImportFromFile ?operation overwrite` (the same path `pvt measure restore` already uses), NOT a dedicated `axlDel*FromOutput` API.** Initial v1.4 work mis-recorded this as "no programmatic cleanup; needs Cadence restart" — that was wrong. The escape hatch is to export the current outputs CSV, blank the Spec column for the row(s) you want to clear, and re-import with overwrite. Outputs are preserved; specs are wiped to whatever the CSV says (empty). Verified live 2026-05-16 by clearing the Rtime_clkout `< 1e-10` and PN_1M `> -150` specs left over from the v1.4 #1 dogfood. The earlier "orphan spec persists in axlGetSpecs(sdb) after axlDeleteOutput" finding still holds — but that's an orphan ID with no attached output, not a live spec, so it doesn't show up in any CSV / snapshot / capture and is effectively dead.
+
 **Test coverage:** SKILL Tier-1 +9 cases on `_pvtMeasureParseSpec` dotted-range branch (5 happy + 4 reject), bringing Tier-1 376 → 385. Python +2 cases on `test_measure_bundle.SpecPassthroughTests` for dotted-range bundle load + negative-range bundle load.
 
-**Live verification:** Parser exercised against 16 cases on fnxSession0 — all 5 happy decimals/ints/negative/SI/whitespace yield `(range V1 V2)`; all 4 reject paths return `pvt_err pvt_validation` with informative messages; all 5 v1.3 regression cases (bracket, range-kw, lt, ge, tol) unchanged.
-
-**Owed:** fnxSession0 has one orphan spec record (`Test._probe_v14`, weight=2.5) leftover from the API probe. Output is deleted; spec entry persists in `axlGetSpecs(sdb)` because no spec-deletion API exists. Won't affect normal use (the orphan has no matching output to attach to in the snapshot); will clear on Cadence restart.
+**Live verification:** Parser exercised against 16 cases on fnxSession0 — all 5 happy decimals/ints/negative/SI/whitespace yield `(range V1 V2)`; all 4 reject paths return `pvt_err pvt_validation` with informative messages; all 5 v1.3 regression cases (bracket, range-kw, lt, ge, tol) unchanged. Cleanup path verified by removing the 2 dogfood specs via the overwrite-import recipe above; post-clean `_pvtCollCaptureSpecs` returns an empty table and the outputs CSV reverts to the 11-row baseline with all Spec columns empty.
