@@ -73,10 +73,16 @@ def render_pre_run_script(spec: PreRunSpec) -> str:
          arg into ``additionalArgs`` via asiSetSimOptionVal.
       4. Always returns t — never nil — so Maestro doesn't abort the corner.
     """
+    # SKILL note: use (list k v) for assoc entries, NOT (cons k v).
+    # Cadence SKILL's cons rejects non-list 2nd arg ("argument #2 should
+    # be a list"), so dotted-pair (cons "k" "v") doesn't compile. The
+    # 2-element-list form (list "k" "v") gives assoc-compatible entries
+    # retrieved via cadr (the cdr is the rest-of-list, not the value
+    # directly). Probed on fnxSession0 2026-05-16.
     table_lines = []
     for corner, arg in spec.corner_to_arg.items():
         table_lines.append(
-            f"        (cons {_skill_quote(corner)} {_skill_quote(arg)})"
+            f"        (list {_skill_quote(corner)} {_skill_quote(arg)})"
         )
     table_block = "\n".join(table_lines) if table_lines else "        ;; (empty map — item has no IC for any corner)"
 
@@ -87,21 +93,29 @@ def render_pre_run_script(spec: PreRunSpec) -> str:
 ;; Runs in Maestro's worker virtuoso VM BEFORE each (test, corner)
 ;; point is netlisted. Looks up the current sub-corner in the embedded
 ;; map and writes the matching +nodeset / +ic flag into additionalArgs.
+;;
+;; SKILL note: uses (let ...) + (setq ...) instead of (let* ...) —
+;; the worker VM's SKILL parser is stricter than the main VM's and
+;; rejects let* with errset-wrapped initial values ("unbound variable"
+;; on the bound name itself). Probed on fnxSession0 2026-05-16.
 
-(let* ((cornerName (car (errset (axlGetCornerNameForCurrentPointInRun) nil)))
-       (cornerMap (list
+(let ((cornerName nil)
+      (cornerMap (list
 {table_block}
-       ))
-       (entry nil)
-       (asi nil))
+      ))
+      (entry nil)
+      (asi nil))
+  (setq cornerName (car (errset (axlGetCornerNameForCurrentPointInRun) nil)))
   ;; Pre-flight call has cornerName="" and asi=nil — guard.
   (when (and cornerName (stringp cornerName) (not (equal cornerName "")))
     (setq entry (assoc cornerName cornerMap))
     (when entry
       (setq asi (car (errset (asiGetCurrentSession) nil)))
       (when asi
+        ;; assoc returns (key val) — cadr extracts val.
+        ;; (Cadence SKILL's assoc with list-form entries; see note above.)
         (errset
-          (asiSetSimOptionVal asi "additionalArgs" (cdr entry))
+          (asiSetSimOptionVal asi "additionalArgs" (cadr entry))
           nil))))
   ;; ALWAYS return t — nil would abort this corner.
   t)

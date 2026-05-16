@@ -384,10 +384,12 @@ class ExecuteIcFromTests(unittest.TestCase):
         self.assertTrue(Path(script_path).exists())
         self.assertEqual(bridge.disables, ["sim_test"])
 
-        # Generated script must contain a (cons ...) for every corner
+        # Generated script must contain a (list ...) for every corner
+        # (assoc-list shape; not (cons k v) which Cadence SKILL rejects
+        # for non-list 2nd arg).
         src = Path(script_path).read_text()
         for cname in ("C1", "C2", "C3"):
-            self.assertIn(f'(cons "{cname}"', src)
+            self.assertIn(f'(list "{cname}"', src)
         self.assertIn("+nodeset", src)
         self.assertIn("/1/sim_test/netlist/spectre.fc", src)
         self.assertIn("/2/sim_test/netlist/spectre.fc", src)
@@ -452,9 +454,9 @@ class ExecuteIcFromTests(unittest.TestCase):
         )
         self.assertEqual(len(bridge.installs), 1)
         src = Path(bridge.installs[0][1]).read_text()
-        self.assertIn('(cons "C1"', src)
-        self.assertNotIn('(cons "C2"', src)
-        self.assertIn('(cons "C3"', src)
+        self.assertIn('(list "C1"', src)
+        self.assertNotIn('(list "C2"', src)
+        self.assertIn('(list "C3"', src)
         pss = next(r for r in report.items if r.item_name == "pss")
         self.assertTrue(pss.completed)
 

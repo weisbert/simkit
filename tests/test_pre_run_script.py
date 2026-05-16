@@ -101,9 +101,11 @@ class RenderScriptTests(unittest.TestCase):
             },
         )
         src = render_pre_run_script(spec)
-        # Both corner names + both args appear, each as a cons
-        self.assertIn('(cons "TT" "+nodeset /a.fc")', src)
-        self.assertIn('(cons "TT_pvt_0" "+nodeset /b.fc")', src)
+        # Each entry is a 2-element list (NOT a cons-cell — Cadence
+        # SKILL's cons rejects non-list 2nd arg). assoc returns the
+        # whole list; cadr extracts the value.
+        self.assertIn('(list "TT" "+nodeset /a.fc")', src)
+        self.assertIn('(list "TT_pvt_0" "+nodeset /b.fc")', src)
 
     def test_script_always_returns_t(self):
         spec = PreRunSpec(item_name="x", mode="readns", corner_to_arg={})
@@ -127,9 +129,9 @@ class RenderScriptTests(unittest.TestCase):
         # cornerMap is just empty, lookup always misses, script returns t.
         spec = PreRunSpec(item_name="x", mode="readic", corner_to_arg={})
         src = render_pre_run_script(spec)
-        self.assertIn("(let*", src)
-        # Should have ZERO `(cons "` lines
-        self.assertEqual(src.count('(cons "'), 0)
+        self.assertIn("(let ", src)  # NOT let* — worker VM is strict
+        # Should have ZERO `(list "` lines
+        self.assertEqual(src.count('(list "'), 0)
 
 
 class WriteScriptTests(unittest.TestCase):
