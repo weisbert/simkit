@@ -33,7 +33,9 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from simkit.errors import SimkitError
+from simkit.ic_source import IcSourceError, resolve_ic_path
 from simkit.review import (
+    IcFromRef,
     OnFailurePolicy,
     PathIssue,
     Review,
@@ -325,6 +327,127 @@ def _sanitize_history(label: str) -> str:
     return "".join(c if (c.isalnum() or c == "_") else "_" for c in label)
 
 
+def _resolve_results_root(pvtproject_path: Path) -> Path:
+    """Compute the Maestro results root that ``axlGetResultsLocation`` returns.
+
+    Per DECISIONS #57 probe: ``axlGetResultsLocation(sdb)`` returns
+    ``<sessionDir>/results/maestro`` for a maestro-mode setup. v1.2
+    derives ``<sessionDir>`` from the .pvtproject's containing dir on
+    the assumption that the project lives in the same dir as
+    ``maestro.sdb`` — same convention every v1 dogfood uses. If a
+    project ever spans a different layout, this fallback errors loudly
+    so the dev path is "add an explicit results_root override field" not
+    "silently look in the wrong dir."
+    """
+    session_dir = Path(pvtproject_path).expanduser().resolve().parent
+    candidate = session_dir / "results" / "maestro"
+    if not candidate.is_dir():
+        raise OrchestratorError(
+            f"results root not found at expected location {candidate}. "
+            f"v1.2 derives this from the .pvtproject parent; add a session "
+            f"override if the layout differs."
+        )
+    return candidate
+
+
+def _set_ic_for_item(
+    item: ReviewItem,
+    bridge,
+    session: str,
+    pvtproject_path: Path,
+    history_by_item: dict[str, str],
+    notes: list[str],
+) -> Optional[str]:
+    """Resolve corner-1's IC for this item's source + set it on every test.
+
+    v1.2 v1 limitation (DECISIONS #57): the consumer item runs all
+    corners as one batch with corner-1's IC. v1.2.1 will iterate corners
+    one-by-one with per-corner IC. Until then, this helper takes the
+    first available corner dir of the source history's results.
+
+    Returns the previous option value (so the orchestrator can restore
+    it via :func:`pvt_runner_clear_ic_source` after the run), or
+    ``None`` if no IC was set (in which case the orchestrator should
+    skip the clear step too).
+    """
+    ic_from: IcFromRef = item.ic_from  # caller has already null-guarded
+    source_name = ic_from.item
+    source_history = history_by_item.get(source_name)
+    if source_history is None:
+        notes.append(
+            f"ic_from: source item {source_name!r} has no recorded history "
+            f"(did it complete?). Running this item without IC."
+        )
+        print(f"           ! ic_from: no upstream history; naked retry")
+        return None
+
+    try:
+        results_root = _resolve_results_root(pvtproject_path)
+    except OrchestratorError as exc:
+        notes.append(f"ic_from: {exc}")
+        print(f"           ! ic_from: {exc}")
+        return None
+
+    # v1 simplification: use corner-1 (first non-default corner dir);
+    # all corners of this batch share the same IC path. Test name is the
+    # consumer's first test (in practice the typical PSS item names ONE
+    # test). Multi-test items would need finer-grained handling.
+    test_for_ic = item.tests[0]
+    explicit_subdir = ic_from.subdir if ic_from.subdir else None
+    try:
+        resolved = resolve_ic_path(
+            results_root, source_history, corner_idx=1,
+            test_name=test_for_ic, file_kind=ic_from.file,
+            explicit_subdir=explicit_subdir,
+        )
+    except IcSourceError as exc:
+        notes.append(f"ic_from path resolve failed: {exc}")
+        print(f"           ! ic_from resolve: {exc}")
+        return None
+
+    if resolved is None:
+        notes.append(
+            f"ic_from: corner 1's spectre.{ic_from.file} not found under "
+            f"{results_root}/{source_history}/1/{test_for_ic}/. Naked retry."
+        )
+        print(f"           ! ic_from: corner-1 IC missing; naked retry")
+        return None
+
+    # Set the IC on every test of this consumer item. Capture the
+    # FIRST test's prev value as the restore baseline — all tests in
+    # the consumer item share the same simulator session in practice
+    # (same cell/view), so a single restore covers them.
+    prev_value: Optional[str] = None
+    for tname in item.tests:
+        try:
+            pv = bridge.pvt_runner_set_ic_source(
+                tname, str(resolved.abs_path), ic_from.mode,
+                session=session,
+            )
+            if prev_value is None:
+                prev_value = pv
+        except Exception as exc:
+            notes.append(
+                f"ic_from: pvt_runner_set_ic_source({tname!r}) failed: {exc}. "
+                f"Bridge writes to the test's 'additionalArgs' sim option — "
+                f"check it's not in a read-only / locked state."
+            )
+            print(f"           ! ic_from set on {tname!r}: {exc}")
+            # If we partially set on earlier tests, attempt to clear them
+            # before bailing — best-effort.
+            return prev_value if prev_value is not None else ""
+
+    print(
+        f"           ic_from: set {ic_from.mode}={resolved.abs_path} "
+        f"(from {source_name}, corner=1, subdir={resolved.subdir}) "
+        f"[v1.2 v1: all corners share this IC]"
+    )
+    notes.append(
+        f"ic_from: {ic_from.mode}=corner1's {ic_from.file} from {source_name}"
+    )
+    return prev_value if prev_value is not None else ""
+
+
 def execute(
     plan: RunPlan,
     bridge,
@@ -379,6 +502,10 @@ def execute(
     snapshot_restored = False
     item_results: list[ItemResult] = []
 
+    # Track each item's actual_history by name so a downstream consumer
+    # with ic_from can find the upstream history dir on disk.
+    history_by_item: dict[str, str] = {}
+
     try:
         for idx, planned in enumerate(plan.planned, start=1):
             item = planned.item
@@ -405,6 +532,23 @@ def execute(
             #    when pvt_measure_push wiring is needed; for S1 dogfood we
             #    rely on whatever Outputs table the session already has).
 
+            # 3b. ic_from (Phase 3A v1.2, DECISIONS #57) — point Spectre at
+            # the upstream item's per-corner IC. v1.2 v1 limitation: we
+            # set ONE shared IC path (corner-1's) for the whole batch
+            # because per-corner enable-and-run iteration needs a SKILL
+            # helper that doesn't exist yet (tracked as v1.2.1). True
+            # per-corner-distinct IC will land then. For now this still
+            # delivers value: the orchestrator handles the cross-item
+            # plumbing + path resolution + restore-on-exit, the user just
+            # gets a less-than-ideal "all corners share corner-1's IC"
+            # behavior until v1.2.1.
+            ic_prev_value: Optional[str] = None
+            if item.ic_from is not None:
+                ic_prev_value = _set_ic_for_item(
+                    item, bridge, session, pvtproject_path,
+                    history_by_item, notes,
+                )
+
             # 4. run synchronously
             sanitized = _sanitize_history(item.name)
             history = f"{history_prefix}_{sanitized}_{timestamp}_{idx}"
@@ -427,6 +571,19 @@ def execute(
             except Exception as exc:
                 notes.append(f"axlRunAllTests error: {exc}")
                 print(f"           ! run errored: {exc}")
+
+            # 4b. clear the IC we set in 3b — independent of run success
+            # so the next item starts clean even if this one errored.
+            if item.ic_from is not None and ic_prev_value is not None:
+                try:
+                    for test_name in item.tests:
+                        bridge.pvt_runner_clear_ic_source(
+                            test_name, item.ic_from.mode, ic_prev_value,
+                            session=session,
+                        )
+                except Exception as exc:
+                    notes.append(f"ic_from clear error: {exc}")
+                    print(f"           ! ic clear errored: {exc}")
 
             # 5. dump via PvtSave
             run_dir = None
@@ -458,6 +615,10 @@ def execute(
             # 7. TODO (v1.x): per-corner failure detection + strategy chain.
             #    For the initial dogfood we mark the item completed and
             #    leave per-corner verdict reading to `pvt list` post-run.
+
+            # Capture history for any downstream consumer's ic_from lookup.
+            if completed and histories:
+                history_by_item[item.name] = histories[-1]
 
             result = ItemResult(
                 item_name=item.name,

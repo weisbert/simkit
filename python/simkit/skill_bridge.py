@@ -724,6 +724,74 @@ def pvt_runner_run(
     return (last_code, last_sub, actual_name)
 
 
+_VALID_IC_MODES = frozenset({"readns", "readic"})
+
+
+def pvt_runner_set_ic_source(
+    test_name: str, ic_path: str, mode: str, *,
+    session: str, workspace: Any = None,
+) -> str:
+    """Point the consumer test's Spectre at a per-corner IC file.
+
+    Wraps SKILL ``pvtRunnerSetIcSource``, which writes a Spectre CLI arg
+    into the test's ``additionalArgs`` sim option via
+    ``asiSetSimOptionVal``:
+
+      * ``mode="readns"`` → ``additionalArgs="+nodeset <ic_path>"`` —
+        soft nodeset hint, typical for PSS convergence aid.
+      * ``mode="readic"`` → ``additionalArgs="+ic <ic_path>"`` — hard
+        initial condition.
+
+    Per DECISIONS #57: the path through ``additionalArgs`` was chosen
+    after a probe found that readns/readic aren't in the 133-option
+    Spectre Options form (which holds reltol/gmin/temp/etc.) but
+    ``additionalArgs`` always exists and accepts arbitrary Spectre CLI
+    args — so zero one-time UI setup is required.
+
+    Returns the option's PREVIOUS value (or ``""`` if unset), which the
+    orchestrator threads back into :func:`pvt_runner_clear_ic_source`
+    after the run to restore the session.
+
+    Raises :class:`SkillBridgeError` if the bridge or asi session is
+    unavailable.
+    """
+    if mode not in _VALID_IC_MODES:
+        raise SkillBridgeError(
+            "pvt_validation",
+            f"mode must be one of {sorted(_VALID_IC_MODES)}, got {mode!r}",
+        )
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(
+        ws["pvtRunnerSetIcSource"](session, test_name, ic_path, mode)
+    )
+    return str(raw) if raw is not None else ""
+
+
+def pvt_runner_clear_ic_source(
+    test_name: str, mode: str, prev_value: str = "", *,
+    session: str, workspace: Any = None,
+) -> None:
+    """Restore the consumer test's Spectre IC option to ``prev_value``.
+
+    Counterpart of :func:`pvt_runner_set_ic_source`. Pass ``prev_value=""``
+    to clear (the SKILL helper normalises empty string + nil to "unset").
+    Always re-issues an asiSetSimOptionVal call; treats a nil return
+    (option not registered) as a successful no-op since clearing an
+    already-unset option is the desired terminal state.
+    """
+    if mode not in _VALID_IC_MODES:
+        raise SkillBridgeError(
+            "pvt_validation",
+            f"mode must be one of {sorted(_VALID_IC_MODES)}, got {mode!r}",
+        )
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    _unwrap(
+        ws["pvtRunnerClearIcSource"](session, test_name, mode, prev_value)
+    )
+
+
 def pvt_runner_delete_history(
     history_name: str, *, session: str, workspace: Any = None,
 ) -> None:

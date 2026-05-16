@@ -43,7 +43,7 @@ A signoff-grade review of a mixed-signal block (e.g. BT2GRX) is a list of 5-15 i
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
-| `review_schema_version` | int | yes | — | Pinned to `1` for Phase 3A v1. |
+| `review_schema_version` | int | yes | — | `1` = v1 base shape. `2` = v1.2 adds `ic_from` on items (§2.5). v1 sidecars still load unchanged. |
 | `name` | str | yes | — | Must match `^[a-z0-9_-]+$` and equal filename basename. |
 | `project` | str | yes | — | Must match enclosing `.pvtproject:project`. |
 | `items` | array | yes | — | One or more items. Empty = load error. |
@@ -70,10 +70,51 @@ A signoff-grade review of a mixed-signal block (e.g. BT2GRX) is a list of 5-15 i
 | `bundle` | str | no | null | Path to a `.measure.json`. If null, Outputs table is not touched (uses whatever's already in the session). |
 | `enabled` | bool | no | `true` | When `false`, item is logged-skipped without running. Cheap way to park an item without deleting it. |
 | `on_failure` | object | no | inherits suite-level | Per-item override; merges on top of suite-level (item keys win). |
+| `ic_from` | object | no | null | **Schema v2.** When set, before each corner of this item runs, the orchestrator points the test's analysis at the named upstream item's per-corner Spectre IC file (`spectre.fc` / `.ic` / `.dc`). See §2.5. |
 
 ### 2.4 What a "review" is in this spec
 
 A **review** is a named, ordered list of items that together describe one full signoff cycle for one project. Multiple reviews can coexist (e.g. `bt2grx_signoff.review.json`, `bt2grx_smoke.review.json`, `bt2grx_tapeout.review.json`). A run invokes exactly one review.
+
+### 2.5 Cross-item IC piping (`ic_from`, schema v2)
+
+Workflow: PSS / HB convergence is hard from cold start. Engineer wants to run a trans precursor across the same PVT corner set, take each corner's Spectre `spectre.fc` (final condition) — or `.ic` / `.dc` — and feed it into the PSS / HB analysis as `readns` (nodeset hint, soft) or `readic` (initial condition, hard) **per corner**.
+
+`ic_from` is an object on the consumer item:
+
+```json
+{
+  "name": "BT2GRX PSS PN",
+  "tests": ["sim_BT2GRX_pss"],
+  "union": "unions/bt2grx_full.union.json",
+  "bundle": "bundles/bt2grx_pss_pn.measure.json",
+  "ic_from": {
+    "item": "BT2GRX trans precursor",
+    "file": "fc",
+    "mode": "readns"
+  }
+}
+```
+
+| Field | Type | Required | Allowed | Notes |
+|---|---|---|---|---|
+| `item` | str | yes | name of an **earlier** item in the same review | Source item must precede the consumer in `items[]` order. |
+| `file` | str | yes | `"fc"`, `"ic"`, `"dc"` | Maps to `spectre.fc` / `spectre.ic` / `spectre.dc` in the trans result dir. |
+| `mode` | str | yes | `"readns"`, `"readic"` | `readns` = nodeset hint (Spectre soft guess, typical for PSS). `readic` = hard IC (constrains values, typical for trans→trans handoff). |
+
+**Corner mapping rule (v2):** consumer and source items MUST reference the **same `.union.json` path** (resolved-equal). Per-corner pairing is positional under that union's explode order. This guarantees zero-ambiguity matching with no name-string heuristics. Loader rejects mismatch at validate time.
+
+**Source item failure handling:** if a corner failed in the source item (no `.fc` produced), the orchestrator runs the corresponding consumer corner **without** the IC (naked retry) and logs a warning. PSS / HB without IC usually still finishes but may fail to converge — the user sees a normal per-corner FAIL row, not an orchestrator error.
+
+**Simulator subdir auto-detection:** Spectre stores IC files under `<corner_dir>/<test>/netlist/spectre.{fc,ic,dc}`. Alps (国产 simulator) stores them under `<corner_dir>/<test>/psf/spectre.{fc,ic,dc}` (TBC at first work-env dogfood). The resolver tries known subdirs in order, picks the first that has the file; user can pin via `ic_from.subdir` override if a new simulator surfaces.
+
+**Per-corner result dir layout** (empirically derived from `simkit_verify`, 2026-05-16):
+
+```
+<axlGetResultsLocation(sdb)>/<history_name>/<corner_idx_1based>/<test_name>/<sim_subdir>/spectre.{fc,ic,dc}
+```
+
+`corner_idx_1based` matches the order corners appear in `axlGetCorners(sdb)` at the time the source item ran. The orchestrator captures this ordering when it pushes the source item's union, so the consumer item's per-corner lookup is deterministic.
 
 ---
 
@@ -91,7 +132,18 @@ for item in review.items:
         if item.bundle:
             push_bundle(item.bundle)            # Phase 3B pvtMeasurePush
         history_name = f"review_{review.name}_{item.name}_{ts}"
-        await _run_with_strategies(history_name, item.on_failure)
+        if item.ic_from:                        # schema v2 (§2.5)
+            # iterate corners ourselves so IC can be set per-corner
+            for corner_idx in range(1, n_corners + 1):
+                ic_path = resolve_ic_path(item.ic_from, corner_idx)
+                if ic_path:
+                    set_ic_source(item.tests, ic_path, item.ic_from.mode)
+                else:
+                    log.warn(item, corner_idx, "upstream IC missing; naked retry")
+                run_one_corner(history_name, corner_idx)
+                clear_ic_source(item.tests, item.ic_from.mode)
+        else:
+            await _run_with_strategies(history_name, item.on_failure)
         per_corner_status = collect_results()   # Phase 1 PvtSave path
         ingest(per_corner_status)               # Phase 1 pvt ingest
         log.summary(item, per_corner_status)
@@ -178,6 +230,8 @@ New file: `skill/pvtRunner.il`. Production-side helpers (all return `(pvt_ok val
 | `pvtRunnerWait` | session, token, timeout-sec | blocks until callback fires or timeout |
 | `pvtRunnerGetStatus` | session | `[runStatusCode, subCode, latestHistoryName]` |
 | `pvtRunnerCollectHistory` | session, history-name | JSON-shaped per-(corner, test) status table — feeds Phase 1 ingester directly |
+| `pvtRunnerSetIcSource` | session, testName, icPath, mode | Sets `readns="<path>"` or `readic="<path>"` on the test's PSS / HB analysis via `asiChangeAnalysis`. v1.2. |
+| `pvtRunnerClearIcSource` | session, testName, mode | Clears the readns / readic field. v1.2. |
 
 `pvtRunnerCollectHistory` reuses `pvtCollIterateResults` from Phase 1 — same row classification (`ok` / `sim_err` / `eval_err` / `unknown`), same JSON envelope shape, so the orchestrator can pipe its output straight into `pvt ingest` with no schema work.
 
@@ -216,7 +270,8 @@ All four gates pinned as pytest cases (using captured snapshots; no live Maestro
 
 ## 9. Out of scope for v1
 
-- `gmin_bump` / `trans_pss_ic` strategies — deferred to v1.1 (separate `asi*` probe phase needed).
+- `gmin_bump` strategy — deferred to v1.3 (separate `asi*` probe phase needed).
+- ~~`trans_pss_ic` strategy~~ — **superseded by `ic_from` (§2.5, v1.2)**: this need turned out to be a workflow concern (always-on prerequisite), not a failure-recovery concern, so it lives on the item, not in the Strategy chain. DECISIONS #57.
 - Per-test bundle (different bundles for tests in one item) — v1 ships single shared bundle; per-test dict form added when a real case appears.
 - Item dependency graph (item B waits for item A pass) — v1 is flat sequential; promote when a real workflow needs it.
 - Multi-Maestro orchestration (one review driving N parallel Maestro sessions) — v1 is single-session.
@@ -232,3 +287,4 @@ All four gates pinned as pytest cases (using captured snapshots; no live Maestro
 | 10.1 | What does `axlGetRunStatus` return during/after a live run? Probe gave `[0,0]` for idle; need to observe run → done → failed transitions before locking the status-decode table in `pvtRunnerGetStatus`. | §3 dogfood |
 | 10.2 | Is `axlRunAllTestsWithCallback`'s third argument a SKILL function symbol or a string of the function name? Need to verify against the doc. | §3 first implementation |
 | 10.3 | Does Maestro need to be the "current window" for `axlRunAllTestsWithCallback` to dispatch, or can the bridge drive it from CIW context? (Recall the session-detection issue from this probe.) | §3 first dry-fire |
+| 10.4 | Exact `asiChangeAnalysis` signature for setting `readns` / `readic` on a PSS / HB analysis — keyword arg name, value shape (raw path string vs. quoted), idempotency. 2026-05-16 probe confirmed the function exists but full args unverified (fnxSession0 has only trans analyses). | v1.2 §4 SKILL implementation, with user-side help loading a PSS analysis. |

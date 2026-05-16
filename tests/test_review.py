@@ -22,6 +22,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT / "python"))
 
 from simkit.review import (  # noqa: E402
+    IcFromRef,
     OnFailurePolicy,
     PathIssue,
     Review,
@@ -414,6 +415,186 @@ class ProjectMatchTests(TempDirMixin, unittest.TestCase):
         review = load_review(self._write(_min_doc()))
         with self.assertRaises(ReviewValidationError):
             check_project_match(review, "other_project")
+
+
+# ---------------------------------------------------------------------------
+# ic_from (schema v2, DECISIONS #57) — Phase 3A v1.2 trans→PSS IC piping
+
+
+def _ic_doc(consumer_ic_from: dict, *, schema_version: int = 2) -> dict:
+    """Build a 2-item review where item 'pss' consumes IC from item 'trans'.
+
+    Both items reference the same union by default. Override the
+    ``ic_from`` block via ``consumer_ic_from``; pass ``schema_version=1``
+    to exercise the v1-rejects-ic_from path.
+    """
+    return {
+        "review_schema_version": schema_version,
+        "name": "myreview",
+        "project": "myproj",
+        "items": [
+            {
+                "name": "trans",
+                "tests": ["sim_trans"],
+                "union": "unions/full.union.json",
+            },
+            {
+                "name": "pss",
+                "tests": ["sim_pss"],
+                "union": "unions/full.union.json",
+                "ic_from": consumer_ic_from,
+            },
+        ],
+    }
+
+
+class IcFromShapeTests(TempDirMixin, unittest.TestCase):
+    """Per-item shape validation: required keys, allowed values, unknown keys."""
+
+    def test_happy_path_loads(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        review = load_review(self._write(doc))
+        self.assertEqual(review.review_schema_version, 2)
+        self.assertIsNone(review.items[0].ic_from)
+        ref = review.items[1].ic_from
+        self.assertIsNotNone(ref)
+        self.assertEqual(ref.item, "trans")
+        self.assertEqual(ref.file, "fc")
+        self.assertEqual(ref.mode, "readns")
+        self.assertIsNone(ref.subdir)
+
+    def test_v1_sidecar_rejects_ic_from(self):
+        # Even shape-valid ic_from must be rejected on v1 (per DECISIONS #57:
+        # silently ignoring would mean PSS runs cold).
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"},
+                      schema_version=1)
+        with self.assertRaises(ReviewSchemaVersionError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("review_schema_version >= 2", str(cm.exception))
+
+    def test_missing_required_key(self):
+        for omit in ("item", "file", "mode"):
+            full = {"item": "trans", "file": "fc", "mode": "readns"}
+            full.pop(omit)
+            with self.subTest(omit=omit):
+                with self.assertRaises(ReviewValidationError) as cm:
+                    load_review(self._write(_ic_doc(full)))
+                self.assertIn("missing required keys", str(cm.exception))
+
+    def test_unknown_key_rejected(self):
+        doc = _ic_doc({
+            "item": "trans", "file": "fc", "mode": "readns", "bogus": True,
+        })
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("bogus", str(cm.exception))
+
+    def test_invalid_file_kind(self):
+        doc = _ic_doc({"item": "trans", "file": "xyz", "mode": "readns"})
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("file must be one of", str(cm.exception))
+
+    def test_invalid_mode(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "loadme"})
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("mode must be one of", str(cm.exception))
+
+    def test_subdir_override_accepted(self):
+        doc = _ic_doc({
+            "item": "trans", "file": "fc", "mode": "readns", "subdir": "psf",
+        })
+        review = load_review(self._write(doc))
+        self.assertEqual(review.items[1].ic_from.subdir, "psf")
+
+    def test_subdir_empty_string_rejected(self):
+        doc = _ic_doc({
+            "item": "trans", "file": "fc", "mode": "readns", "subdir": "",
+        })
+        with self.assertRaises(ReviewValidationError):
+            load_review(self._write(doc))
+
+    def test_each_file_kind_accepted(self):
+        for kind in ("fc", "ic", "dc"):
+            with self.subTest(kind=kind):
+                doc = _ic_doc({"item": "trans", "file": kind, "mode": "readns"})
+                review = load_review(self._write(doc))
+                self.assertEqual(review.items[1].ic_from.file, kind)
+
+    def test_both_modes_accepted(self):
+        for mode in ("readns", "readic"):
+            with self.subTest(mode=mode):
+                doc = _ic_doc({"item": "trans", "file": "ic", "mode": mode})
+                review = load_review(self._write(doc))
+                self.assertEqual(review.items[1].ic_from.mode, mode)
+
+    def test_null_ic_from_treated_as_omitted(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"][1]["ic_from"] = None
+        review = load_review(self._write(doc))
+        self.assertIsNone(review.items[1].ic_from)
+
+
+class IcFromCrossRefTests(TempDirMixin, unittest.TestCase):
+    """Post-loop cross-item refs: existence, ordering, same-union, no self-ref."""
+
+    def test_self_reference_rejected(self):
+        doc = _ic_doc({"item": "pss", "file": "fc", "mode": "readns"})
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("references itself", str(cm.exception))
+
+    def test_unknown_source_item_rejected(self):
+        doc = _ic_doc({"item": "does_not_exist", "file": "fc", "mode": "readns"})
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("does not match any item name", str(cm.exception))
+
+    def test_forward_reference_rejected(self):
+        # Swap order: consumer comes BEFORE source → should fail because the
+        # source can't have produced IC files yet when the consumer needs them.
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"] = list(reversed(doc["items"]))
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("must appear earlier", str(cm.exception))
+
+    def test_different_union_rejected(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"][1]["union"] = "unions/different.union.json"
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("share the same union", str(cm.exception))
+
+    def test_same_union_passes(self):
+        # Already exercised by happy_path but pin explicitly.
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        review = load_review(self._write(doc))
+        self.assertEqual(
+            review.items[0].union, review.items[1].union,
+            "test fixture must keep both items on the same union",
+        )
+
+    def test_chain_of_three_items_valid(self):
+        # trans → trans2 (reads trans.fc) → pss (reads trans2.fc).
+        doc = {
+            "review_schema_version": 2, "name": "myreview", "project": "myproj",
+            "items": [
+                {"name": "trans", "tests": ["sim_trans"],
+                 "union": "unions/full.union.json"},
+                {"name": "trans2", "tests": ["sim_trans2"],
+                 "union": "unions/full.union.json",
+                 "ic_from": {"item": "trans", "file": "ic", "mode": "readic"}},
+                {"name": "pss", "tests": ["sim_pss"],
+                 "union": "unions/full.union.json",
+                 "ic_from": {"item": "trans2", "file": "fc", "mode": "readns"}},
+            ],
+        }
+        review = load_review(self._write(doc))
+        self.assertIsNone(review.items[0].ic_from)
+        self.assertEqual(review.items[1].ic_from.item, "trans")
+        self.assertEqual(review.items[2].ic_from.item, "trans2")
 
 
 if __name__ == "__main__":

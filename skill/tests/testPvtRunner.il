@@ -97,3 +97,76 @@
 (pvtTestRegister "runner/enableOnly/exists"
   (lambda ()
     (pvtAssert (procedurep (getd 'pvtRunnerEnableOnly)) t "enableOnly defined")))
+
+
+;; ---------- v1.2: pvtRunnerSetIcSource / pvtRunnerClearIcSource -----------
+
+(pvtTestRegister "runner/setIcSource/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerSetIcSource)) t
+               "pvtRunnerSetIcSource defined")))
+
+(pvtTestRegister "runner/clearIcSource/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerClearIcSource)) t
+               "pvtRunnerClearIcSource defined")))
+
+(pvtTestRegister "runner/setIcSource/empty-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" "" "/tmp/fc" "readns")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty testName"))))
+
+(pvtTestRegister "runner/setIcSource/nil-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" nil "/tmp/fc" "readns")))
+      (pvtAssertErrCategory rv 'pvt_validation "nil testName"))))
+
+(pvtTestRegister "runner/setIcSource/empty-path-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" "Test" "" "readns")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty icPath"))))
+
+(pvtTestRegister "runner/setIcSource/nil-path-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" "Test" nil "readns")))
+      (pvtAssertErrCategory rv 'pvt_validation "nil icPath"))))
+
+(pvtTestRegister "runner/setIcSource/bad-mode-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" "Test" "/tmp/fc" "loadme")))
+      (pvtAssertErrCategory rv 'pvt_validation "unknown mode"))))
+
+(pvtTestRegister "runner/setIcSource/nil-mode-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" "Test" "/tmp/fc" nil)))
+      (pvtAssertErrCategory rv 'pvt_validation "nil mode"))))
+
+(pvtTestRegister "runner/setIcSource/readns-mode-accepted-shape"
+  (lambda ()
+    ;; With no live session it'll progress to pvt_runner_set_ic
+    ;; (or similar). The key assertion is validation passed.
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" "Test" "/tmp/fc" "readns")))
+      (cond
+        ((pvtIsErr rv)
+          (pvtAssert (not (equal (cadr rv) 'pvt_validation)) t
+                     "readns must pass validation"))
+        (t (pvtAssert t t "readns accepted"))))))
+
+(pvtTestRegister "runner/setIcSource/readic-mode-accepted-shape"
+  (lambda ()
+    (let ((rv (pvtRunnerSetIcSource "fakeSession" "Test" "/tmp/ic" "readic")))
+      (cond
+        ((pvtIsErr rv)
+          (pvtAssert (not (equal (cadr rv) 'pvt_validation)) t
+                     "readic must pass validation"))
+        (t (pvtAssert t t "readic accepted"))))))
+
+(pvtTestRegister "runner/clearIcSource/bad-mode-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerClearIcSource "fakeSession" "Test" "loadme" "")))
+      (pvtAssertErrCategory rv 'pvt_validation "unknown mode in clear"))))
+
+(pvtTestRegister "runner/clearIcSource/empty-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerClearIcSource "fakeSession" "" "readns" "")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty testName in clear"))))

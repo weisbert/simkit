@@ -1180,3 +1180,40 @@ Three discoveries from the re-verify:
 
 **Robustness note:** the fix is "polite Python" (every entry has a matching exit) but doesn't fix the underlying Maestro quirk (cwd snapshot at dispatch time is non-obvious global state). If a user runs CIW commands that `changeWorkingDir` between simkit verbs, the cwd they end up in IS what Maestro will use. Document expectation: *the parent Virtuoso's cwd at any moment between simkit verbs should be a dir that contains `cds.lib`*. The fix means simkit never violates this; the user's own scripts still can.
 
+
+## #57 — Phase 3A v1.2: trans→PSS IC piping is a workflow concern (`ic_from`), not a Strategy
+_Date: 2026-05-16_
+
+**Decision:** Cross-item IC piping (trans precursor → PSS/HB consumer) is expressed as an item-level field `ic_from: {item, file, mode}` on the consumer item, **not** as a failure-recovery `Strategy`. v1.2 ships this as `review_schema_version: 2`; v1 sidecars load unchanged. Original `trans_pss_ic` strategy entry in DECISIONS #52 / spec §9 is superseded.
+
+**Why:** When the user described the workflow ("跑PSS之前，先跑一组trans的PVT，把每个corner的spectre.fc当作PSS的readns读入"), it became clear this is an **always-on prerequisite**, not a "PSS failed → retry with IC" recovery. Putting it in the Strategy chain would mean every PSS would either need a useless first-attempt-without-IC just to "fail" and trigger the strategy, OR the Strategy framework would need a new "always-apply" mode that's essentially "be an item dependency". Both are awkward. A dedicated `ic_from` field on the consumer item is conceptually clean: it parallels `bundle` (defines what the item RUNS WITH) the way `bundle` defines what the item MEASURES WITH.
+
+**Design picks (user-confirmed 2026-05-16):**
+
+| Question | Pick | Rationale |
+|---|---|---|
+| Which IC files? | `.fc`, `.ic`, `.dc` all supported | User said "spectre.ic 或者 spectre.fc... 再加一个 spectre.dc"; covers PSS readns hint (typical `.fc` / `.dc`) + trans-handoff hard IC (typical `.ic`). |
+| Which read modes? | `readns` (soft) + `readic` (hard) | Spectre's two IC-read modes; let user pair freely per item. |
+| Corner mapping | Strict same-union | v1 simplicity: zero-ambiguity per-corner pairing by index. Different-union mapping deferred. |
+| Source corner failed | Naked retry (no IC) + warning | Matches DECISIONS #51 per-corner skip philosophy; PSS without IC may still converge. |
+| Sidecar shape | Field on consumer item, reference source by `item` name | Source item must precede consumer in `items[]` order; both items stay independently ingestible (you get a separate slice for the trans + a separate slice for the PSS). |
+
+**Per-corner path resolution (probed live against `simkit_verify`, 2026-05-16):**
+
+```
+<axlGetResultsLocation(sdb)>/<history_name>/<corner_idx_1based>/<test_name>/<sim_subdir>/spectre.{fc,ic,dc}
+```
+
+- `axlGetResultsLocation` takes an integer (sdb handle), NOT a session name string (one-off API quirk; sibling `axl*Name` family takes the session name). Probed by passing sdb integer; returns `/<simdir>/results/maestro`.
+- `axlGetCorners(sdb)` returns `(handle . names-list)` — a 2-element list where `car` is a corners-collection handle and `cadr` is the bare name list. Use `cadr` for ordering.
+- `corner_idx_1based` matches `axlGetCorners(sdb)` order at the time the source item ran. Orchestrator captures this when pushing the source item's union.
+- `sim_subdir` is `netlist` for Spectre, `psf` for Alps (国产 simulator, work env, TBC at first work-env dogfood). Resolver tries known subdirs in declared order, picks first that has the file. Sidecar `ic_from.subdir` override stays as an escape hatch when a new simulator surfaces.
+
+**SKILL surface:** new helpers `pvtRunnerSetIcSource(sess, testName, icPath, mode)` + `pvtRunnerClearIcSource(sess, testName, mode, prevValue)` write a Spectre CLI arg into the test's `additionalArgs` simulator option via `asiSetSimOptionVal(asi, "additionalArgs", "+nodeset <path>")` (for readns) or `"+ic <path>"` (for readic). The path through `additionalArgs` was chosen after an initial mis-design that tried setting `asiSetSimOptionVal(asi, "readns", path)` — readns/readic are NOT in the 133-option Spectre Options form (which holds reltol/gmin/temp/iabstol/etc.); they're netlist-syntax keywords, not option-form fields. `additionalArgs` always exists as a default sim option and accepts arbitrary Spectre CLI args, so the orchestrator can write `+nodeset <abs path>` / `+ic <abs path>` with **zero one-time UI setup** required from the user. Live-verified 2026-05-16 on `fnxSession0`: round-trip set readns → readic → clear restores additionalArgs to its original value.
+
+**v1 caveat:** `additionalArgs` is shared with whatever else the user might put there. We snapshot the prev value on entry and pass it back to ClearIcSource for restore — but if the user relies on `additionalArgs` for OTHER per-test needs (logging level, debug flags) and runs ic_from concurrently, our write clobbers theirs for the duration of the consumer item's run. v1.2.1 follow-up if dogfood shows this matters: append-with-marker instead of replace-wholesale.
+
+**Why bump schema_version (not additive):** the orchestrator's per-corner control loop differs structurally when `ic_from` is present — it iterates corners itself and calls SetIcSource/ClearIcSource around each, vs. v1's "submit one axlRunAllTests for the whole item, walk away." Loaders running v1 code against a v2 sidecar would silently ignore `ic_from` and submit the consumer item with no IC — which would converge-fail every PSS corner. Version bump makes the failure loud (loader rejects unknown schema).
+
+**Promoted from v1.3 to v1.2 by user request (real workflow):** v1.2 backlog items (rdb-walker discriminator demoted in #56; `pvt corners push --replace`; per-corner verdict + strategy chain) reslot to v1.3.
+

@@ -34,13 +34,21 @@ _REVIEW_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
 _ITEM_NAME_RE = re.compile(r"^[\w\-\s./+#()]+$", re.UNICODE)
 _TEST_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-_SUPPORTED_REVIEW_SCHEMA_VERSIONS = frozenset({1})
+_SUPPORTED_REVIEW_SCHEMA_VERSIONS = frozenset({1, 2})
 
 _VALID_POLICY_VALUES = frozenset({"skip", "halt"})
 _KNOWN_ON_FAILURE_KEYS = frozenset({
     "default", "corner_policy", "item_policy", "strategies",
 })
 _KNOWN_STRATEGY_ENTRY_REQUIRED = frozenset({"name"})
+
+# `ic_from` (schema v2 only, DECISIONS #57): cross-item IC piping. Consumer item
+# names an earlier item whose Spectre per-corner IC file is fed into this item's
+# analysis as readns / readic. See docs/phase3a_orchestrator_spec.md §2.5.
+_VALID_IC_FILE_KINDS = frozenset({"fc", "ic", "dc"})
+_VALID_IC_MODES = frozenset({"readns", "readic"})
+_KNOWN_IC_FROM_KEYS = frozenset({"item", "file", "mode", "subdir"})
+_REQUIRED_IC_FROM_KEYS = frozenset({"item", "file", "mode"})
 
 # Phase 3A v1 ships exactly one built-in strategy name (DECISIONS #52). The
 # loader does NOT enforce membership — user-defined strategies are valid by
@@ -98,6 +106,30 @@ class OnFailurePolicy:
 
 
 @dataclass(frozen=True)
+class IcFromRef:
+    """Cross-item IC pointer on a consumer item (schema v2; DECISIONS #57).
+
+    The orchestrator, before each corner of the consumer item, sets the test's
+    PSS / HB analysis to read ``spectre.<file>`` from the same corner's result
+    directory of the named source item, via ``mode`` = ``readns`` (soft hint)
+    or ``readic`` (hard IC). ``item`` references another item in the same
+    review by ``name``; the source item must appear earlier in ``items[]``
+    and share the same resolved ``union`` path as the consumer.
+
+    ``subdir`` is an optional explicit override of the per-test simulator
+    output sub-directory. Empty default = let ``ic_source.resolve_ic_path``
+    try the registered candidates (``netlist`` for Spectre, ``psf`` for
+    Alps) and pick the first that has the file. Set this when running an
+    exotic simulator whose dir name isn't in the registry.
+    """
+
+    item: str
+    file: str  # "fc" | "ic" | "dc"
+    mode: str  # "readns" | "readic"
+    subdir: str | None = None
+
+
+@dataclass(frozen=True)
 class ReviewItem:
     """One row of a review — own tests / own union / own bundle / own policy.
 
@@ -105,6 +137,8 @@ class ReviewItem:
     paths in the source JSON are resolved against the review file's parent
     directory).  ``bundle`` is ``None`` when the source declared null or
     omitted the key entirely — meaning "do not touch the Outputs table".
+    ``ic_from`` is set only on schema-v2 items that declare cross-item IC
+    piping (see ``IcFromRef`` and spec §2.5).
     """
 
     name: str
@@ -113,6 +147,7 @@ class ReviewItem:
     bundle: Path | None
     enabled: bool
     on_failure: OnFailurePolicy
+    ic_from: IcFromRef | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +198,8 @@ def load_review(path: Path | str) -> Review:
         p, raw_suite_on_failure, where="on_failure"
     )
 
-    items = _validate_items(p, data, suite_on_failure_dict)
+    items = _validate_items(p, data, suite_on_failure_dict, schema_version)
+    items = _resolve_ic_from_cross_refs(p, items)
 
     return Review(
         review_schema_version=schema_version,
@@ -332,7 +368,7 @@ def _strategy_entry_from_dict(raw: dict[str, Any]) -> StrategyEntry:
 
 
 def _validate_items(
-    path: Path, data: dict, suite_on_failure: dict[str, Any]
+    path: Path, data: dict, suite_on_failure: dict[str, Any], schema_version: int,
 ) -> tuple[ReviewItem, ...]:
     if "items" not in data:
         raise ReviewValidationError(f"{path}: missing required field 'items'")
@@ -346,7 +382,9 @@ def _validate_items(
     seen_names: set[str] = set()
     out: list[ReviewItem] = []
     for i, raw_item in enumerate(raw):
-        item = _validate_item(path, i, raw_item, review_dir, suite_on_failure)
+        item = _validate_item(
+            path, i, raw_item, review_dir, suite_on_failure, schema_version,
+        )
         if item.name in seen_names:
             raise ReviewValidationError(
                 f"{path}: items[{i}] duplicates name {item.name!r} "
@@ -363,6 +401,7 @@ def _validate_item(
     raw: Any,
     review_dir: Path,
     suite_on_failure: dict[str, Any],
+    schema_version: int,
 ) -> ReviewItem:
     where = f"items[{idx}]"
     if not isinstance(raw, dict):
@@ -453,9 +492,15 @@ def _validate_item(
     )
     effective_policy = _merge_on_failure(suite_on_failure, item_on_failure_dict)
 
+    # ic_from (schema v2 only — rejected on v1 with a "bump to 2" pointer)
+    ic_from_ref = _validate_ic_from(
+        path, raw.get("ic_from"), where=f"{where}.ic_from",
+        schema_version=schema_version,
+    )
+
     # unknown keys
     known_item_keys = {
-        "name", "tests", "union", "bundle", "enabled", "on_failure",
+        "name", "tests", "union", "bundle", "enabled", "on_failure", "ic_from",
     }
     unknown = set(raw.keys()) - known_item_keys
     if unknown:
@@ -471,7 +516,117 @@ def _validate_item(
         bundle=bundle_path,
         enabled=enabled,
         on_failure=effective_policy,
+        ic_from=ic_from_ref,
     )
+
+
+def _validate_ic_from(
+    path: Path, raw: Any, *, where: str, schema_version: int,
+) -> IcFromRef | None:
+    """Shape-validate the per-item ``ic_from`` object; cross-refs come later.
+
+    Returns ``None`` if the field is absent or null. Rejects the field
+    entirely on schema_version=1 (the orchestrator's per-corner control
+    loop only exists in v2; silently ignoring would mean PSS runs cold).
+    """
+    if raw is None:
+        return None
+    if schema_version < 2:
+        raise ReviewSchemaVersionError(
+            f"{path}: {where} requires review_schema_version >= 2 "
+            f"(got {schema_version}); bump the version to use ic_from"
+        )
+    if not isinstance(raw, dict):
+        raise ReviewValidationError(
+            f"{path}: {where} must be a JSON object, got {type(raw).__name__}"
+        )
+    missing = _REQUIRED_IC_FROM_KEYS - set(raw.keys())
+    if missing:
+        raise ReviewValidationError(
+            f"{path}: {where} missing required keys {sorted(missing)}"
+        )
+    unknown = set(raw.keys()) - _KNOWN_IC_FROM_KEYS
+    if unknown:
+        raise ReviewValidationError(
+            f"{path}: {where} has unknown keys {sorted(unknown)}; "
+            f"known: {sorted(_KNOWN_IC_FROM_KEYS)}"
+        )
+    item_ref = raw["item"]
+    if not isinstance(item_ref, str) or item_ref == "":
+        raise ReviewValidationError(
+            f"{path}: {where}.item must be a non-empty string"
+        )
+    file_kind = raw["file"]
+    if file_kind not in _VALID_IC_FILE_KINDS:
+        raise ReviewValidationError(
+            f"{path}: {where}.file must be one of "
+            f"{sorted(_VALID_IC_FILE_KINDS)}, got {file_kind!r}"
+        )
+    mode = raw["mode"]
+    if mode not in _VALID_IC_MODES:
+        raise ReviewValidationError(
+            f"{path}: {where}.mode must be one of "
+            f"{sorted(_VALID_IC_MODES)}, got {mode!r}"
+        )
+    subdir = raw.get("subdir")
+    if subdir is not None and (not isinstance(subdir, str) or subdir == ""):
+        raise ReviewValidationError(
+            f"{path}: {where}.subdir must be a non-empty string or omitted, "
+            f"got {subdir!r}"
+        )
+    return IcFromRef(item=item_ref, file=file_kind, mode=mode, subdir=subdir)
+
+
+def _resolve_ic_from_cross_refs(
+    path: Path, items: tuple[ReviewItem, ...],
+) -> tuple[ReviewItem, ...]:
+    """Validate cross-item refs for every item carrying ``ic_from``:
+
+    1. Referenced ``item`` must exist by name in the same review.
+    2. Referenced item must appear EARLIER in ``items[]`` than the consumer
+       (sequential execution = source must finish before consumer needs IC).
+    3. Referenced item must share the same resolved ``union`` path as the
+       consumer (per-corner pairing is positional under union explode order;
+       different unions = ambiguous mapping, deferred to v2.x).
+    4. No self-reference.
+
+    Items are not mutated — only cross-refs are checked; the typed shape
+    already carries the validated ``IcFromRef``. Returns the input tuple.
+    """
+    by_name: dict[str, int] = {it.name: i for i, it in enumerate(items)}
+    for i, item in enumerate(items):
+        if item.ic_from is None:
+            continue
+        ref = item.ic_from
+        src_name = ref.item
+        if src_name == item.name:
+            raise ReviewValidationError(
+                f"{path}: items[{i}] {item.name!r}.ic_from.item references "
+                f"itself; ic_from must point at a different earlier item"
+            )
+        if src_name not in by_name:
+            raise ReviewValidationError(
+                f"{path}: items[{i}] {item.name!r}.ic_from.item={src_name!r} "
+                f"does not match any item name in this review "
+                f"(available: {sorted(by_name)})"
+            )
+        src_idx = by_name[src_name]
+        if src_idx >= i:
+            raise ReviewValidationError(
+                f"{path}: items[{i}] {item.name!r}.ic_from.item={src_name!r} "
+                f"must appear earlier in items[] (source at index {src_idx}, "
+                f"consumer at index {i}); reorder items so source runs first"
+            )
+        src_item = items[src_idx]
+        if src_item.union != item.union:
+            raise ReviewValidationError(
+                f"{path}: items[{i}] {item.name!r}.ic_from cross-corner "
+                f"pairing requires source + consumer to share the same union. "
+                f"Source {src_name!r} uses {src_item.union}; consumer uses "
+                f"{item.union}. (v2 limitation; different-union mapping "
+                f"deferred to v2.x.)"
+            )
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -557,6 +712,12 @@ def _cli_validate(args: argparse.Namespace) -> int:
         print(f"      on_failure: corner={item.on_failure.corner_policy} "
               f"item={item.on_failure.item_policy} "
               f"strategies={strat_names}")
+        if item.ic_from is not None:
+            subdir_suffix = (f" subdir={item.ic_from.subdir!r}"
+                             if item.ic_from.subdir else "")
+            print(f"      ic_from:    item={item.ic_from.item!r} "
+                  f"file={item.ic_from.file} mode={item.ic_from.mode}"
+                  f"{subdir_suffix}")
 
     issues = validate_paths_exist(review)
     if issues:

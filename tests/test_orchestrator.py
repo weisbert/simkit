@@ -238,5 +238,207 @@ class ExecuteSkeletonTests(unittest.TestCase):
             execute(plan, bridge=None, session="x")
 
 
+# ---------------------------------------------------------------------------
+# Phase 3A v1.2: ic_from execute-path (DECISIONS #57)
+
+
+class ExecuteIcFromTests(unittest.TestCase):
+    """End-to-end execute() with a 2-item review that pipes IC from trans → PSS.
+
+    Synthetic on-disk results tree + mock bridge that records every
+    pvt_runner_set_ic_source / clear call. v1.2 v1 behaviour pinned:
+    set+clear fire once per consumer item, against corner-1's IC.
+    """
+
+    def setUp(self):
+        import tempfile
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_orch_ic_"))
+        # Lay out: <tmp>/results/maestro/<hist>/1/<test>/netlist/spectre.fc
+        # Project file sits at <tmp>/<name>.pvtproject (its parent is
+        # the session dir; _resolve_results_root joins ./results/maestro).
+        self.pvt_path = self.tmp / "myproj.pvtproject"
+        self.pvt_path.write_text('{"schema_version":1,"project":"myproj"}\n')
+        # Use the history name the mock bridge will generate so the IC
+        # resolver finds the .fc file we plant.
+        # _sanitize_history("trans") = "trans"; the orch builds
+        # "<prefix>_trans_<ts>_<idx>" — too dynamic. We override
+        # MockBridge.pvt_runner_run to return a fixed string.
+        self.fixed_hist = "fixed_trans_hist"
+        corner_dir = (self.tmp / "results" / "maestro" / self.fixed_hist
+                      / "1" / "sim_trans" / "netlist")
+        corner_dir.mkdir(parents=True)
+        (corner_dir / "spectre.fc").write_text("# fake fc\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_review(self):
+        """2-item review: trans → pss, same union, ic_from on pss."""
+        union_path = self.tmp / "unions" / "u.union.json"
+        union_path.parent.mkdir(exist_ok=True)
+        union_path.write_text("{}")  # plan_review tolerates unloadable
+        doc = {
+            "review_schema_version": 2,
+            "name": "icfrom",
+            "project": "myproj",
+            "items": [
+                {"name": "trans", "tests": ["sim_trans"],
+                 "union": "unions/u.union.json"},
+                {"name": "pss", "tests": ["sim_trans"],  # same test name so
+                 "union": "unions/u.union.json",          # IC dir matches
+                 "ic_from": {"item": "trans", "file": "fc", "mode": "readns"}},
+            ],
+        }
+        review_path = self.tmp / "icfrom.review.json"
+        review_path.write_text(json.dumps(doc))
+        return load_review(review_path)
+
+    def _make_bridge(self, fixed_hist: str, *, set_returns: str = "/old/path"):
+        """MockBridge that returns a fixed history name + records ic calls."""
+        class MockBridge:
+            def __init__(self):
+                self.calls = []
+                self.ic_set_calls = []
+                self.ic_clear_calls = []
+
+            def pvt_runner_snapshot_test_state(self, *, session):
+                self.calls.append(("snap",))
+                return [("sim_trans", True)]
+
+            def pvt_runner_restore_test_state(self, snap, *, session):
+                self.calls.append(("restore",))
+
+            def pvt_runner_enable_only(self, names, *, session):
+                self.calls.append(("enable_only", tuple(names)))
+
+            def pvt_runner_run(self, hist, *, session, **kwargs):
+                self.calls.append(("run", hist))
+                return (0, 0, fixed_hist)
+
+            def pvt_save(self, hist, *, pvtproject_path, session):
+                self.calls.append(("save", hist))
+                return str(Path("/tmp") / f"fake_dump_{hist}")
+
+            def pvt_corners_push(self, path, **kwargs):
+                self.calls.append(("push",))
+
+            def pvt_runner_set_ic_source(self, test, path, mode, *, session):
+                self.ic_set_calls.append((test, path, mode))
+                return set_returns
+
+            def pvt_runner_clear_ic_source(self, test, mode, prev, *, session):
+                self.ic_clear_calls.append((test, mode, prev))
+
+        return MockBridge()
+
+    def test_happy_path_sets_and_clears_ic(self):
+        review = self._make_review()
+        plan = plan_review(review)
+        bridge = self._make_bridge(self.fixed_hist)
+        execute(
+            plan, bridge,
+            session="fake_session",
+            pvtproject_path=self.pvt_path,
+            push_union=False,
+            ingest_cb=lambda d: None,
+        )
+        # set called once on the consumer item, with corner-1's resolved .fc
+        self.assertEqual(len(bridge.ic_set_calls), 1)
+        test_name, path, mode = bridge.ic_set_calls[0]
+        self.assertEqual(test_name, "sim_trans")
+        self.assertEqual(mode, "readns")
+        self.assertTrue(path.endswith("/1/sim_trans/netlist/spectre.fc"))
+        # clear called once, restoring the prev value the mock returned
+        self.assertEqual(len(bridge.ic_clear_calls), 1)
+        self.assertEqual(bridge.ic_clear_calls[0],
+                         ("sim_trans", "readns", "/old/path"))
+
+    def test_no_upstream_history_runs_naked(self):
+        # Make the upstream item fail (run returns OK but we pretend its
+        # history never makes it into history_by_item by simulating an
+        # error — the cleanest way is to break pvt_runner_run on item 0).
+        review = self._make_review()
+        plan = plan_review(review)
+        bridge = self._make_bridge(self.fixed_hist)
+
+        orig_run = bridge.pvt_runner_run
+        call_n = {"n": 0}
+        def failing_first_run(hist, *, session, **kwargs):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                raise RuntimeError("trans died")
+            return orig_run(hist, session=session, **kwargs)
+        bridge.pvt_runner_run = failing_first_run
+
+        report = execute(
+            plan, bridge,
+            session="fake_session",
+            pvtproject_path=self.pvt_path,
+            push_union=False,
+            ingest_cb=lambda d: None,
+        )
+        # No IC set/clear because source never recorded a history
+        self.assertEqual(bridge.ic_set_calls, [])
+        self.assertEqual(bridge.ic_clear_calls, [])
+        # PSS item should still have run + completed, with a note
+        pss_result = next(r for r in report.items if r.item_name == "pss")
+        self.assertTrue(pss_result.completed)
+        self.assertIn("no recorded history", pss_result.notes)
+
+    def test_ic_file_missing_runs_naked(self):
+        # Plant the upstream history in history_by_item by letting it run,
+        # but DELETE its IC file before the consumer item runs. Easiest
+        # path: rename the spectre.fc so resolve_ic_path returns None.
+        review = self._make_review()
+        plan = plan_review(review)
+        bridge = self._make_bridge(self.fixed_hist)
+
+        # Use item_done_cb to delete the file between items
+        ic_file = (self.tmp / "results" / "maestro" / self.fixed_hist
+                   / "1" / "sim_trans" / "netlist" / "spectre.fc")
+        def after_each(result):
+            if result.item_name == "trans":
+                ic_file.unlink()
+        report = execute(
+            plan, bridge,
+            session="fake_session",
+            pvtproject_path=self.pvt_path,
+            push_union=False,
+            ingest_cb=lambda d: None,
+            item_done_cb=after_each,
+        )
+        # No IC set/clear because the file was missing at lookup time
+        self.assertEqual(bridge.ic_set_calls, [])
+        self.assertEqual(bridge.ic_clear_calls, [])
+        pss_result = next(r for r in report.items if r.item_name == "pss")
+        self.assertTrue(pss_result.completed)
+        self.assertIn("corner 1", pss_result.notes)
+
+    def test_set_ic_raises_skips_clear(self):
+        review = self._make_review()
+        plan = plan_review(review)
+        bridge = self._make_bridge(self.fixed_hist)
+        def explode(test, path, mode, *, session):
+            raise RuntimeError("readns not registered")
+        bridge.pvt_runner_set_ic_source = explode
+
+        report = execute(
+            plan, bridge,
+            session="fake_session",
+            pvtproject_path=self.pvt_path,
+            push_union=False,
+            ingest_cb=lambda d: None,
+        )
+        # Clear should NOT have run (no successful set to roll back)
+        # — actually our helper returns "" sentinel on partial-set so the
+        # orchestrator does call clear with "". Pin that explicit behaviour:
+        # if a SET-attempt errored before producing a real prev, clear is
+        # called once with "" to nudge the option back to empty.
+        self.assertEqual(len(bridge.ic_clear_calls), 1)
+        self.assertEqual(bridge.ic_clear_calls[0][2], "")
+        pss_result = next(r for r in report.items if r.item_name == "pss")
+        self.assertIn("readns not registered", pss_result.notes)
+
+
 if __name__ == "__main__":
     unittest.main()

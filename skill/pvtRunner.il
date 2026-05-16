@@ -323,4 +323,154 @@
                          "axlGetRunStatus returned nil"))))))
 
 
-(printf "[simkit] pvtRunner.il loaded (Phase 3A section 3 v1.1: Submit + Rename split)\n")
+;; --- IC source (readns / readic) per Phase 3A v1.2 (DECISIONS #57) ---------
+;;
+;; Two helpers point the Spectre simulator at a per-corner spectre.fc / .ic /
+;; .dc file by writing a +nodeset or +ic command-line arg into the test's
+;; `additionalArgs` simulator option. Architectural notes from the
+;; 2026-05-16 live probe (DECISIONS #57):
+;;
+;;   * `readns` / `readic` are NOT in the 133-option Spectre Options form
+;;     (the user's "Options" form holds reltol/gmin/temp/iabstol/etc.).
+;;     They're netlist-syntax keywords, not option-form fields, so trying
+;;     `asiSetSimOptionVal(asi, "readns", path)` returns nil.
+;;   * BUT every Spectre test has an `additionalArgs` option (in the 133
+;;     defaults) that accepts arbitrary Spectre command-line args. Spectre
+;;     CLI supports `+nodeset <file>` and `+ic <file>` for reading the
+;;     nodeset / IC files respectively — same semantics as the netlist
+;;     `readns`/`readic` keywords. Verified: setting
+;;     `additionalArgs="+nodeset /tmp/x.fc"` round-trips cleanly via
+;;     asiSetSimOptionVal AND requires zero one-time UI setup from the
+;;     user (the option always exists).
+;;   * Per-test asi session: asiGetCurrentSession returns the per-test
+;;     session matching whichever test is currently active in Maestro.
+;;     v1.2 relies on this; v1.3 will switch active test programmatically
+;;     once we find the test-switcher API.
+;;
+;; Trade-off vs. trying to surface `readns` as its own option: we share
+;; one slot (`additionalArgs`) with whatever else the user might have put
+;; in there. We snapshot the prev value on entry and pass it back through
+;; ClearIcSource so the user's manual additionalArgs survive. If the user
+;; relies on additionalArgs for OTHER per-test needs (e.g. -log level),
+;; concurrent ic_from use will clobber them — flag a v1.2.1 follow-up if
+;; this bites in dogfood.
+;;
+;; pvtRunnerSetIcSource(sess testName icPath mode)
+;;   icPath: absolute path to spectre.{fc,ic,dc}
+;;   mode: "readns" → emits `+nodeset <icPath>`
+;;         "readic" → emits `+ic <icPath>`
+;;   -> (pvtOk prevAdditionalArgsValue)  for caller to restore via Clear
+;;   -> (pvtErr 'pvt_validation msg)     on bad args
+;;   -> (pvtErr 'pvt_runner_set_ic msg)  on api failure
+;;
+;; pvtRunnerClearIcSource(sess testName mode prevValue)
+;;   Restores `additionalArgs` to prevValue ("" / nil → empty).
+;;   -> (pvtOk t) / (pvtErr ...)
+
+(procedure (_pvtRunnerValidateMode mode)
+  ;; Returns t on valid mode, nil otherwise.
+  (and (stringp mode) (or (equal mode "readns") (equal mode "readic"))))
+
+
+(procedure (_pvtRunnerIcSpectreArg mode icPath)
+  ;; mode → Spectre CLI flag:
+  ;;   "readns" → "+nodeset"     (soft, nodeset hint)
+  ;;   "readic" → "+ic"          (hard, initial condition)
+  ;; Returns the assembled arg string (e.g. `"+nodeset /tmp/x.fc"`).
+  (cond
+    ((equal mode "readns") (lsprintf "+nodeset %s" icPath))
+    ((equal mode "readic") (lsprintf "+ic %s" icPath))
+    (t nil)))
+
+
+(procedure (pvtRunnerSetIcSource sess testName icPath mode)
+  (prog (sessR sessName asi prev newVal r)
+    ;; arg validation
+    (cond
+      ((or (null testName) (not (stringp testName)) (equal testName ""))
+        (return (pvtErr 'pvt_validation "testName must be a non-empty string"))))
+    (cond
+      ((or (null icPath) (not (stringp icPath)) (equal icPath ""))
+        (return (pvtErr 'pvt_validation "icPath must be a non-empty string"))))
+    (cond
+      ((not (_pvtRunnerValidateMode mode))
+        (return (pvtErr 'pvt_validation
+                        (lsprintf "mode must be \"readns\" or \"readic\", got %L"
+                                  mode)))))
+
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
+
+    ;; Ref: skartistref.pdf p.636 — asiGetCurrentSession returns the
+    ;; currently-active simulation session. In Maestro context the
+    ;; per-test session is exposed via this call.
+    (setq asi (errset (asiGetCurrentSession) nil))
+    (setq asi (cond ((listp asi) (car asi)) (t nil)))
+    (cond
+      ((null asi)
+        (return (pvtErr 'pvt_runner_set_ic
+                        "asiGetCurrentSession returned nil — no live ADE session"))))
+
+    ;; Snapshot prev value of additionalArgs so caller can restore on clear.
+    ;; Ref: skartistref.pdf p.315 — asiGetSimOptionVal.
+    (setq prev (errset (asiGetSimOptionVal asi "additionalArgs") nil))
+    (setq prev (cond ((listp prev) (car prev)) (t nil)))
+
+    ;; Assemble the spectre CLI arg.
+    (setq newVal (_pvtRunnerIcSpectreArg mode icPath))
+
+    ;; Ref: skartistref.pdf p.321 — asiSetSimOptionVal returns the new
+    ;; value on success. additionalArgs always exists in default Spectre
+    ;; sessions so this path should not return nil; if it does, that's
+    ;; a real failure worth surfacing.
+    (setq r (errset (asiSetSimOptionVal asi "additionalArgs" newVal) nil))
+    (setq r (cond ((listp r) (car r)) (t nil)))
+    (cond
+      ((null r)
+        (return (pvtErr 'pvt_runner_set_ic
+                        (lsprintf
+                          "asiSetSimOptionVal(additionalArgs, %L) failed — \
+                           session may be read-only or in an unexpected state"
+                          newVal)))))
+
+    ;; Return prev (empty-string sentinel for nil to keep Python decode simple)
+    (return (pvtOk (cond ((null prev) "") (t prev))))))
+
+
+(procedure (pvtRunnerClearIcSource sess testName mode prevValue)
+  ;; Restores additionalArgs to prevValue. Pass "" / nil to set empty.
+  ;; testName + mode are captured for symmetry / future per-test work;
+  ;; v1.2 always acts on the currently-active session.
+  (prog (sessR asi val r)
+    (cond
+      ((or (null testName) (not (stringp testName)) (equal testName ""))
+        (return (pvtErr 'pvt_validation "testName must be a non-empty string"))))
+    (cond
+      ((not (_pvtRunnerValidateMode mode))
+        (return (pvtErr 'pvt_validation
+                        (lsprintf "mode must be \"readns\" or \"readic\", got %L"
+                                  mode)))))
+
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+
+    (setq asi (errset (asiGetCurrentSession) nil))
+    (setq asi (cond ((listp asi) (car asi)) (t nil)))
+    (cond
+      ((null asi)
+        (return (pvtErr 'pvt_runner_clear_ic
+                        "asiGetCurrentSession returned nil"))))
+
+    ;; Normalise prevValue: nil → ""
+    (setq val (cond
+                ((null prevValue) "")
+                (t prevValue)))
+
+    (setq r (errset (asiSetSimOptionVal asi "additionalArgs" val) nil))
+    ;; Treat nil-return as no-op for clear semantics; the value is
+    ;; either already what we wanted or wasn't set.
+    (return (pvtOk t))))
+
+
+(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.2: + SetIcSource / ClearIcSource via additionalArgs)\n")
