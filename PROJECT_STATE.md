@@ -1,10 +1,10 @@
 # Project State
 
-_Last updated: 2026-05-16 (**Phase 3A v1.1 #1 + DECISIONS #56 cwd-leak fix — LANDED + LIVE RE-VERIFIED**: Phase 3A v1.1 #1 ships SKILL Submit/Rename split + Python poll-to-idle state machine + handle-0 RuntimeError translation + Tier-1 +13 + 9 state-machine tests. During v1.1 live verify, a parallel-agent investigation found that `_prep`'s `changeWorkingDir(simkit_p3b_dogfood)` was leaking the per-verb cwd into the next `axlRunAllTests`, causing Maestro's AXL worker to boot in a dir without `cds.lib` → config error → no Spectre → permanent "pending" + ASSEMBLER-2423 on cleanup. DECISIONS #56 converts `_prep` / `_prep_measure` to context managers + wraps `pvt_save` body in `_restore_cwd(ws)`. Re-verify on `fnxSession0` proved the fix: Job27.log now written to `Test/workarea/logs_yusheng/logs0/` (correct cwd), AXL worker boots cleanly, Spectre actually dispatches. The DECISIONS #55 "axlGetRunStatus is blind" framing is RETRACTED in-file — the discriminator was always correct; [0,0] meant "no in-flight run", which was true (because Spectre never started before the fix). v1.2 takes "Maestro post-Spectre flag-stickiness" (cleanup-modal that fires even after Spectre exits) as its own ticket; rdb-walker discriminator demoted to "robustness improvement, do when convenient". Python 835 → 871 (+36). SKILL Tier-1 394/1 → 407/1 (+13 runner validation cases). Earlier: Phase 3A v1 §1-§6 + S1 dogfood end-to-end; Phase 3B v1.5 #2/#3/#4 all landed.)_
+_Last updated: 2026-05-17 (**Phase 3A v1.2 + v1.3 cross-item IC piping — LANDED + LIVE-VERIFIED end-to-end on fnxSession0**: User asked to prioritise the trans→PSS IC chaining workflow ("不同的corner读取不同的ic condition") over the v1.2 polling/replace items. Built across 3 architectural stages, last 5 commits: `503fa0b` stage-1 (ic_from schema + IC injection via additionalArgs); `1296cc4` stage-2 (per-corner submit; correct but N Maestro histories — bad GUI UX); `61b554a` v1.3 (single-batch + Maestro pre-run script — ONE history, GUI consolidated); `fc574bc` v1.3 fixes (worker-VM SKILL quirks: `let* → let+setq`, `cons → list`); `efb4cac` v1.3 syntax fix (additionalArgs is appended into netlist's `simulatorOptions options` block, NOT spectre CLI — emit `readns="<path>"` / `readic="<path>"` not `+nodeset`/`+ic`). End-to-end live evidence in Interactive.2 dogfood: ONE history with 3 per-corner subdirs, each `input.scs` had a DIFFERENT per-corner IC path, Spectre completed successfully. Final readns-syntax verify pending (high confidence; uses engineer's manual-flow syntax verbatim). Python 871 → 931 (+60). SKILL Tier-1 407/1 → 434/1 (+27 across IC source + pre-run script helpers). DECISIONS #57 grew through 3 stages in-file._)
 
 ## Current phase
 
-**Phase 3A: Simulation Orchestrator — v1.1 #1 (Submit/Rename split + Python poll-to-idle) + DECISIONS #56 (cwd-leak fix) DONE 2026-05-16.** Architectural split landed end-to-end; cwd fix verified live — Job27.log written to `Test/workarea/logs_yusheng/logs0/` (was `simkit_p3b_dogfood/logs_*/` pre-fix), AXL worker boots cleanly, Spectre actually dispatches. Cached path: 3.3s clean, no ASSEMBLER-2423 on cleanup. Real-Spectre path: worker + Spectre dispatch confirmed via process tree + per-corner netlist dir materialising; cleanup-modal still fires (Maestro post-Spectre flag-stickiness, independent of discriminator — v1.2 ticket). Python 835 → 871 (+36). SKILL Tier-1 394/1 → 407/1 (+13 runner validation cases).
+**Phase 3A v1.3 cross-item IC piping (ic_from) — DONE 2026-05-17, 5 commits ahead of origin/main not pushed.** Architecture: schema v2 adds `ic_from: {item, file, mode}` on a consumer item; orchestrator's `_execute_ic_chained_item` walks the consumer's union explode order, resolves each sub-corner's spectre.{fc,ic,dc} from the upstream item's results dir, generates a self-contained SKILL pre-run script with the corner→arg map embedded as a `(list "name" "readns=\"path\"")` assoc, attaches it via `axlImportPreRunScript`, fires ONE `axlRunAllTests`. Maestro fires the pre-run script per (test, sub-corner) before each point's netlist gen; script looks up current sub-corner via `axlGetCornerNameForCurrentPointInRun` and writes the matching value into `additionalArgs` via `asiSetSimOptionVal` on the per-test asi session. Result: ONE Maestro history with all N sub-corners, per-corner IC delivered. Live-verified end-to-end on `fnxSession0` (Interactive.2: 3 per-corner subdirs, distinct IC paths per corner, Spectre ran clean). Final retry of readns="<path>" syntax pending (bridge session-focus dance interrupted; fix is purely textual and architecturally proven).
 
 **Phase 3A: Simulation Orchestrator — §1-§5 + §6 (partial) DONE 2026-05-16 (v1).** v1 end-to-end smoke worked on fnxSession0: snapshot test state → enable-only → axlRunAllTests → axlSetHistoryName rename → PvtSave dump → `pvt ingest` → `pvt list` round-trip green. New result row (`c955d584-…`) sits alongside Phase 3B v1.3/v1.4 dogfood runs. Python suite 835 / 0 (was 797 + 38 net). SKILL Tier-1 unchanged (no Tier-1 added yet for pvtRunner — added in v1.1).
 
@@ -106,7 +106,16 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 
 ## What's IN PROGRESS
 
-**Phase 3A v1.2 (immediate next) — Maestro post-Spectre flag-stickiness mitigation.** Re-verify after #56 cwd fix confirmed: Spectre actually dispatches, but Maestro keeps the history's `actively running` flag set until the AXL worker formally finishes — so any `pvtRunnerDeleteHistory` (or other destructive op) during that window still trips ASSEMBLER-2423, **independent of how clever our polling discriminator is**. A perfect "is-running" check wouldn't help. Fix options (pick one during v1.2 #1):
+**Phase 3A v1.3 ic_from — DONE, final retry of readns="<path>" form pending.** Mechanism end-to-end proven via Interactive.2 dogfood on `fnxSession0` (3 per-corner subdirs in ONE history, each `input.scs` carries distinct per-corner IC path, Spectre completed successfully). Final live retry of the corrected `readns="<path>"` syntax (commit `efb4cac`) didn't complete because session-focus dance wedged the bridge mid-loop. High confidence the fix works: it's the EXACT syntax engineer types manually into Spectre Options form, and the textual change is purely in `build_corner_arg_map` — mechanism unchanged. **Next-session dogfood task = retry that single readns="<path>" run; if clean (no SFE-1994), declare done; if not, debug from there.**
+
+**5 commits ahead of origin/main not pushed:**
+- `503fa0b` v1.2 stage-1: ic_from schema + DECISIONS #57 + IC injection via additionalArgs
+- `1296cc4` v1.2 stage-2: per-corner submit (correct mechanism but N Maestro histories)
+- `61b554a` v1.3: single-batch + Maestro pre-run script (ONE history, GUI consolidated)
+- `fc574bc` v1.3 worker-VM SKILL quirks: `let* → let+setq`, `cons → list`
+- `efb4cac` v1.3 syntax fix: `readns="<path>"` (netlist) not `+nodeset <path>` (CLI)
+
+**Earlier in this session (now stale — kept for reference):** Phase 3A v1.2 was originally going to be Maestro post-Spectre flag-stickiness mitigation (re-verify after #56 cwd fix; Spectre dispatches but Maestro keeps the "actively running" flag → cleanup hits ASSEMBLER-2423). User PROMOTED the trans→PSS IC chaining workflow into v1.2 instead. The original v1.2 candidates (flag-stickiness + push --replace + per-corner verdict) reslot to v1.4+. Old v1.2 options for the cleanup-modal problem, in case someone picks it up later:
 - **(a) wait for worker PID exit**: `pvt_runner_run` accepts a `wait_for_worker_exit_sec` kwarg; after status-idle, polls `ps -p <axl-worker-pid>` until it's gone. Needs SKILL helper to expose the worker PID.
 - **(b) read history's done-marker**: probe whether `axlGetCurrentHistory`'s handle exposes a "completed/error/running" slot (earlier probes didn't find one, but the rdb walker via `_pvtCollWalkRdb` does emit per-row status; if ALL rows are `'done`/`'failed`/`'eval_err`, treat history as done).
 - **(c) treat post-rename cleanup as best-effort**: catch ASSEMBLER-2423 in `pvt_runner_delete_history`, retry with exponential backoff up to N seconds, surface as a warning not an error. Pragmatic but pushes the problem to runtime.
@@ -140,7 +149,32 @@ _2026-05-16 v1.4 push (4 commits): #4 X..Y parser, #5 apply CLI spec_status, #1 
 
 ## What's NEXT (the deferred-work shelf)
 
-**Primary next action (user-stated):** kick off **Phase 3A — simulation orchestrator**. PHASE_PLAN.md has the seed: YAML-driven "review suite" definition + Python runner that drives Maestro via socket/CLI + auto-ingest to the Phase 1 data layer. v1.4 cleared the hard prerequisite (pass/fail capture is live), so Phase 3A is unblocked. First session task: lock §1 spec same way Phase 2 and Phase 3B were started (`docs/phase3a_*_spec.md` + DECISIONS entry).
+**Primary next action: finish the v1.3 dogfood retry** — run the 8-corner trans→PSS pre-run script test once more with the readns="<path>" fix; if clean, mark v1.3 fully done and push the 5 commits. Quick session bootstrap at `docs/session_bootstrap.md`.
+
+**Owed back from user (housekeeping after this session):**
+- Maestro GUI: delete histories `Interactive.0`, `Interactive.1`, `Interactive.2` (probe leftovers from the v1.3 dogfood)
+- `rm /tmp/simkit_dogfood_*.ic` (8 fake IC files used as probe payload)
+- `rm -rf /tmp/simkit_dogfood_workdir/` (generated pre-run scripts cache)
+- `rm /tmp/probe_prerun.il` (early probe script — may be re-attached to Test_trans, the orchestrator's cleanup re-installs it on cleanup so don't worry if it's still wired)
+- In `fnxSession0` Spectre Options form, clear `additionalArgs` if it still has `+ic /tmp/ic` leftover from earlier probes
+
+**v1.3 known gaps (v1.4 candidates if dogfood reveals they bite):**
+1. **`additionalArgs` prior-value snapshot/restore** — we capture & restore the user's prior PRE-RUN SCRIPT (axlGetPreRunScript) but NOT the prior `additionalArgs` simoption value. Our pre-run script overwrites it per-corner; orchestrator cleanup clears to `""` regardless of what was there before. If user has a non-empty manual additionalArgs (e.g. `+log debug`), it gets clobbered.
+2. **Multi-test consumer items** — v1.3 picks `item.tests[0]` as the IC-resolution test. If a consumer item has multiple tests with different signal nets, per-test IC needs per-test pre-run scripts (currently same script attached to each test).
+3. **Per-corner→per-corner chains** — `_resolve_ic_path` expects upstream = batch (one history with N corner subdirs). If upstream is itself a v1.3 ic_from consumer (per-corner history in this consumer model = 1 history with N subdirs — actually fine since v1.3 IS single-batch), this should work. Confirm during a 3-item chain dogfood.
+
+**Original Phase 3A v1.2 candidates (reslot to v1.4):** flag-stickiness mitigation, `pvt corners push --replace`, per-corner verdict reading + strategy chain dispatch. None blocking.
+
+**Operational note for next session — bridge session-focus dance:**
+When orchestrator's `axlRunAllTests` fires, Maestro takes window focus and `axlGetMainSetupDB(sess_name)` from the bridge starts returning "Cannot find an active session" until user clicks back into Maestro. Bridge can also wedge into "not enough values to unpack" stale-response mode requiring `(pyKillServer)(pyStartServer)` in CIW. Both pinned in user-memory `reference_bridge_session_focus.md`. Plan probes to minimize the "submit → bridge wedges → wait for user → retry" loop.
+
+**Phase 3A v1.3 mechanism cheatsheet (for next session):**
+- Generator: `simkit/pre_run_script.py::write_pre_run_script(PreRunSpec, workdir)` → writes `.simkit/pre_run/pre_run_<item>_<hash>.il`
+- Bridge wrappers: `pvt_runner_install_pre_run_script` / `_disable_` / `_get_`
+- SKILL: `pvtRunnerInstallPreRunScript` / `_Disable_` / `_Get_` in `skill/pvtRunner.il`
+- Script template: `(let ((cornerName nil) (cornerMap (list (list "TT" "readns=\"/path\"") ...))) (setq cornerName (car (errset (axlGetCornerNameForCurrentPointInRun) nil))) (when ... (asiSetSimOptionVal asi "additionalArgs" (cadr entry))) t)`
+- Worker-VM SKILL quirks: NO `let*` with errset-wrapped initials; NO `(cons k v)` for non-list v; ALWAYS return `t` (nil aborts that corner)
+- additionalArgs is appended into netlist's `simulatorOptions options` block (NOT spectre CLI)
 
 **Phase 3B v1.5 follow-ups (parked until they bite):**
 
