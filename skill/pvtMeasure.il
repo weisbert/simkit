@@ -368,10 +368,46 @@
         (cond ((pvtIsErr v2) (return v2)))
         (return (pvtOk (list "range" (pvtUnwrap v1) (pvtUnwrap v2))))))
 
-    ;; (Dotted "X..Y" range form is intentionally NOT supported in v1.3 —
-    ;; parseString uses single-char delimiters which makes "..", ambiguous
-    ;; with single dots inside numeric literals. Use bracket [X:Y] or the
-    ;; explicit "range X Y" form instead.)
+    ;; v1.4 — Dotted "X..Y" range form. parseString can't help (single-char
+    ;; delimiter only), but classic SKILL `index` returns the substring at
+    ;; first match — enough to split on the literal ".." substring without
+    ;; confusing it with numeric-literal dots. Each side is then validated
+    ;; via _pvtMeasureSafeEvalNumber. Two pre-checks are mandatory:
+    ;;   (a) reject 3+ consecutive dots ("1...2"). Without this, "1...2"
+    ;;       silently parses as range(1, .2) since .2 is a valid number.
+    ;;   (b) reject multiple ".." occurrences ("1..2..3"). Without this,
+    ;;       the right side "2..3" feeds evalstring, which calls the SKILL
+    ;;       reader on "2..3" and crashes uncatchably (errset cannot trap
+    ;;       evalstring reader errors per DECISIONS #45).
+    (cond
+      ((index s "...")
+        (return (pvtErr 'pvt_validation
+                  (strcat "spec has 3+ consecutive dots; "
+                          "use 'X..Y' exactly (got: " specStr ")")
+                  specStr))))
+    (setq rest (index s ".."))
+    (cond
+      ((and rest
+            ;; both sides non-empty: suffix-after-dotdot >= 3 chars
+            ;; (".." plus at least one rhs char) AND less than the full string
+            ;; (at least one lhs char).
+            (greaterp (strlen rest) 2)
+            (lessp (strlen rest) (strlen s)))
+        ;; Guard against multiple ".." (e.g. "1..2..3"): the rhs would then
+        ;; hit evalstring with a malformed token, and the SKILL reader's
+        ;; error path is uncatchable per DECISIONS #45.
+        (cond
+          ((index (substring rest 3) "..")
+            (return (pvtErr 'pvt_validation
+                      (strcat "spec contains multiple '..' separators; "
+                              "use a single 'X..Y' (got: " specStr ")")
+                      specStr))))
+        (setq v2 (_pvtMeasureSafeEvalNumber (substring rest 3)))
+        (cond ((pvtIsErr v2) (return v2)))
+        (setq v1 (_pvtMeasureSafeEvalNumber
+                   (substring s 1 (difference (strlen s) (strlen rest)))))
+        (cond ((pvtIsErr v1) (return v1)))
+        (return (pvtOk (list "range" (pvtUnwrap v1) (pvtUnwrap v2))))))
 
     ;; Comparison operators — handle the 2-char ones first (<=, >=) then 1-char.
     (cond

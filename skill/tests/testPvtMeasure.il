@@ -303,6 +303,57 @@
     (let ((r (_pvtMeasureParseSpec "")))
       (pvtAssertErrCategory r 'pvt_validation "empty -> err"))))
 
+;; v1.4 — dotted "X..Y" range form (DECISIONS #46).
+(pvtTestRegister "measure/parseSpec/dotted-range-decimals"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "1.5..2.5")))
+      (pvtAssert (pvtUnwrap r) '("range" 1.5 2.5) "1.5..2.5 -> (range 1.5 2.5)"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-ints"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "1..2")))
+      (pvtAssert (pvtUnwrap r) '("range" 1 2) "1..2 -> (range 1 2)"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-negative"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "-150..-100")))
+      (pvtAssert (pvtUnwrap r) '("range" -150 -100)
+                 "-150..-100 -> (range -150 -100)"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-si"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "100p..1n")))
+      (pvtAssert (pvtUnwrap r) '("range" 1e-10 1e-09)
+                 "SI suffixes resolved on both sides"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-whitespace"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "  1..2  ")))
+      (pvtAssert (pvtUnwrap r) '("range" 1 2)
+                 "outer whitespace trimmed before dotted parse"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-3dots-rejected"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "1...2")))
+      (pvtAssertErrCategory r 'pvt_validation
+                            "'1...2' -> err (else silently parses as range(1, .2))"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-multi-dots-rejected"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "1.5..2.5..3.5")))
+      (pvtAssertErrCategory r 'pvt_validation
+                            "multi '..' -> err (else evalstring reader crash, DECISIONS #45)"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-empty-left-rejected"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "..5")))
+      (pvtAssertErrCategory r 'pvt_validation "leading '..' -> err"))))
+
+(pvtTestRegister "measure/parseSpec/dotted-range-empty-right-rejected"
+  (lambda ()
+    (let ((r (_pvtMeasureParseSpec "5..")))
+      (pvtAssertErrCategory r 'pvt_validation "trailing '..' -> err"))))
+
 
 ;; ---------- v1.3 _pvtMeasureSafeEvalNumber ---------------------------------
 

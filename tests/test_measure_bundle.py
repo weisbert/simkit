@@ -476,6 +476,20 @@ class SpecPassthroughTests(ProjectFixtureMixin, unittest.TestCase):
         b = load_measure_bundle(path, project=self.project)
         self.assertEqual(b.apply[0].spec, "range -150 -100")
 
+    def test_spec_loads_range_dotted(self):
+        # v1.4 — Cadence-style "X..Y" dotted range form. Python validation
+        # already passed it through (prefix is numeric); the change is on
+        # the SKILL parser side (DECISIONS #46). Pin the bundle-load contract
+        # here so a future tightening of _SPEC_PREFIX_RE doesn't regress it.
+        path = self._bundle_with_spec(spec="1.5..2.5")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].spec, "1.5..2.5")
+
+    def test_spec_loads_range_dotted_negative(self):
+        path = self._bundle_with_spec(spec="-150..-100")
+        b = load_measure_bundle(path, project=self.project)
+        self.assertEqual(b.apply[0].spec, "-150..-100")
+
     def test_spec_null_means_none(self):
         path = self._bundle_with_spec(spec=None)
         b = load_measure_bundle(path, project=self.project)
