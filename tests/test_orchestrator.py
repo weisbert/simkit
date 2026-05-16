@@ -390,7 +390,13 @@ class ExecuteIcFromTests(unittest.TestCase):
         src = Path(script_path).read_text()
         for cname in ("C1", "C2", "C3"):
             self.assertIn(f'(list "{cname}"', src)
-        self.assertIn("+nodeset", src)
+        # Value uses netlist-syntax `readns="<path>"` (NOT spectre CLI
+        # `+nodeset <path>`) — additionalArgs is appended into the
+        # simulatorOptions block in the netlist; live-confirmed by
+        # SFE-1994 warnings when we used CLI syntax. See DECISIONS #57.
+        # The inner `"` is escaped by the SKILL string quoter, so we
+        # match the rendered form `readns=\"...`.
+        self.assertIn(r'readns=\"', src)
         self.assertIn("/1/sim_test/netlist/spectre.fc", src)
         self.assertIn("/2/sim_test/netlist/spectre.fc", src)
         self.assertIn("/3/sim_test/netlist/spectre.fc", src)

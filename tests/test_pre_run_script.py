@@ -39,22 +39,25 @@ class SkillQuoteTests(unittest.TestCase):
 
 
 class BuildCornerArgMapTests(unittest.TestCase):
-    def test_readns_emits_nodeset_flag(self):
+    def test_readns_emits_simulator_option(self):
+        # additionalArgs gets appended into the netlist's simulatorOptions
+        # block (NOT spectre CLI), so the value must be netlist-syntax
+        # `readns="path"` — not the +nodeset CLI flag.
         m = build_corner_arg_map(
             ["TT", "TT_pvt_0"],
             {"TT": "/a/spectre.fc", "TT_pvt_0": "/b/spectre.fc"},
             "readns",
         )
         self.assertEqual(m, {
-            "TT": "+nodeset /a/spectre.fc",
-            "TT_pvt_0": "+nodeset /b/spectre.fc",
+            "TT": 'readns="/a/spectre.fc"',
+            "TT_pvt_0": 'readns="/b/spectre.fc"',
         })
 
-    def test_readic_emits_ic_flag(self):
+    def test_readic_emits_simulator_option(self):
         m = build_corner_arg_map(
             ["TT"], {"TT": "/p/spectre.ic"}, "readic",
         )
-        self.assertEqual(m, {"TT": "+ic /p/spectre.ic"})
+        self.assertEqual(m, {"TT": 'readic="/p/spectre.ic"'})
 
     def test_none_paths_dropped(self):
         # Corners with no upstream IC are omitted so the SKILL assoc
@@ -84,7 +87,7 @@ class RenderScriptTests(unittest.TestCase):
         spec = PreRunSpec(
             item_name="bt2grx_pss",
             mode="readns",
-            corner_to_arg={"TT": "+nodeset /a.fc"},
+            corner_to_arg={"TT": 'readns="/a.fc"'},
         )
         src = render_pre_run_script(spec)
         self.assertIn("bt2grx_pss", src)
@@ -96,16 +99,17 @@ class RenderScriptTests(unittest.TestCase):
             item_name="pss",
             mode="readns",
             corner_to_arg={
-                "TT": "+nodeset /a.fc",
-                "TT_pvt_0": "+nodeset /b.fc",
+                "TT": 'readns="/a.fc"',
+                "TT_pvt_0": 'readns="/b.fc"',
             },
         )
         src = render_pre_run_script(spec)
         # Each entry is a 2-element list (NOT a cons-cell — Cadence
         # SKILL's cons rejects non-list 2nd arg). assoc returns the
-        # whole list; cadr extracts the value.
-        self.assertIn('(list "TT" "+nodeset /a.fc")', src)
-        self.assertIn('(list "TT_pvt_0" "+nodeset /b.fc")', src)
+        # whole list; cadr extracts the value. Inner " are escaped
+        # by the SKILL string quoter.
+        self.assertIn(r'(list "TT" "readns=\"/a.fc\"")', src)
+        self.assertIn(r'(list "TT_pvt_0" "readns=\"/b.fc\"")', src)
 
     def test_script_always_returns_t(self):
         spec = PreRunSpec(item_name="x", mode="readns", corner_to_arg={})
@@ -143,7 +147,7 @@ class WriteScriptTests(unittest.TestCase):
 
     def test_writes_file_with_il_extension(self):
         spec = PreRunSpec(item_name="my_item", mode="readns",
-                          corner_to_arg={"TT": "+nodeset /x.fc"})
+                          corner_to_arg={"TT": 'readns="/x.fc"'})
         p = write_pre_run_script(spec, self.tmp)
         self.assertTrue(p.exists())
         self.assertEqual(p.suffix, ".il")
@@ -158,16 +162,16 @@ class WriteScriptTests(unittest.TestCase):
 
     def test_different_specs_produce_different_filenames(self):
         s1 = PreRunSpec(item_name="x", mode="readns",
-                        corner_to_arg={"TT": "+nodeset /a"})
+                        corner_to_arg={"TT": 'readns="/a"'})
         s2 = PreRunSpec(item_name="x", mode="readns",
-                        corner_to_arg={"TT": "+nodeset /b"})
+                        corner_to_arg={"TT": 'readns="/b"'})
         p1 = write_pre_run_script(s1, self.tmp)
         p2 = write_pre_run_script(s2, self.tmp)
         self.assertNotEqual(p1, p2)  # content hash differs
 
     def test_same_spec_idempotent_filename(self):
         spec = PreRunSpec(item_name="x", mode="readns",
-                          corner_to_arg={"TT": "+nodeset /a"})
+                          corner_to_arg={"TT": 'readns="/a"'})
         self.assertEqual(write_pre_run_script(spec, self.tmp),
                          write_pre_run_script(spec, self.tmp))
 

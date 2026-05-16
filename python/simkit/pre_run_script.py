@@ -151,7 +151,7 @@ def build_corner_arg_map(
     corner_to_ic_path: Mapping[str, str | None],
     mode: str,
 ) -> dict[str, str]:
-    """Build the corner→Spectre-arg map embedded in the pre-run script.
+    """Build the corner→Spectre-option map embedded in the pre-run script.
 
     Args:
         sub_corner_names: ordered list of sub-corner names from the
@@ -161,15 +161,27 @@ def build_corner_arg_map(
             if the upstream corner failed / no IC produced). Corners
             mapped to None are dropped from the output map so the
             script's ``assoc`` lookup misses and the corner runs naked.
-        mode: ``"readns"`` → ``+nodeset <path>``;
-              ``"readic"`` → ``+ic <path>``.
+        mode: ``"readns"`` → emits ``readns="<path>"``;
+              ``"readic"`` → emits ``readic="<path>"``.
+
+    Live-discovered 2026-05-17 on fnxSession0 dogfood: Maestro
+    **appends `additionalArgs` into the netlist's ``simulatorOptions
+    options`` block**, NOT to Spectre's command line. Originally we
+    used ``+nodeset <path>`` / ``+ic <path>`` (CLI syntax), which Spectre
+    saw as malformed continuations of the prior option and emitted
+    SFE-1994 warnings. The CORRECT form is the netlist-syntax
+    ``readns="<path>"`` / ``readic="<path>"`` — same shape the engineer
+    types into the Spectre Options > Init Conds & Nodesets form by hand.
     """
     if mode not in ("readns", "readic"):
         raise ValueError(f"mode must be readns/readic, got {mode!r}")
-    flag = "+nodeset" if mode == "readns" else "+ic"
     out: dict[str, str] = {}
     for name in sub_corner_names:
         ic = corner_to_ic_path.get(name)
         if ic:
-            out[name] = f"{flag} {ic}"
+            # readns="<path>" / readic="<path>" — valid Spectre
+            # simulatorOptions key=value syntax. Maestro appends this
+            # verbatim into the existing simulatorOptions options block,
+            # so quotes around the path are essential.
+            out[name] = f'{mode}="{ic}"'
     return out
