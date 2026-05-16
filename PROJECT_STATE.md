@@ -1,6 +1,6 @@
 # Project State
 
-_Last updated: 2026-05-15 (Phase 3B **v1.3 spec passthrough** DONE — closed the silent v1.0–v1.2 gap where the framework discarded Maestro Spec column on apply. 678/678 Python green; SKILL Tier-1 376/1 baseline. DECISIONS #45 captures the design + the Cadence normalisation behavior. Live dogfood: 7-row v1.3 bundle with spec on 6 rows applied to fnxSession0, pull confirms specs landed (normalised form), restore wipes clean.)_
+_Last updated: 2026-05-16 (Phase 3B **v1.3 spec passthrough** DONE + post-commit live extension. Spec round-trips end-to-end through Maestro GUI (user-confirmed). Dogfood went one step further: user ran sim with specs applied → history `simkit_check_spec` → PvtSave → ingest → DuckDB. Pipeline ran clean, but exposed a real gap: the Phase 1 collector predates specs and **does NOT capture pass/fail status per result row**. Flagged as the #1 v1.4 candidate — see TODO. 678/678 Python; SKILL Tier-1 376/1.)_
 
 ## Current phase
 
@@ -91,7 +91,9 @@ End-to-end loop: "Maestro sim finishes" → "one command saves it" → "Python c
 
 ## What's IN PROGRESS
 
-_Nothing — Phase 3B v1.3 at a clean stopping point. v1.2 closed 6 expressiveness gaps; v1.3 closed the pass/fail spec gap (DECISIONS #45). Define layer now end-to-end covers: corner conditions (Phase 2), measurement expressions (P3B v1.0–v1.1), output naming + sweep + raw entries (v1.2), and pass/fail criteria (v1.3). Next phase boundary candidates: Phase 3A (sim orchestrator), or in-place P3B v1.4 for the per-signal alias map + per-iteration sweep spec + multi-axis sweep — whichever the next dogfood surfaces._
+_Nothing — Phase 3B v1.3 at a clean stopping point._
+
+_2026-05-16 live test session with user: v1.3 GUI verified (Maestro Outputs Spec column populated), spec drives Maestro pass/fail dots (user-confirmed visually). Sim ran on TT corner from history `simkit_check_spec`; PvtSave pulled the 6 expr results, ingest landed cleanly in DuckDB. **Surprise**: the Phase 1 collector predates v1.3, so result rows have `status="ok"` (= "computed without eval-err") but no `spec_status`/`pass`/`fail` field. The data layer can store the numbers but can't yet answer "which corners failed spec?" — flagged as the #1 v1.4 candidate, see TODO. fnxSession0 restored to spec-clean 11-row baseline after the test._
 
 ## What's NEXT (the deferred-work shelf)
 

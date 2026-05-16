@@ -38,6 +38,19 @@ Not "batch everything." First cut:
 
 Only after Phase 2's helper is in daily use.
 
+**Hard prerequisite from 2026-05-16 live test**: Phase 3A's value depends on the collector capturing pass/fail per result. Without it, "run 100 corners → tell me what's red" is impossible. v1.4 #1 (pass/fail capture) should land before — or as the first thing inside — Phase 3A.
+
+## Phase 3B v1.4 (in-place, candidate)
+
+If picked over Phase 3A. Items in priority order (top is highest); see TODO.md "v1.4 deferred" section for details.
+
+1. **Pass/fail capture in collector** — highest priority; surfaced by the 2026-05-16 spec dogfood. Touches pvtCollect.il + run.json schema + ingest + DuckDB DDL + CLI.
+2. Per-iteration spec on sweep entries (parallel `specs: [...]` array).
+3. `axlGetSpecData` / `?weight` / `?info` capture on measure pull.
+4. Per-signal alias map (absorb the `Iavg_1`/`Iavg_2` hand-numbering idiom from v1.1 walkthrough).
+5. Multi-axis param_sweep.
+6. Spec status surfaced in apply CLI summary (data already on the wire in pushReport, just not printed).
+
 ---
 
 ## Parked ideas (raw — flesh out when they're picked up)

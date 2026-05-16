@@ -171,6 +171,13 @@ User pointed out v1.2 silently discarded the Maestro Spec column on apply, even 
 
 ### Deferred from Phase 3B v1.3 → v1.4 (do NOT block next phase):
 
+- **#1 PASS/FAIL CAPTURE IN COLLECTOR** (surfaced 2026-05-16 by live spec sim dogfood). The Phase 1 collector predates specs. After v1.3 specs land in Maestro, a sim runs, PvtSave dumps results — but `result.status` only encodes "computed without eval-err". Spec verdict is silently dropped: `pvt list` / `pvt diff` cannot answer "which corners failed spec?" The fix touches several layers:
+    1. `skill/pvtCollect.il` — capture `axlGetSpecData` / per-result pass/fail at iterate time (probably `axlGetResultSpecVal` or similar — needs live SKILL probe).
+    2. `docs/schema.md` + run.json schema version bump — add `spec` (string) + `spec_status` (pass/fail/no_spec) per-result column.
+    3. `python/simkit/ingest.py` + DuckDB DDL — new columns; `pvt list --failed-only`; `pvt diff --spec-changes`.
+    4. Acceptance: dogfood replay against `simkit_check_spec` history should reproduce the 6 PASS verdicts the user saw in the GUI.
+   This is the highest-priority v1.4 because it unblocks "orchestrator runs 100 corners → tell me what's red" which is the natural Phase 3A entry condition.
+
 - **Per-iteration spec on sweep entries** — currently single spec applies uniformly to N swept rows. Per-row spec (e.g. PN @ 1MHz < -100, PN @ 100MHz < -140) needs a parallel `specs: [...]` array alongside `output_names`.
 - **`axlGetSpecData` / `axlGetSpecWeight` on pull** — pull captures the spec string but loses the structured `?weight` / `?info` side metadata.
 - **Dotted `X..Y` range form in spec parser** — parseString uses single-char delimiters so `..` is ambiguous with the dot inside numeric literals. Bracket `[X:Y]` + `range X Y` cover the cases; revisit if needed.
