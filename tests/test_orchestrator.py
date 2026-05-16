@@ -245,13 +245,15 @@ class ExecuteSkeletonTests(unittest.TestCase):
 class ExecuteIcFromTests(unittest.TestCase):
     """End-to-end execute() with a 2-item review piping IC from trans → PSS.
 
-    Phase 3A v1.2 stage-2 (DECISIONS #57): the PSS item is run ONE CORNER
-    AT A TIME, each corner with its own IC pointing at the upstream
-    trans's per-corner spectre.fc. These tests pin:
-      * happy path: N corners → N set / N clear / N run calls
-      * upstream-failed → consumer falls back to batch (no IC)
-      * one corner's IC missing → that corner runs naked, others succeed
-      * corner-enable snapshot/restore wraps the loop
+    Phase 3A v1.3 (DECISIONS #57 stage-3): the consumer item runs as a
+    SINGLE axlRunAllTests batch with per-corner IC delivered by a SKILL
+    pre-run script attached to each test. These tests pin:
+      * happy path: single run, pre-run script generated + installed,
+        contains a corner→arg cons for every sub-corner with IC
+      * upstream-failed → fallback to batch (no IC, no pre-run script)
+      * one corner's IC missing → that corner's cons omitted from script
+        (lookup misses → naked at runtime); other corners still mapped
+      * cleanup: pre-run disabled + user's prior pre-run reattached
     """
 
     # 3-corner union shared by both items (same content; loader requires
@@ -308,16 +310,15 @@ class ExecuteIcFromTests(unittest.TestCase):
         return load_review(review_path)
 
     def _make_bridge(self, trans_hist: str):
-        """MockBridge with all the v1.2 stage-2 surface methods."""
+        """MockBridge with all the v1.3 pre-run surface methods."""
         class MockBridge:
             def __init__(self):
-                self.ic_set_calls = []
-                self.ic_clear_calls = []
-                self.enable_corner_calls = []
                 self.run_histories = []
                 self.run_n = 0
-                self.snap_called = 0
-                self.restore_called = 0
+                self.installs = []        # list of (test, script_path)
+                self.disables = []        # list of test
+                self.get_prerun_calls = []
+                self.clear_ic_calls = []  # cleanup at end
 
             def pvt_runner_snapshot_test_state(self, *, session):
                 return [("sim_test", True)]
@@ -331,9 +332,6 @@ class ExecuteIcFromTests(unittest.TestCase):
             def pvt_runner_run(self, hist, *, session, **kwargs):
                 self.run_n += 1
                 self.run_histories.append(hist)
-                # First run is the trans batch item — return fixed name
-                # so the IC resolver finds spectre.fc on disk. Subsequent
-                # per-corner runs return their own caller-provided name.
                 if self.run_n == 1:
                     return (0, 0, trans_hist)
                 return (0, 0, hist)
@@ -344,27 +342,25 @@ class ExecuteIcFromTests(unittest.TestCase):
             def pvt_corners_push(self, path, **kwargs):
                 pass
 
-            def pvt_runner_set_ic_source(self, test, path, mode, *, session):
-                self.ic_set_calls.append((test, path, mode))
-                return "/orig/additionalArgs"
+            # v1.3 pre-run script surface
+            def pvt_runner_get_pre_run_script(self, test, *, session):
+                self.get_prerun_calls.append(test)
+                return ""  # user had no prior pre-run
 
+            def pvt_runner_install_pre_run_script(self, test, path, *, session):
+                self.installs.append((test, path))
+                return path
+
+            def pvt_runner_disable_pre_run_script(self, test, *, session):
+                self.disables.append(test)
+
+            # Stage-1 leftovers used during cleanup
             def pvt_runner_clear_ic_source(self, test, mode, prev, *, session):
-                self.ic_clear_calls.append((test, mode, prev))
-
-            def pvt_runner_snapshot_corners_enable(self, *, session):
-                self.snap_called += 1
-                return [("C1", True), ("C2", False), ("C3", True)]
-
-            def pvt_runner_enable_corner_by_index(self, idx, *, session):
-                self.enable_corner_calls.append(idx)
-                return f"C{idx}"
-
-            def pvt_runner_restore_corners_enable(self, snap, *, session):
-                self.restore_called += 1
+                self.clear_ic_calls.append((test, mode, prev))
 
         return MockBridge()
 
-    def test_per_corner_happy_path(self):
+    def test_single_batch_with_pre_run_happy_path(self):
         review = self._make_review()
         plan = plan_review(review)
         bridge = self._make_bridge(self.trans_hist)
@@ -375,44 +371,47 @@ class ExecuteIcFromTests(unittest.TestCase):
             push_union=False,
             ingest_cb=lambda d: None,
         )
-        # N corners → N set / N clear / N enable_corner / N+1 runs
-        # (+1 for the upstream trans batch run).
-        self.assertEqual(len(bridge.ic_set_calls), self.N_CORNERS)
-        self.assertEqual(len(bridge.ic_clear_calls), self.N_CORNERS)
-        self.assertEqual(bridge.enable_corner_calls, [1, 2, 3])
-        self.assertEqual(len(bridge.run_histories), 1 + self.N_CORNERS)
+        # ONE consumer-item run (not N): trans = 1, pss = 1 → 2 total.
+        self.assertEqual(len(bridge.run_histories), 2)
 
-        # IC set paths point at distinct per-corner .fc files
-        paths = [c[1] for c in bridge.ic_set_calls]
-        self.assertTrue(paths[0].endswith("/1/sim_test/netlist/spectre.fc"))
-        self.assertTrue(paths[1].endswith("/2/sim_test/netlist/spectre.fc"))
-        self.assertTrue(paths[2].endswith("/3/sim_test/netlist/spectre.fc"))
+        # Pre-run script: get_pre_run_script + install (once per test),
+        # disable (once per test on cleanup).
+        self.assertEqual(bridge.get_prerun_calls, ["sim_test"])
+        self.assertEqual(len(bridge.installs), 1)
+        test_installed, script_path = bridge.installs[0]
+        self.assertEqual(test_installed, "sim_test")
+        self.assertTrue(script_path.endswith(".il"))
+        self.assertTrue(Path(script_path).exists())
+        self.assertEqual(bridge.disables, ["sim_test"])
 
-        # Clear always sees the prev value the set returned
-        for c in bridge.ic_clear_calls:
-            self.assertEqual(c, ("sim_test", "readns", "/orig/additionalArgs"))
+        # Generated script must contain a (cons ...) for every corner
+        src = Path(script_path).read_text()
+        for cname in ("C1", "C2", "C3"):
+            self.assertIn(f'(cons "{cname}"', src)
+        self.assertIn("+nodeset", src)
+        self.assertIn("/1/sim_test/netlist/spectre.fc", src)
+        self.assertIn("/2/sim_test/netlist/spectre.fc", src)
+        self.assertIn("/3/sim_test/netlist/spectre.fc", src)
 
-        # Corner enable mask snapshot + restore both fired exactly once
-        self.assertEqual(bridge.snap_called, 1)
-        self.assertEqual(bridge.restore_called, 1)
+        # additionalArgs cleared at end (once)
+        self.assertEqual(len(bridge.clear_ic_calls), 1)
+        self.assertEqual(bridge.clear_ic_calls[0], ("sim_test", "readns", ""))
 
-        # PSS item completed with N run_dirs
         pss = next(r for r in report.items if r.item_name == "pss")
         self.assertTrue(pss.completed)
-        self.assertEqual(len(pss.run_dirs), self.N_CORNERS)
+        self.assertEqual(len(pss.run_dirs), 1)  # single batch = 1 run_dir
 
-    def test_upstream_failed_falls_back_to_batch(self):
+    def test_upstream_failed_falls_back_to_batch_no_prerun(self):
         review = self._make_review()
         plan = plan_review(review)
         bridge = self._make_bridge(self.trans_hist)
 
         # Make the trans item's run raise
-        orig_run = bridge.pvt_runner_run
         def bomb_first(hist, *, session, **kwargs):
             if bridge.run_n == 0:
                 bridge.run_n = 1
                 raise RuntimeError("trans crashed")
-            return orig_run(hist, session=session, **kwargs)
+            return (0, 0, hist)
         bridge.pvt_runner_run = bomb_first
 
         report = execute(
@@ -422,16 +421,18 @@ class ExecuteIcFromTests(unittest.TestCase):
             push_union=False,
             ingest_cb=lambda d: None,
         )
-        # No per-corner activity since upstream had no history
-        self.assertEqual(bridge.ic_set_calls, [])
-        self.assertEqual(bridge.enable_corner_calls, [])
-        self.assertEqual(bridge.snap_called, 0)
+        # No pre-run activity since upstream had no history
+        self.assertEqual(bridge.installs, [])
+        self.assertEqual(bridge.disables, [])
         pss = next(r for r in report.items if r.item_name == "pss")
         self.assertIn("no recorded history", pss.notes)
         self.assertTrue(pss.completed)  # ran naked via batch fallback
 
-    def test_one_corner_missing_ic_runs_naked(self):
-        # Delete corner-2's spectre.fc; corners 1 and 3 should still work.
+    def test_partial_ic_only_missing_corner_omitted_from_script(self):
+        # Delete corner-2's spectre.fc; the generated script should
+        # contain (cons "C1" ...) + (cons "C3" ...) but NOT C2 — at
+        # runtime C2's assoc misses → additionalArgs stays untouched →
+        # C2 runs naked, other corners still get IC.
         review = self._make_review()
         plan = plan_review(review)
         bridge = self._make_bridge(self.trans_hist)
@@ -449,32 +450,28 @@ class ExecuteIcFromTests(unittest.TestCase):
             ingest_cb=lambda d: None,
             item_done_cb=after_each,
         )
-        # Only corners 1 and 3 got set_ic; corner 2 ran naked
-        self.assertEqual(len(bridge.ic_set_calls), 2)
-        paths = [c[1] for c in bridge.ic_set_calls]
-        self.assertTrue(paths[0].endswith("/1/sim_test/netlist/spectre.fc"))
-        self.assertTrue(paths[1].endswith("/3/sim_test/netlist/spectre.fc"))
-        # All 3 corners enabled (even the IC-less one)
-        self.assertEqual(bridge.enable_corner_calls, [1, 2, 3])
+        self.assertEqual(len(bridge.installs), 1)
+        src = Path(bridge.installs[0][1]).read_text()
+        self.assertIn('(cons "C1"', src)
+        self.assertNotIn('(cons "C2"', src)
+        self.assertIn('(cons "C3"', src)
         pss = next(r for r in report.items if r.item_name == "pss")
-        self.assertIn("corner 2", pss.notes)
+        self.assertTrue(pss.completed)
 
-    def test_corner_enable_snapshot_restored_even_on_run_error(self):
-        # Per-corner-run failures should NOT skip the restore in finally.
+    def test_cleanup_runs_even_when_batch_run_errors(self):
+        # Pre-run install succeeds, batch run raises. Cleanup (disable
+        # pre-run + clear additionalArgs) must still fire in finally.
         review = self._make_review()
         plan = plan_review(review)
         bridge = self._make_bridge(self.trans_hist)
 
-        orig_run = bridge.pvt_runner_run
-        def fail_corner_2(hist, *, session, **kwargs):
+        def fail_pss(hist, *, session, **kwargs):
             bridge.run_n += 1
             bridge.run_histories.append(hist)
-            if bridge.run_n == 3:  # 1=trans batch, 2=corner1, 3=corner2
-                raise RuntimeError("corner 2 spectre died")
             if bridge.run_n == 1:
                 return (0, 0, self.trans_hist)
-            return (0, 0, hist)
-        bridge.pvt_runner_run = fail_corner_2
+            raise RuntimeError("pss batch died")
+        bridge.pvt_runner_run = fail_pss
 
         execute(
             plan, bridge,
@@ -483,13 +480,31 @@ class ExecuteIcFromTests(unittest.TestCase):
             push_union=False,
             ingest_cb=lambda d: None,
         )
-        # Snapshot + restore both ran exactly once regardless of error
-        self.assertEqual(bridge.snap_called, 1)
-        self.assertEqual(bridge.restore_called, 1)
-        # All 3 corners attempted enable (loop didn't break early)
-        self.assertEqual(bridge.enable_corner_calls, [1, 2, 3])
-        # IC cleared after every corner (even corner 2 which errored on run)
-        self.assertEqual(len(bridge.ic_clear_calls), self.N_CORNERS)
+        self.assertEqual(len(bridge.installs), 1)
+        self.assertEqual(bridge.disables, ["sim_test"])
+        self.assertEqual(len(bridge.clear_ic_calls), 1)
+
+    def test_user_prior_pre_run_reattached_on_cleanup(self):
+        # If user had their own pre-run script attached, capture +
+        # reattach it after our run completes.
+        review = self._make_review()
+        plan = plan_review(review)
+        bridge = self._make_bridge(self.trans_hist)
+        bridge.pvt_runner_get_pre_run_script = (
+            lambda test, *, session: "/tmp/user_owned.il"
+        )
+
+        execute(
+            plan, bridge,
+            session="fake_session",
+            pvtproject_path=self.pvt_path,
+            push_union=False,
+            ingest_cb=lambda d: None,
+        )
+        install_paths = [c[1] for c in bridge.installs]
+        self.assertEqual(len(install_paths), 2)
+        self.assertIn(".simkit", install_paths[0])
+        self.assertEqual(install_paths[1], "/tmp/user_owned.il")
 
 
 if __name__ == "__main__":

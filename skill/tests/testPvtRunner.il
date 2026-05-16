@@ -216,3 +216,47 @@
 ;; (same class of issue as DECISIONS #55's axlGetRunStatus). The
 ;; positive-int path IS covered live by the bridge-side round-trip
 ;; against fnxSession0 documented in DECISIONS #57.
+
+
+;; --- v1.3: pre-run-script helpers -----------------------------------------
+
+(pvtTestRegister "runner/installPreRunScript/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerInstallPreRunScript)) t
+               "pvtRunnerInstallPreRunScript defined")))
+
+(pvtTestRegister "runner/disablePreRunScript/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerDisablePreRunScript)) t
+               "pvtRunnerDisablePreRunScript defined")))
+
+(pvtTestRegister "runner/getPreRunScript/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerGetPreRunScript)) t
+               "pvtRunnerGetPreRunScript defined")))
+
+(pvtTestRegister "runner/installPreRunScript/empty-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerInstallPreRunScript "fakeSession" "" "/tmp/x.il")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty testName"))))
+
+(pvtTestRegister "runner/installPreRunScript/empty-path-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerInstallPreRunScript "fakeSession" "Test" "")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty scriptPath"))))
+
+(pvtTestRegister "runner/installPreRunScript/missing-file-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerInstallPreRunScript "fakeSession" "Test"
+                                            "/tmp/simkit_does_not_exist.il")))
+      (pvtAssertErrCategory rv 'pvt_validation "scriptPath does not exist"))))
+
+(pvtTestRegister "runner/disablePreRunScript/empty-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerDisablePreRunScript "fakeSession" "")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty testName in disable"))))
+
+(pvtTestRegister "runner/getPreRunScript/empty-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerGetPreRunScript "fakeSession" "")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty testName in get"))))

@@ -792,6 +792,54 @@ def pvt_runner_clear_ic_source(
     )
 
 
+def pvt_runner_install_pre_run_script(
+    test_name: str, script_path: str, *,
+    session: str, workspace: Any = None,
+) -> str:
+    """Attach + enable a pre-run script for ``test_name``.
+
+    Wraps SKILL ``pvtRunnerInstallPreRunScript`` which calls
+    ``axlImportPreRunScript`` followed by ``axlSetPreRunScriptEnabled``.
+    The script fires in Maestro's worker virtuoso VM BEFORE each
+    (test, corner) point is netlisted — see DECISIONS #57 stage-3.
+
+    Returns the path Maestro recorded (usually identical to ``script_path``).
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    return str(_unwrap(
+        ws["pvtRunnerInstallPreRunScript"](session, test_name, script_path)
+    ))
+
+
+def pvt_runner_disable_pre_run_script(
+    test_name: str, *, session: str, workspace: Any = None,
+) -> None:
+    """Disable the pre-run script for ``test_name``.
+
+    Maestro has no "detach" API; disable is our equivalent. The script
+    file on disk stays — orchestrator owns its cleanup.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    _unwrap(ws["pvtRunnerDisablePreRunScript"](session, test_name))
+
+
+def pvt_runner_get_pre_run_script(
+    test_name: str, *, session: str, workspace: Any = None,
+) -> str:
+    """Return the currently-attached pre-run script path for ``test_name``.
+
+    ``""`` means no script attached (or attached-but-disabled — Maestro
+    doesn't expose the enabled flag to a getter). Used by the orchestrator
+    to snapshot user state before installing our script.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(ws["pvtRunnerGetPreRunScript"](session, test_name))
+    return str(raw) if raw else ""
+
+
 def pvt_runner_snapshot_corners_enable(
     *, session: str, workspace: Any = None,
 ) -> list[tuple[str, bool]]:

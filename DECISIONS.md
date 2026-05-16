@@ -1240,3 +1240,47 @@ Stage-1's "v1 limitation: all corners share corner-1" is now gone. The ic_from f
 
 **Promoted from v1.3 to v1.2 by user request (real workflow):** v1.2 backlog items (rdb-walker discriminator demoted in #56; `pvt corners push --replace`; per-corner verdict + strategy chain) reslot to v1.3.
 
+---
+
+**Stage-3 (v1.3) supersedes stage-2's per-corner-submit pattern.** User flagged stage-2's UX cost on 2026-05-16: "这样 cadence 里面看见的仿真结果是不是只能看见一个一个的了？" — N corners = N Maestro history entries instead of 1, which makes ViVA waveform comparison + results table browsing painful at real-bench scale (PSS sweeps with 20+ corners). Investigation found a clean alternative: **Maestro pre-run scripts** (`axlImportPreRunScript`) fire per-(test, sub-corner) in a worker virtuoso VM right before each point's netlist is generated. From inside that script we can call `asiSetSimOptionVal` on the per-test asi session to write `additionalArgs="+nodeset <abs_path>"` (or `"+ic <abs_path>"`) before Spectre sees the netlist.
+
+**v1.3 architecture:**
+
+1. Orchestrator side, ONCE per consumer item: enumerate sub-corner names via `explode(union)`, resolve each one's IC path from the upstream history's `<results>/<hist>/<sub_corner_idx>/<test>/netlist/spectre.<kind>`, build a `{sub_corner_name → "+nodeset <path>"}` map.
+2. Render a self-contained SKILL pre-run script with the map embedded as a literal `(cons "name" "+nodeset path")` list. No JSON parsing at runtime; no dependency on simkit code being loaded in worker VM.
+3. Snapshot each test's prior pre-run script (`axlGetPreRunScript`).
+4. Install our script on each test in the consumer item via `pvtRunnerInstallPreRunScript` (wraps `axlImportPreRunScript` + `axlSetPreRunScriptEnabled t`).
+5. ONE `axlRunAllTests` submit → single history entry → all N corners in one results table.
+6. PvtSave + ingest the single batch history.
+7. Cleanup: disable our pre-run on each test, reattach user's original if any, clear `additionalArgs` baseline.
+
+**Live-probed on `fnxSession0` (2026-05-16):**
+- Pre-run fires once per sub-corner with the FULL sub-corner name (TT_pvt explodes into TT_pvt_0..5 — each gets its own firing). 9 distinct firings for a 1+6+1 union, including one pre-flight call with `cornerName=""` that the script must guard against (asi is nil at that point).
+- Worker VM has `asiGetCurrentSession`, `asiSetSimOptionVal`, `asiGetSimOptionVal`; set+get round-trip confirmed.
+- Pre-run fires BEFORE netlist generation — script's `additionalArgs` write is picked up by Maestro at netlist-gen time.
+- Pre-run errors are FATAL to that corner's run (Maestro aborts the point) — script always wraps SKILL calls in `errset` and returns `t` unconditionally.
+
+**Trade-off vs. stage-2 per-corner-submit:**
+
+| Dimension | stage-2 per-corner submit | stage-3 pre-run script (v1.3) |
+|---|---|---|
+| Maestro histories | N entries | 1 entry ✅ |
+| ViVA / Results table | N to browse | one consolidated ✅ |
+| Per-run overhead | N × per-corner Maestro dispatch | native single batch ✅ |
+| Implementation complexity | medium (corner enable mask + sequential loop) | medium (cross-VM SKILL gen + state snapshot/restore) |
+| Per-corner error isolation | partial fails skip that corner | partial fails skip via assoc miss (corner runs naked) |
+| Cleanup hygiene | restore corner enable mask | disable our pre-run + reattach user's prior + clear additionalArgs |
+
+**Surface changes vs. stage-2:**
+- `python/simkit/pre_run_script.py` NEW: `PreRunSpec`, `render_pre_run_script`, `write_pre_run_script`, `build_corner_arg_map`. Pure-Python + filesystem; 18 unit tests.
+- `python/simkit/orchestrator.py`: `_execute_per_corner_item` → `_execute_ic_chained_item`. Single batch, embeds union explode order to compute sub_corner_name → corner_idx mapping.
+- `python/simkit/skill_bridge.py`: `pvt_runner_install_pre_run_script` / `pvt_runner_disable_pre_run_script` / `pvt_runner_get_pre_run_script` wrappers (alongside the stage-1 SetIcSource/ClearIcSource which now only run on cleanup).
+- `skill/pvtRunner.il`: `pvtRunnerInstallPreRunScript` / `pvtRunnerDisablePreRunScript` / `pvtRunnerGetPreRunScript`. Stage-2's `pvtRunnerSnapshotCornersEnable` / `pvtRunnerEnableCornerByIndex` / `pvtRunnerRestoreCornersEnable` stay (general-purpose; just not on the v1.3 ic_from critical path).
+- `tests/test_pre_run_script.py` NEW: 18 cases. `tests/test_orchestrator.py::ExecuteIcFromTests` rewritten for single-batch + pre-run shape (5 cases vs prior 4): happy path, upstream-failed fallback, partial-IC corner omitted from script, cleanup runs on batch error, user's prior pre-run reattached.
+
+Final tally: Python 912 / 0 → 931 / 0 (+19); SKILL Tier-1 426/1 → +8 (3 existence + 5 validation for the new pre-run helpers).
+
+**Known v1.3 gap (v1.3.1 candidate):** if the user had a non-empty `additionalArgs` in their Spectre Options form BEFORE the orchestrator runs, our pre-run script overwrites it per-corner; cleanup clears to `""` regardless of the prior state. Captures `prior_scripts` (pre-run files) but not `prior_additionalArgs` (the simoption value). Fix is straightforward — bridge.pvt_runner_get_pre_run_script-style getter for additionalArgs + restore on cleanup. Defer until first dogfood reveals it bites.
+
+
+

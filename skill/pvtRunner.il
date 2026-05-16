@@ -587,4 +587,97 @@
     (return (pvtOk snap))))
 
 
-(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.2 stage-2: + per-corner enable helpers)\n")
+;; --- v1.3: pre-run-script attachment for single-batch per-corner IC ---
+;;
+;; Architecture (DECISIONS #57 stage-3): Maestro lets you attach a
+;; per-test SKILL script via axlImportPreRunScript that fires BEFORE
+;; each (test, corner) point is netlisted. The script runs in
+;; Maestro's worker virtuoso VM and has access to:
+;;   * axlGetCornerNameForCurrentPointInRun — returns the exact
+;;     sub-corner name (e.g. "TT_pvt_3", not just "TT_pvt")
+;;   * asiGetCurrentSession / asiGetSimOptionVal / asiSetSimOptionVal
+;;     on the per-test asi session
+;; Combining these lets us write per-corner-specific +nodeset/+ic into
+;; the test's additionalArgs IMMEDIATELY before its netlist+Spectre
+;; invocation — single axlRunAllTests, single Maestro history, per-corner
+;; IC delivered. Replaces v1.2 stage-2's N-submit pattern.
+;;
+;; Live-probed 2026-05-16 on fnxSession0:
+;;   * Pre-run fires once per sub-corner — 9 distinct firings for
+;;     1 + 6 + 1 = 8 sub-corners on a 3-row union (TT, TT_pvt × 6 expand,
+;;     TT_2p5G) + one pre-flight call with corner="" that we MUST guard
+;;     against (asi is nil at that point).
+;;   * asiSetSimOptionVal works in worker VM; write persists across
+;;     sub-corner pre-run firings (within the same run).
+;;   * Script returning nil aborts that corner; we always return t.
+;;
+;; pvtRunnerInstallPreRunScript(sess, testName, scriptPath)
+;;   Wraps axlImportPreRunScript + axlSetPreRunScriptEnabled(true).
+;;   -> (pvtOk attachedPath)  the path Maestro recorded
+;;   -> (pvtErr 'pvt_validation msg)
+;;   -> (pvtErr 'pvt_runner_install_prerun msg)
+;;
+;; pvtRunnerDisablePreRunScript(sess, testName)
+;;   axlSetPreRunScriptEnabled(false). Maestro has no detach API, so
+;;   disable is our equivalent of "remove."
+;;   -> (pvtOk t)
+;;
+;; pvtRunnerGetPreRunScript(sess, testName)
+;;   Returns the currently-attached script path (or "" if none) so the
+;;   caller can snapshot it before install and restore on cleanup.
+;;   -> (pvtOk pathOrEmpty)
+
+(procedure (pvtRunnerInstallPreRunScript sess testName scriptPath)
+  (prog (sessR sessName r)
+    (cond
+      ((or (null testName) (not (stringp testName)) (equal testName ""))
+        (return (pvtErr 'pvt_validation "testName must be a non-empty string"))))
+    (cond
+      ((or (null scriptPath) (not (stringp scriptPath)) (equal scriptPath ""))
+        (return (pvtErr 'pvt_validation "scriptPath must be a non-empty string"))))
+    (cond
+      ((not (isFile scriptPath))
+        (return (pvtErr 'pvt_validation
+                        (lsprintf "scriptPath %L does not exist on disk"
+                                  scriptPath)))))
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
+    (setq r (errset (axlImportPreRunScript sessName testName scriptPath) nil))
+    (setq r (cond ((listp r) (car r)) (t nil)))
+    (cond
+      ((null r)
+        (return (pvtErr 'pvt_runner_install_prerun
+                        (lsprintf "axlImportPreRunScript failed for test %L"
+                                  testName)))))
+    (errset (axlSetPreRunScriptEnabled sessName testName t) nil)
+    (return (pvtOk r))))
+
+
+(procedure (pvtRunnerDisablePreRunScript sess testName)
+  (prog (sessR sessName)
+    (cond
+      ((or (null testName) (not (stringp testName)) (equal testName ""))
+        (return (pvtErr 'pvt_validation "testName must be a non-empty string"))))
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
+    (errset (axlSetPreRunScriptEnabled sessName testName nil) nil)
+    (return (pvtOk t))))
+
+
+(procedure (pvtRunnerGetPreRunScript sess testName)
+  (prog (sessR sessName r)
+    (cond
+      ((or (null testName) (not (stringp testName)) (equal testName ""))
+        (return (pvtErr 'pvt_validation "testName must be a non-empty string"))))
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
+    (setq r (errset (axlGetPreRunScript sessName testName) nil))
+    (setq r (cond ((listp r) (car r)) (t nil)))
+    ;; axlGetPreRunScript returns "" when nothing attached; preserve.
+    (return (pvtOk (cond ((null r) "") (t r))))))
+
+
+(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.3: + pre-run script install/disable/get)\n")

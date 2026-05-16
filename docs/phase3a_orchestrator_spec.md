@@ -104,7 +104,7 @@ Workflow: PSS / HB convergence is hard from cold start. Engineer wants to run a 
 
 **Corner mapping rule (v2):** consumer and source items MUST reference the **same `.union.json` path** (resolved-equal). Per-corner pairing is positional under that union's explode order. This guarantees zero-ambiguity matching with no name-string heuristics. Loader rejects mismatch at validate time.
 
-**Orchestrator behaviour:** ic_from triggers a **per-corner execution** path. The consumer item runs corners **one at a time** — for each `corner_idx` from 1 to N: resolve the upstream's per-corner IC, set `additionalArgs` on the test, enable only that one corner via `axlSetEnabled`, `axlRunAllTests`, `PvtSave`, ingest, clear IC, advance. The corner enable mask is snapshot/restored across the loop so the next item / the user's interactive session see the original state.
+**Orchestrator behaviour (v1.3):** ic_from triggers a **single-batch + Maestro pre-run script** path. The consumer item runs ONCE via `axlRunAllTests`; per-corner IC is delivered just-in-time by a SKILL pre-run script attached to each test via `axlImportPreRunScript`. The script fires in Maestro's worker virtuoso VM right before each (test, sub-corner) point is netlisted, reads the current sub-corner via `axlGetCornerNameForCurrentPointInRun`, looks up the matching `+nodeset` / `+ic <path>` in an embedded SKILL `assoc` table, and writes it into the test's `additionalArgs` simulator option via `asiSetSimOptionVal`. Result: ONE Maestro history with all N sub-corners consolidated in the GUI / ViVA / results table, and each sub-corner saw its own IC at Spectre invocation time. The orchestrator snapshots the user's prior pre-run script (if any) and re-attaches it on cleanup.
 
 **Source item failure handling:** if a corner failed in the source item (no `.fc` produced for that corner_idx), the orchestrator runs the corresponding consumer corner **without** the IC (naked retry) and logs a warning. PSS / HB without IC usually still finishes but may fail to converge — the user sees a normal per-corner FAIL row, not an orchestrator error. If the entire source item has no recorded history (it crashed pre-PvtSave), the consumer falls back to **batch mode without IC** (one axlRunAllTests for all corners).
 
@@ -135,24 +135,27 @@ for item in review.items:
             push_bundle(item.bundle)            # Phase 3B pvtMeasurePush
         history_name = f"review_{review.name}_{item.name}_{ts}"
         if item.ic_from:                        # schema v2 (§2.5)
-            corner_snap = snapshot_corners_enable()
+            # v1.3: single-batch + Maestro pre-run script
+            corner_to_arg = {}
+            for sub_corner in explode(item.union):
+                ic_path = resolve_ic_path(item.ic_from, sub_corner.idx)
+                if ic_path:
+                    flag = "+nodeset" if mode == "readns" else "+ic"
+                    corner_to_arg[sub_corner.name] = f"{flag} {ic_path}"
+            script_path = write_pre_run_script(item.name, corner_to_arg)
+            prior = {t: bridge.get_pre_run_script(t) for t in item.tests}
             try:
-                for corner_idx in range(1, n_corners + 1):
-                    ic_path = resolve_ic_path(item.ic_from, corner_idx)
-                    if ic_path:
-                        prev = set_ic_source(item.tests, ic_path, item.ic_from.mode)
-                    else:
-                        log.warn(item, corner_idx, "upstream IC missing; naked")
-                        prev = None
-                    enable_corner_by_index(corner_idx)
-                    history = f"{base}_c{corner_idx}"
-                    run_one_corner_submit(history)
-                    pvt_save(history)
-                    ingest(history)
-                    if prev is not None:
-                        clear_ic_source(item.tests, item.ic_from.mode, prev)
+                for t in item.tests:
+                    bridge.install_pre_run_script(t, script_path)
+                run_batch_submit(history_name)      # ONE axlRunAllTests
+                pvt_save(history_name)
+                ingest(history_name)
             finally:
-                restore_corners_enable(corner_snap)
+                for t in item.tests:
+                    bridge.disable_pre_run_script(t)
+                    if prior[t]:
+                        bridge.install_pre_run_script(t, prior[t])
+                bridge.clear_ic_source(item.tests[0], mode, "")
         else:
             await _run_with_strategies(history_name, item.on_failure)
         per_corner_status = collect_results()   # Phase 1 PvtSave path
@@ -243,9 +246,12 @@ New file: `skill/pvtRunner.il`. Production-side helpers (all return `(pvt_ok val
 | `pvtRunnerCollectHistory` | session, history-name | JSON-shaped per-(corner, test) status table — feeds Phase 1 ingester directly |
 | `pvtRunnerSetIcSource` | session, testName, icPath, mode | Writes `+nodeset <path>` (readns) or `+ic <path>` (readic) into the test's `additionalArgs` sim option via `asiSetSimOptionVal`. Returns prev value for restore. v1.2 stage-1. |
 | `pvtRunnerClearIcSource` | session, testName, mode, prevValue | Restores `additionalArgs` to prevValue. v1.2 stage-1. |
-| `pvtRunnerSnapshotCornersEnable` | session | List of `(name, bool)` per-corner enable state. v1.2 stage-2. |
-| `pvtRunnerEnableCornerByIndex` | session, idx | Disable all corners except the one at 1-based idx (in `axlGetCorners` order). Returns enabled corner's name. v1.2 stage-2. |
-| `pvtRunnerRestoreCornersEnable` | session, snap | Apply snapshot to restore corner enable mask. v1.2 stage-2. |
+| `pvtRunnerSnapshotCornersEnable` | session | List of `(name, bool)` per-corner enable state. v1.2 stage-2 (kept; not on ic_from critical path in v1.3). |
+| `pvtRunnerEnableCornerByIndex` | session, idx | Disable all corners except the 1-based idx (in `axlGetCorners` order). v1.2 stage-2 (kept). |
+| `pvtRunnerRestoreCornersEnable` | session, snap | Apply snapshot to restore corner enable mask. v1.2 stage-2 (kept). |
+| `pvtRunnerInstallPreRunScript` | session, testName, scriptPath | Attach + enable a pre-run SKILL script (`axlImportPreRunScript` + `axlSetPreRunScriptEnabled t`). v1.3 — the ic_from injection hook. |
+| `pvtRunnerDisablePreRunScript` | session, testName | Disable the pre-run script (`axlSetPreRunScriptEnabled nil`). v1.3. |
+| `pvtRunnerGetPreRunScript` | session, testName | Returns the attached script path (`""` if none). For snapshot/restore of user's prior script. v1.3. |
 
 `pvtRunnerCollectHistory` reuses `pvtCollIterateResults` from Phase 1 — same row classification (`ok` / `sim_err` / `eval_err` / `unknown`), same JSON envelope shape, so the orchestrator can pipe its output straight into `pvt ingest` with no schema work.
 
