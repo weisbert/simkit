@@ -28,17 +28,30 @@ Rationale for going B before A (sim orchestrator): Phase 3A explicitly waits on 
 
 ---
 
-## Phase 3A (tentative — next after 3B): simulation orchestrator (bite-sized first cut)
+## Phase 3A: simulation orchestrator (NEXT — user committed 2026-05-16)
 
-Not "batch everything." First cut:
+User has signalled to start Phase 3A in the next session. **First-session task: lock §1 spec** at `docs/phase3a_*_spec.md` + DECISIONS entries, same pattern as Phase 2 (`docs/phase2_pvt_union_spec.md`) and Phase 3B (`docs/phase3b_measure_template_spec.md`). Open questions to surface during the spec push (not pre-decided here):
 
-- A YAML-driven "review suite" definition (which tests, which corners, which sims to run)
-- Python runner that invokes Maestro via socket/CLI, monitors progress, merges non-convergence retries
-- Auto-ingests results to data layer (leverages Phase 1)
+- **Driver style:** skillbridge (existing infra, no subprocess) vs. `virtuoso -nograph -replay` (fresh VM per run, isolation but slow startup). The bridge has been the Phase 1 / 2 / 3B-skeleton workhorse and just works; subprocess style is an option not a default.
+- **Review-suite sidecar shape:** YAML or JSON? Project convention is JSON sidecars (`.pvtproject`, `.union.json`, `.measure.json`, `.siggroup.json`, `.template.json`). YAML would be the first divergence — needs a reason or default to JSON for consistency.
+- **Trigger surface:** does the orchestrator iterate test×corner×sim combinations itself, or hand each combination to Maestro via the existing axlSKILL run-control API? Live skillbridge probe needed: `axlRun` / `axlSubmitJobs` / `axlSetMaestroRun` etc. — which exist, which actually drive runs.
+- **Failure semantics:** non-convergence retry policy (skip / retry-N / abort?); whether a single corner failure halts the suite or just marks that corner failed and continues.
+- **Auto-ingest hookup:** Phase 1 `pvt ingest` happens against a dump dir. Does the orchestrator dump per-run JSON between Maestro calls (current `PvtSave` style) or batch-dump at suite end?
 
-Only after Phase 2's helper is in daily use.
+**Pre-existing assets that Phase 3A can lean on:**
 
-**v1.4 cleared the Phase 3A hard prerequisite**: pass/fail capture is now live end-to-end (#1 done 2026-05-16). Phase 3A can start any time.
+- Phase 1 data pillar — full ingest + query + diff + label CLI surface.
+- Phase 2 PVT-union loader + explode — already produces the exact (var, model, sub-corner) tuples a suite would iterate.
+- Phase 3B measure-bundle render — produces the exact Outputs table the suite needs to push pre-run.
+- Skillbridge wrapper (`python/simkit/skill_bridge.py`) — `pvt_corners_pull/push`, `pvt_measure_push/pull/restore` are the existing drive-Maestro surface; orchestrator probably extends it with a `pvt_run_test` helper.
+
+**v1.4 cleared the Phase 3A hard prerequisite**: pass/fail capture is live end-to-end. Phase 3A can start clean.
+
+**Bite-sized v1 cut (the seed; spec will refine):**
+
+- A sidecar-driven "review suite" definition (which tests, which unions, which bundles).
+- Python runner that iterates the suite, drives Maestro per (test, corner), monitors progress, handles non-convergence per policy.
+- Auto-ingests each completed run via the existing `pvt ingest` path.
 
 ## Phase 3B v1.5 (in-place, remaining candidates)
 
