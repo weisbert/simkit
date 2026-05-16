@@ -18,15 +18,32 @@
 ;;     -> (pvtOk diff_list)             e.g. (("Test" t->t) ("OtherTest" t->nil))
 ;;        (where each entry says before -> after; same value = no change)
 ;;
-;;   pvtRunnerRun(sess, historyName)
-;;     -> (pvtOk [status-code sub-code]) on completion
+;;   pvtRunnerSubmit(sess)                              [v1.1, 2026-05-16]
+;;     -> (pvtOk t)                     fire-and-forget; axlRunAllTests
+;;        returns immediately even though the sim runs in the background
+;;        (DECISIONS #54). Callers poll pvtRunnerGetStatus and call
+;;        pvtRunnerRename once idle.
+;;
+;;   pvtRunnerRename(sess, historyName)                 [v1.1, 2026-05-16]
+;;     -> (pvtOk actualHistoryName)     wraps axlGetCurrentHistory +
+;;        axlSetHistoryName. DESTRUCTIVE — must only run once
+;;        axlGetRunStatus says [0,0]; otherwise risks ASSEMBLER-2423
+;;        modal (DECISIONS #54 #5).
+;;
+;;   pvtRunnerRun(sess, historyName)                    [v1, LEGACY]
+;;     -> (pvtOk [status-code sub-code historyName]) on completion
 ;;     -> (pvtErr 'pvt_runner_run "<msg>")   on submit error (errset trapped)
 ;;
-;;     This is the SYNCHRONOUS path — wraps axlRunAllTests, which blocks
-;;     until the suite finishes. v1.1 may add an async with-callback variant.
+;;     NOT poll-blocking — dispatches axlRunAllTests + immediately renames.
+;;     Safe for CIW interactive use on small/cached runs, BUT unsafe for
+;;     real-Spectre runs because the rename hits the setupdb while Maestro
+;;     is still finalising the history (modal-dialog risk per DECISIONS
+;;     #54). Python orchestrator uses pvtRunnerSubmit + poll + Rename
+;;     instead. Kept for back-compat; prefer the split pair.
 ;;
 ;;   pvtRunnerGetStatus(sess)
 ;;     -> (pvtOk [code sub])            wraps axlGetRunStatus(sess)
+;;        Pure read — safe to call during the async tail of axlRunAllTests.
 ;;
 ;; Reuse:
 ;;   - pvtError.il:  pvtOk / pvtErr / pvtIsErr / pvtUnwrap
@@ -167,22 +184,42 @@
 
 ;; --- run + status -----------------------------------------------------------
 
-(procedure (pvtRunnerRun sess historyName)
-  ;; Synchronous run: blocks until axlRunAllTests returns. historyName is
-  ;; the NAME WE WANT the new history entry to have; we rename after
-  ;; because axlRunAllTests always auto-names to "Interactive.NN" (probe
-  ;; finding 2026-05-16).
+(procedure (pvtRunnerSubmit sess)
+  ;; Fire-and-forget dispatch of axlRunAllTests. Returns immediately even
+  ;; though the Spectre sims keep running in the background (DECISIONS
+  ;; #54). Caller polls pvtRunnerGetStatus to know when truly idle, THEN
+  ;; calls pvtRunnerRename. Splitting the legacy pvtRunnerRun into
+  ;; submit + rename gives the Python orchestrator a seam to insert
+  ;; poll-to-idle in between, which avoids the ASSEMBLER-2423 modal that
+  ;; pops when axlSetHistoryName fires against a still-running setupdb.
   ;;
-  ;; Probe findings (2026-05-16):
-  ;;   * axlRunAllTests takes (session-string, X-string), NOT (sdb, name)
-  ;;     — type template "tt" confirmed (open spec decision 10.2).
-  ;;   * The 2nd arg is NOT honoured as a history name. Maestro always
-  ;;     names the new history "Interactive.<N+1>". We pass empty string
-  ;;     pending further investigation of what the field actually drives.
-  ;;   * axlSetHistoryName(handle, name) renames after the fact.
+  ;; Probe findings re-confirmed 2026-05-16:
+  ;;   * axlRunAllTests takes (string, string); type template "tt".
+  ;;   * 2nd arg ignored as a history name; Maestro always auto-names
+  ;;     "Interactive.<N+1>".
   ;;
-  ;; Returns (pvtOk [statusCode subCode actualHistoryName]).
-  (prog (sessR sessName rc statusR newHist hname renameR)
+  ;; Returns (pvtOk t).
+  (prog (sessR sessName rc)
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
+    (setq rc (errset (axlRunAllTests sessName "") nil))
+    (cond
+      ((null rc)
+        (return (pvtErr 'pvt_runner_submit
+                        (lsprintf "axlRunAllTests failed (session %L)"
+                                  sessName)))))
+    (return (pvtOk t))))
+
+
+(procedure (pvtRunnerRename sess historyName)
+  ;; Rename the session's current history entry. DESTRUCTIVE — must be
+  ;; called after the run has reached idle (axlGetRunStatus == [0 0]
+  ;; with prior non-idle observation, OR the sim was cached / no-op).
+  ;; Calling this against a still-finalising setupdb is the documented
+  ;; route to ASSEMBLER-2423 (DECISIONS #54 #5/#6). Returns the actual
+  ;; post-rename name (in case Maestro mangles it).
+  (prog (sessR sessName newHist hname)
     (cond
       ((or (null historyName) (not (stringp historyName)) (equal historyName ""))
         (return (pvtErr 'pvt_validation
@@ -191,25 +228,38 @@
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessName (pvtUnwrap sessR))
 
-    (setq rc (errset (axlRunAllTests sessName "") nil))
-    (cond
-      ((null rc)
-        (return (pvtErr 'pvt_runner_run
-                        (lsprintf "axlRunAllTests failed (session %L)"
-                                  sessName)))))
-
-    ;; Grab the auto-created history handle + rename it to what the caller asked.
     (setq newHist (errset (axlGetCurrentHistory sessName) nil))
     (setq newHist (cond ((listp newHist) (car newHist)) (t nil)))
     (cond
       ((null newHist)
-        (return (pvtErr 'pvt_runner_run
-                        "axlGetCurrentHistory returned nil after run"))))
-    (setq renameR (errset (axlSetHistoryName newHist historyName) nil))
-    ;; Re-read the actual name post-rename (in case Maestro mangled it).
+        (return (pvtErr 'pvt_runner_rename
+                        "axlGetCurrentHistory returned nil"))))
+    (errset (axlSetHistoryName newHist historyName) nil)
     (setq hname (errset (axlGetHistoryName newHist) nil))
     (setq hname (cond ((listp hname) (car hname)) (t historyName)))
+    (return (pvtOk hname))))
 
+
+(procedure (pvtRunnerRun sess historyName)
+  ;; LEGACY (v1) — kept for CIW callers. Atomically dispatches +
+  ;; immediately renames. NOT poll-blocking; the rename races the
+  ;; async sim tail. Safe only for cached / instant runs. Python
+  ;; orchestrator uses Submit + poll + Rename instead.
+  ;;
+  ;; Returns (pvtOk [statusCode subCode actualHistoryName]).
+  (prog (subR renameR statusR sessR sessName hname)
+    (cond
+      ((or (null historyName) (not (stringp historyName)) (equal historyName ""))
+        (return (pvtErr 'pvt_validation
+                        "historyName must be a non-empty string"))))
+    (setq subR (pvtRunnerSubmit sess))
+    (cond ((pvtIsErr subR) (return subR)))
+    (setq renameR (pvtRunnerRename sess historyName))
+    (cond ((pvtIsErr renameR) (return renameR)))
+    (setq hname (pvtUnwrap renameR))
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
     (setq statusR (errset (axlGetRunStatus sessName) nil))
     (cond
       ((and statusR (car statusR))
@@ -247,6 +297,21 @@
 
 
 (procedure (pvtRunnerGetStatus sess)
+  ;; CAVEAT (probed 2026-05-16): axlGetRunStatus throws an UNCATCHABLE
+  ;; *Error* "Cannot find a setup database entry for handle 0." when
+  ;; there's no active in-flight run record (i.e. the session is fully
+  ;; idle with no recent run, or some time after a run completes and
+  ;; Maestro drops the active-run handle). errset does NOT trap this
+  ;; class of C-level error; neither does errsetstring or any flag we
+  ;; could find. So we let it escape — the Python caller wraps the
+  ;; bridge call and treats the "handle 0" RuntimeError as semantically
+  ;; equivalent to "idle, no active run." Pre-submit and post-cleanup
+  ;; both surface that way.
+  ;;
+  ;; When the call succeeds, returns (pvtOk [code sub]). Observed
+  ;; values during 2026-05-16 dogfood: [0,0] briefly post-completion,
+  ;; [1,1] post-cached-run, [5,9] post-real-run-completion (DECISIONS
+  ;; #54 #3).
   (prog (sessR r)
     (setq sessR (_pvtRunnerResolveSession sess))
     (cond ((pvtIsErr sessR) (return sessR)))
@@ -258,4 +323,4 @@
                          "axlGetRunStatus returned nil"))))))
 
 
-(printf "[simkit] pvtRunner.il loaded (Phase 3A §3 v1)\n")
+(printf "[simkit] pvtRunner.il loaded (Phase 3A section 3 v1.1: Submit + Rename split)\n")

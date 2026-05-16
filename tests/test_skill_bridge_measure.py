@@ -41,6 +41,9 @@ def _err(category: str, msg: str, source=None):
     ]
 
 
+_SENTINEL_ORIG_CWD = "/orig/cwd/from/parent/virtuoso"
+
+
 def _make_mock_ws(push_return=None, pull_return=None, import_return=True,
                   session="fnxSession0"):
     push_fn = MagicMock(return_value=push_return)
@@ -55,6 +58,7 @@ def _make_mock_ws(push_return=None, pull_return=None, import_return=True,
         "load": load_fn,
         "changeWorkingDir": cwd_fn,
         "setShellEnvVar": env_fn,
+        "getWorkingDir": MagicMock(return_value=_SENTINEL_ORIG_CWD),
         "pvtMeasurePush": push_fn,
         "pvtMeasurePull": pull_fn,
         "axlOutputsImportFromFile": import_fn,
@@ -200,26 +204,30 @@ class TestPvtMeasurePush(unittest.TestCase):
         self.assertEqual(got.rows[0].status, "failed")
         self.assertEqual(got.rows[0].reason, "missing expression")
 
-    def test_changes_working_dir_to_json_parent_when_no_project(self):
+    def test_changes_working_dir_to_json_parent_then_restores(self):
         with tempfile.TemporaryDirectory() as td:
             jp = _make_rendered_json(Path(td))
             ws = _make_mock_ws(push_return=_ok(_push_payload()))
             pvt_measure_push(jp, workspace=ws)
-        # cwd should be the rendered JSON's parent dir.
-        ws._table["changeWorkingDir"].assert_called_once_with(
-            str(jp.parent.resolve())
-        )
+        # Two calls: enter the JSON parent, then restore the sentinel
+        # (DECISIONS #56: cwd-leak protection so a later axlRunAllTests
+        # doesn't inherit the per-verb cwd).
+        calls = ws._table["changeWorkingDir"].call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].args[0], str(jp.parent.resolve()))
+        self.assertEqual(calls[1].args[0], _SENTINEL_ORIG_CWD)
 
-    def test_project_path_pins_pvt_project_env(self):
+    def test_project_path_pins_pvt_project_env_and_restores_cwd(self):
         with tempfile.TemporaryDirectory() as td:
             jp = _make_rendered_json(Path(td))
             pvtproject = Path(td) / ".pvtproject"
             pvtproject.write_text("{}", encoding="utf-8")
             ws = _make_mock_ws(push_return=_ok(_push_payload()))
             pvt_measure_push(jp, pvtproject_path=pvtproject, workspace=ws)
-        ws._table["changeWorkingDir"].assert_called_once_with(
-            str(pvtproject.parent)
-        )
+        calls = ws._table["changeWorkingDir"].call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].args[0], str(pvtproject.parent))
+        self.assertEqual(calls[1].args[0], _SENTINEL_ORIG_CWD)
         ws._table["setShellEnvVar"].assert_called_once_with(
             f"PVT_PROJECT={pvtproject}"
         )
@@ -274,10 +282,13 @@ class TestPvtMeasurePull(unittest.TestCase):
             pvt_measure_pull("/foo", workspace=ws)
         self.assertEqual(ctx.exception.category, "pvt_io")
 
-    def test_changes_working_dir_to_outpath_parent(self):
+    def test_changes_working_dir_to_outpath_parent_then_restores(self):
         ws = _make_mock_ws(pull_return=_ok(_pull_payload()))
         pvt_measure_pull("/tmp/x.snapshot.json", workspace=ws)
-        ws._table["changeWorkingDir"].assert_called_once_with("/tmp")
+        calls = ws._table["changeWorkingDir"].call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].args[0], "/tmp")
+        self.assertEqual(calls[1].args[0], _SENTINEL_ORIG_CWD)
 
 
 # --- pvt_measure_restore --------------------------------------------------

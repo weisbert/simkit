@@ -31,6 +31,7 @@ exceptions (connect failures, malformed responses) propagate unchanged.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -133,17 +134,45 @@ def _unwrap(result: Any) -> Any:
     )
 
 
-def _prep(ws, pvtproject_path: Path) -> None:
-    """Load production files, ``cd`` to the project root, and pin the
-    Virtuoso-side ``PVT_PROJECT`` env var to the path we resolved on
-    the Python side. Pinning is important because the Virtuoso process
-    can have a stale ``PVT_PROJECT`` left over from prior probes /
-    sessions; if it points at a non-existent file, SKILL's
-    ``pvtLoadPvtProject`` fails fast (per DECISIONS #6) before falling
-    back to the cwd walker."""
+@contextmanager
+def _restore_cwd(ws):
+    """Snapshot Virtuoso's working directory on enter; restore on exit.
+
+    Critical for any verb that calls ``changeWorkingDir``. Without this,
+    a subsequent ``axlRunAllTests`` (in this verb or a later one in the
+    same Python process) inherits the project-specific cwd that the
+    earlier verb left behind. Maestro snapshots the parent's cwd into
+    the AXL worker's ``runICRP`` launcher script; if that cwd doesn't
+    contain ``cds.lib`` (which a ``.pvtproject`` dir typically does
+    not), the worker's session configuration fails (`asiGet: no
+    applicable method`), Spectre is never dispatched, the history sits
+    in "pending" forever, and any cleanup op trips the ASSEMBLER-2423
+    "setupdb temporarily locked" modal because Maestro thinks the run
+    is still active. DECISIONS #56 captures the diagnosis.
+    """
+    orig_cwd = ws["getWorkingDir"]()
+    try:
+        yield
+    finally:
+        ws["changeWorkingDir"](str(orig_cwd))
+
+
+@contextmanager
+def _prep(ws, pvtproject_path: Path):
+    """Load production files, ``cd`` to the project root, pin
+    ``PVT_PROJECT``, and restore the original cwd on exit.
+
+    Context-manager form (was a plain procedure in v1) so the verb's
+    body runs inside the cwd-restoration scope. Pinning ``PVT_PROJECT``
+    is important because the Virtuoso process can have a stale value
+    left over from prior probes / sessions; if it points at a
+    non-existent file, SKILL's ``pvtLoadPvtProject`` fails fast (per
+    DECISIONS #6) before falling back to the cwd walker."""
     _load_production_files(ws)
-    ws["changeWorkingDir"](str(pvtproject_path.parent))
-    ws["setShellEnvVar"](f"PVT_PROJECT={pvtproject_path}")
+    with _restore_cwd(ws):
+        ws["changeWorkingDir"](str(pvtproject_path.parent))
+        ws["setShellEnvVar"](f"PVT_PROJECT={pvtproject_path}")
+        yield
 
 
 def pvt_corners_pull(
@@ -159,13 +188,13 @@ def pvt_corners_pull(
     Returns the absolute path of the written sidecar (echoed by SKILL).
     """
     ws = workspace if workspace is not None else _open_workspace()
-    _prep(ws, pvtproject_path)
-    kwargs = {"outPath": str(out_path)}
-    if session is not None:
-        kwargs["sess"] = session
-    if union_name is not None:
-        kwargs["unionName"] = union_name
-    return _unwrap(ws["pvtCornersPull"](**kwargs))
+    with _prep(ws, pvtproject_path):
+        kwargs = {"outPath": str(out_path)}
+        if session is not None:
+            kwargs["sess"] = session
+        if union_name is not None:
+            kwargs["unionName"] = union_name
+        return _unwrap(ws["pvtCornersPull"](**kwargs))
 
 
 def resolve_live_testbench_id(
@@ -211,13 +240,13 @@ def pvt_corners_push(
     Returns the union ``name`` echoed by SKILL on success.
     """
     ws = workspace if workspace is not None else _open_workspace()
-    _prep(ws, pvtproject_path)
-    kwargs: dict = {"unionJsonPath": str(union_json_path)}
-    if session is not None:
-        kwargs["sess"] = session
-    if dry_run:
-        kwargs["dryRun"] = True
-    return _unwrap(ws["pvtCornersPush"](**kwargs))
+    with _prep(ws, pvtproject_path):
+        kwargs: dict = {"unionJsonPath": str(union_json_path)}
+        if session is not None:
+            kwargs["sess"] = session
+        if dry_run:
+            kwargs["dryRun"] = True
+        return _unwrap(ws["pvtCornersPush"](**kwargs))
 
 
 # --------------------------------------------------------------------------
@@ -314,12 +343,13 @@ def _decode_pull_report(raw: Any) -> PvtMeasurePullReport:
     return PvtMeasurePullReport(n_rows=int(n_rows), path=str(path or ""))
 
 
+@contextmanager
 def _prep_measure(
     ws,
     pvtproject_path: Optional[Path],
     cwd_fallback: Optional[Path],
-) -> None:
-    """Common pre-call setup for measure verbs.
+):
+    """Common pre-call setup for measure verbs (context-manager form).
 
     Loads the Phase 3B SKILL modules and ``cd``s the Virtuoso shell to
     either the supplied ``.pvtproject`` directory or to ``cwd_fallback``
@@ -327,13 +357,18 @@ def _prep_measure(
     path is supplied, ``PVT_PROJECT`` is pinned just like the corners
     helpers do — keeps SKILL session-state predictable when both verb
     families share a process.
+
+    Wraps body in :func:`_restore_cwd` so the cwd change does not leak
+    to a subsequent ``axlRunAllTests`` (DECISIONS #56).
     """
     _load_measure_skill_files(ws)
-    if pvtproject_path is not None:
-        ws["changeWorkingDir"](str(pvtproject_path.parent))
-        ws["setShellEnvVar"](f"PVT_PROJECT={pvtproject_path}")
-    elif cwd_fallback is not None:
-        ws["changeWorkingDir"](str(cwd_fallback))
+    with _restore_cwd(ws):
+        if pvtproject_path is not None:
+            ws["changeWorkingDir"](str(pvtproject_path.parent))
+            ws["setShellEnvVar"](f"PVT_PROJECT={pvtproject_path}")
+        elif cwd_fallback is not None:
+            ws["changeWorkingDir"](str(cwd_fallback))
+        yield
 
 
 def pvt_measure_push(
@@ -363,20 +398,19 @@ def pvt_measure_push(
         if rendered_path.parent != Path("")
         else None
     )
-    _prep_measure(ws, pvtproject_path, fallback)
+    with _prep_measure(ws, pvtproject_path, fallback):
+        kwargs: dict = {"renderedJsonPath": str(rendered_path)}
+        if test_name is not None:
+            kwargs["testName"] = test_name
+        if dry_run:
+            kwargs["dryRun"] = True
+        if replace:
+            kwargs["replace"] = True
+        if session is not None:
+            kwargs["sess"] = session
 
-    kwargs: dict = {"renderedJsonPath": str(rendered_path)}
-    if test_name is not None:
-        kwargs["testName"] = test_name
-    if dry_run:
-        kwargs["dryRun"] = True
-    if replace:
-        kwargs["replace"] = True
-    if session is not None:
-        kwargs["sess"] = session
-
-    raw = _unwrap(ws["pvtMeasurePush"](**kwargs))
-    return _decode_push_report(raw)
+        raw = _unwrap(ws["pvtMeasurePush"](**kwargs))
+        return _decode_push_report(raw)
 
 
 def pvt_measure_pull(
@@ -401,18 +435,17 @@ def pvt_measure_pull(
         if snapshot_path.parent != Path("")
         else None
     )
-    _prep_measure(ws, pvtproject_path, fallback)
+    with _prep_measure(ws, pvtproject_path, fallback):
+        kwargs: dict = {"outPath": str(snapshot_path)}
+        if test_name is not None:
+            kwargs["testName"] = test_name
+        if include_signals:
+            kwargs["includeSignals"] = True
+        if session is not None:
+            kwargs["sess"] = session
 
-    kwargs: dict = {"outPath": str(snapshot_path)}
-    if test_name is not None:
-        kwargs["testName"] = test_name
-    if include_signals:
-        kwargs["includeSignals"] = True
-    if session is not None:
-        kwargs["sess"] = session
-
-    raw = _unwrap(ws["pvtMeasurePull"](**kwargs))
-    return _decode_pull_report(raw)
+        raw = _unwrap(ws["pvtMeasurePull"](**kwargs))
+        return _decode_pull_report(raw)
 
 
 def pvt_measure_restore(
@@ -450,26 +483,25 @@ def pvt_measure_restore(
         )
 
     ws = workspace if workspace is not None else _open_workspace()
-    _prep_measure(ws, pvtproject_path, csv.parent.resolve())
+    with _prep_measure(ws, pvtproject_path, csv.parent.resolve()):
+        sess = session if session is not None else ws["axlGetWindowSession"]()
+        if not sess:
+            raise SkillBridgeError(
+                "pvt_validation",
+                "no active Maestro session — pass --session or open Maestro",
+            )
 
-    sess = session if session is not None else ws["axlGetWindowSession"]()
-    if not sess:
-        raise SkillBridgeError(
-            "pvt_validation",
-            "no active Maestro session — pass --session or open Maestro",
-        )
+        kwargs: dict = {"operation": operation}
+        if test_name is not None:
+            kwargs["test"] = test_name
 
-    kwargs: dict = {"operation": operation}
-    if test_name is not None:
-        kwargs["test"] = test_name
-
-    rv = ws["axlOutputsImportFromFile"](sess, str(csv), **kwargs)
-    if rv is None or rv is False:
-        raise SkillBridgeError(
-            "pvt_io",
-            f"axlOutputsImportFromFile returned {rv!r} for {csv}",
-            str(csv),
-        )
+        rv = ws["axlOutputsImportFromFile"](sess, str(csv), **kwargs)
+        if rv is None or rv is False:
+            raise SkillBridgeError(
+                "pvt_io",
+                f"axlOutputsImportFromFile returned {rv!r} for {csv}",
+                str(csv),
+            )
 
 
 def _load_runner_skill_files(ws) -> None:
@@ -516,20 +548,180 @@ def pvt_runner_enable_only(
     return [(name, bool(b), bool(a)) for name, b, a in raw]
 
 
-def pvt_runner_run(
-    history_name: str, *, session: str, workspace: Any = None,
-) -> tuple[int, int, str]:
-    """Run all enabled tests on all enabled corners. BLOCKING.
+def pvt_runner_submit(
+    *, session: str, workspace: Any = None,
+) -> None:
+    """Dispatch ``axlRunAllTests`` on the session. Fire-and-forget.
 
-    Returns ``(status_code, sub_code, actual_history_name)``. The SKILL
-    side runs `axlRunAllTests` (which auto-names the new entry "Interactive.NN")
-    then renames it to ``history_name`` via `axlSetHistoryName`. The
-    returned actual name is what the caller should pass to `pvt_save`.
+    Returns once Maestro has accepted the dispatch; the sims continue
+    running in the background. Caller must poll
+    :func:`pvt_runner_get_status` until idle BEFORE calling
+    :func:`pvt_runner_rename` or any other mutating op against the same
+    setupdb, else risks the ASSEMBLER-2423 modal that wedges the
+    bridge (DECISIONS #54).
     """
     ws = workspace if workspace is not None else _open_workspace()
     _load_runner_skill_files(ws)
-    raw = _unwrap(ws["pvtRunnerRun"](session, history_name))
-    return (int(raw[0]), int(raw[1]), str(raw[2]))
+    _unwrap(ws["pvtRunnerSubmit"](session))
+
+
+def pvt_runner_rename(
+    history_name: str, *, session: str, workspace: Any = None,
+) -> str:
+    """Rename the session's current history entry. DESTRUCTIVE.
+
+    Must only run once the prior dispatch has reached idle. Returns
+    the actual post-rename name (Maestro may sanitise).
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(ws["pvtRunnerRename"](session, history_name))
+    return str(raw)
+
+
+# axlGetRunStatus throws an uncatchable C-level error when there is no
+# active in-flight run record (handle 0). errset can't trap it; neither
+# can errsetstring. Per 2026-05-16 probe, the message is exact and
+# stable. Treat its appearance as semantically "no active run = idle."
+_RUN_STATUS_NO_ACTIVE_MARKERS = (
+    "Cannot find a setup database entry for handle 0",
+)
+
+
+def pvt_runner_get_status(
+    *, session: str, workspace: Any = None,
+) -> tuple[int, int]:
+    """Read ``axlGetRunStatus`` for the session.
+
+    Returns ``(code, sub)``. Raises :class:`SkillBridgeError` for any
+    SKILL-side ``pvt_err``. The "no active run" RuntimeError is
+    translated to a synthetic ``(0, 0)`` because the C call escapes all
+    SKILL trap mechanisms on that path (see pvtRunner.il caveat).
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    try:
+        raw = _unwrap(ws["pvtRunnerGetStatus"](session))
+    except RuntimeError as exc:
+        msg = str(exc)
+        if any(m in msg for m in _RUN_STATUS_NO_ACTIVE_MARKERS):
+            return (0, 0)
+        raise
+    return (int(raw[0]), int(raw[1]))
+
+
+def pvt_runner_run(
+    history_name: str, *,
+    session: str,
+    poll_interval: float = 2.0,
+    timeout_sec: float = 1800.0,
+    idle_confirm_reads: int = 2,
+    dispatch_grace_reads: int = 2,
+    initial_wait_sec: float = 0.0,
+    post_idle_quiesce_sec: float = 0.0,
+    workspace: Any = None,
+    _sleep=None,
+) -> tuple[int, int, str]:
+    """Submit a run, poll-to-idle, rename. BLOCKING for real.
+
+    v1.1 (2026-05-16) rewrite — was a thin wrapper over the legacy
+    ``pvtRunnerRun`` which returned immediately after dispatch and
+    renamed the history while the sim was still in-flight, risking
+    ASSEMBLER-2423 (DECISIONS #54). v1.1 uses pvtRunnerSubmit +
+    poll-loop on pvtRunnerGetStatus + pvtRunnerRename, ensuring the
+    rename only fires when Maestro is truly idle.
+
+    Returns ``(final_code, final_sub, actual_history_name)``.
+
+    Args:
+        history_name: name the caller wants the new history entry to
+            carry. Renamed post-completion via
+            :func:`pvt_runner_rename`.
+        session: Maestro session name (e.g. ``fnxSession0``).
+        poll_interval: seconds between ``axlGetRunStatus`` polls. Each
+            poll is one bridge round-trip; pick to balance latency vs
+            chatter. Default 2.0.
+        timeout_sec: hard ceiling on the whole submit→idle wait. Default
+            1800s (30 min) — large enough for typical PVT sweeps but
+            not so large that a wedged sim silently consumes a session.
+        idle_confirm_reads: after observing a non-idle state, require
+            this many consecutive idle reads before declaring done.
+            Guards against a brief momentary [0,0] mid-transition.
+        dispatch_grace_reads: when the loop never observes non-idle,
+            allow up to this many consecutive idle reads as "cached /
+            no-op completion" before declaring done. This handles the
+            S1-style re-run-the-already-cached-corner case where the
+            full submit→complete happens between two poll intervals.
+        initial_wait_sec: extra sleep AFTER submit and BEFORE the first
+            poll. Use when the session's ``axlGetRunStatus`` is unable
+            to report in-flight state and the loop would otherwise
+            exit via dispatch_grace before Spectre has even started.
+            Set to e.g. 30-60s for sessions where post-completion
+            destructive ops are seen to hit ASSEMBLER-2423 (DECISIONS
+            #54 / #55). Default 0 keeps the cached-path fast.
+        post_idle_quiesce_sec: extra sleep AFTER the loop reports
+            idle, BEFORE pvtRunnerRename fires. Lets Maestro release
+            the setupdb lock; mirrors the ASSEMBLER-2423 mitigation.
+        workspace: optional pre-opened skillbridge Workspace.
+        _sleep: hook for tests; defaults to ``time.sleep``.
+
+    Raises :class:`SkillBridgeError` on submit failure, rename failure,
+    or timeout.
+    """
+    import time
+    sleep = _sleep if _sleep is not None else time.sleep
+
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+
+    if not history_name or not isinstance(history_name, str):
+        raise SkillBridgeError(
+            "pvt_validation",
+            "history_name must be a non-empty string",
+        )
+
+    pvt_runner_submit(session=session, workspace=ws)
+
+    if initial_wait_sec > 0:
+        sleep(initial_wait_sec)
+        elapsed_initial = initial_wait_sec
+    else:
+        elapsed_initial = 0.0
+
+    last_code, last_sub = 0, 0
+    saw_non_idle = False
+    idle_streak = 0
+    elapsed = elapsed_initial
+    while elapsed < timeout_sec:
+        sleep(poll_interval)
+        elapsed += poll_interval
+        code, sub = pvt_runner_get_status(session=session, workspace=ws)
+        last_code, last_sub = code, sub
+        is_idle = (code == 0 and sub == 0)
+        if is_idle:
+            idle_streak += 1
+            if saw_non_idle and idle_streak >= idle_confirm_reads:
+                break  # transitioned non-idle → idle for N reads: done for real
+            if (not saw_non_idle) and idle_streak >= dispatch_grace_reads:
+                break  # never observed non-idle: cached / no-op completion
+        else:
+            saw_non_idle = True
+            idle_streak = 0
+    else:
+        raise SkillBridgeError(
+            "pvt_runner_timeout",
+            f"axlRunAllTests did not return to idle in {timeout_sec}s "
+            f"(last status [{last_code}, {last_sub}])",
+            session,
+        )
+
+    if post_idle_quiesce_sec > 0:
+        sleep(post_idle_quiesce_sec)
+
+    actual_name = pvt_runner_rename(
+        history_name, session=session, workspace=ws,
+    )
+    return (last_code, last_sub, actual_name)
 
 
 def pvt_runner_delete_history(
@@ -543,15 +735,6 @@ def pvt_runner_delete_history(
     ws = workspace if workspace is not None else _open_workspace()
     _load_runner_skill_files(ws)
     _unwrap(ws["pvtRunnerDeleteHistory"](session, history_name))
-
-
-def pvt_runner_get_status(
-    *, session: str, workspace: Any = None,
-) -> tuple[int, int]:
-    ws = workspace if workspace is not None else _open_workspace()
-    _load_runner_skill_files(ws)
-    raw = _unwrap(ws["pvtRunnerGetStatus"](session))
-    return (int(raw[0]), int(raw[1]))
 
 
 def pvt_save(
@@ -574,18 +757,19 @@ def pvt_save(
     ws = workspace if workspace is not None else _open_workspace()
     _load_runner_skill_files(ws)
     pvtproject_path = Path(pvtproject_path).expanduser().resolve()
-    ws["changeWorkingDir"](str(pvtproject_path.parent))
-    ws["setShellEnvVar"](f"PVT_PROJECT={pvtproject_path}")
-    kwargs: dict[str, Any] = {"histName": history_name}
-    if label is not None:
-        kwargs["label"] = label
-    if note is not None:
-        kwargs["note"] = note
-    if session is not None:
-        kwargs["explicitSess"] = session
-    raw = ws["PvtSave"](**kwargs)
-    # PvtSave returns (pvt_ok run-dir-path) on success.
-    return _unwrap(raw)
+    with _restore_cwd(ws):
+        ws["changeWorkingDir"](str(pvtproject_path.parent))
+        ws["setShellEnvVar"](f"PVT_PROJECT={pvtproject_path}")
+        kwargs: dict[str, Any] = {"histName": history_name}
+        if label is not None:
+            kwargs["label"] = label
+        if note is not None:
+            kwargs["note"] = note
+        if session is not None:
+            kwargs["explicitSess"] = session
+        raw = ws["PvtSave"](**kwargs)
+        # PvtSave returns (pvt_ok run-dir-path) on success.
+        return _unwrap(raw)
 
 
 def resolve_pvtproject_path(explicit: Optional[str]) -> Path:

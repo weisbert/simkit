@@ -1100,7 +1100,83 @@ _Date: 2026-05-16_
 - ⚠️ Cleanup left 2 orphan histories (`orch_s1_s1_baseline_TT_1778932203_1`, `orch_s2_s2_temp_sweep_1778932284_1`) — recommend user clears via Maestro GUI History panel (right-click delete).
 
 **v1.1 Phase 3A backlog (immediate):**
-- `pvtRunnerRunBlocking` with poll-to-idle (resolves the misleading "Run" semantics).
+- `pvtRunnerRunBlocking` with poll-to-idle (resolves the misleading "Run" semantics). **DONE 2026-05-16 via #55 — but discriminator turned out to be blind on fnxSession0; see #55 for the residual gap and v1.2 plan.**
 - `pvt corners push --replace` mode (or clarify the v1 ADD-semantics).
 - Strategy chain wired into `execute()` per-corner failure detection (per #52 plumbing already in place).
 - `gmin_bump` + `trans_pss_ic` built-in strategies after asi* probe phase.
+
+
+## #55 — Phase 3A v1.1 #1: split Submit/Rename + Python poll-to-idle; `axlGetRunStatus` discriminator is blind
+_Date: 2026-05-16_
+
+**Decision:** v1's monolithic `pvtRunnerRun` (`axlRunAllTests` + immediate `axlSetHistoryName`) is split into `pvtRunnerSubmit` (dispatch-only) and `pvtRunnerRename` (rename-current-history-only). The Python orchestrator's `pvt_runner_run` now wraps the split with a poll-to-idle state machine using `axlGetRunStatus` as the discriminator. Tier-1 grows +13 cases for the validation paths; live-verified cached path returns cleanly in 3.4s with no ASSEMBLER-2423.
+
+**Why the split:** Per DECISIONS #54, `axlSetHistoryName` against a still-finalising setupdb is the documented route to ASSEMBLER-2423. The Submit/Rename split gives the Python orchestrator a seam to insert "wait until safe" between dispatch and rename. Putting the poll loop in Python (vs SKILL `sleep`) keeps the bridge IPC responsive (per `reference_skillbridge_recovery.md`: never kill mid-call), allows sub-second poll intervals, and gives Python ownership of timeout/cancellation.
+
+**State-machine shape (`pvt_runner_run`):**
+- Submit, optional `initial_wait_sec` sleep, then loop:
+- Each iteration: `time.sleep(poll_interval)` → call `pvt_runner_get_status`.
+- `sawNonIdle` flag flips on first non-`[0,0]` read.
+- Exit on `sawNonIdle and idle_streak >= idle_confirm_reads` (real run done) OR `not sawNonIdle and idle_streak >= dispatch_grace_reads` (cached / no-op completion).
+- Optional `post_idle_quiesce_sec` sleep before `pvtRunnerRename` to let Maestro release the setupdb lock.
+- Timeout raises `SkillBridgeError(pvt_runner_timeout)` without renaming.
+
+**Handle-0 RuntimeError translation:** `axlGetRunStatus(sess)` throws an *uncatchable* C-level `*Error* error: Cannot find a setup database entry for handle 0.` when there is no active in-flight run record. SKILL `errset` / `errsetstring` / `(errset … t)` / a hypothetical `errSetSeverityFatal` flag ALL fail to trap it (probed 2026-05-16). The Python wrapper catches the `RuntimeError` and translates the "handle 0" message to a synthetic `(0, 0)` because semantically that means "no run in flight".
+
+**Residual gap (live-verified): `axlGetRunStatus` is blind on fnxSession0.** During the 2026-05-16 dogfood:
+- Cached path: state machine takes `dispatch_grace` branch, returns in ~3s, rename + delete clean. ✅
+- Real-Spectre path (TT_v11verify, temp=56 forced fresh sim): submit dispatched the run; `axlGetRunStatus` returned `[0,0]` consistently for **90+ seconds** while Spectre was visibly still running (verified via `axlGetCurrentHistory` showing a fresh `Interactive.0` handle that never advanced to a "completed" state during the window). State machine exited via `dispatch_grace` at ~6s. The rename DID succeed mid-sim — Maestro accepts rename on the new history even while in-flight — BUT subsequent `pvtRunnerDeleteHistory` hit ASSEMBLER-2423 because the setupdb lock was still active. So the architectural improvement landed, but the polling discriminator is **insufficient on this session's installation**.
+
+**Why `axlGetRunStatus` is blind here:** unknown. DECISIONS #54 observed it returning `[1,1]` / `[5,9]` on the SAME session days earlier. Possibly session-state dependent (was the SKILL `sleep` test corrupting something? Was there a per-session initialisation that drifted?). Probed `axlGetRunMode`/`axlIsRunning`/`axlGetRunningTests` — none exist. Other candidate APIs (`axlGetCurrentHistory` handle introspection, slot access on the history handle) don't expose an in-flight signal either.
+
+**Mitigation in v1.1:** new kwargs `initial_wait_sec` (sleep BEFORE first poll) and `post_idle_quiesce_sec` (sleep AFTER loop exits, BEFORE rename). Defaults 0 to keep cached-path fast. Callers who know their sims take ≥ N seconds can pass `initial_wait_sec=N` as a manual override; the loop then doesn't get a chance to exit prematurely. NOT ideal but pragmatic — the architectural split is the real value-add of v1.1; the discriminator can swap independently.
+
+**Robust discriminator (v1.2 task, priority HIGH):** reuse the Phase 1 collector's `_pvtCollWalkRdb` to count rows with status `'running` in the current history's rdb. When count drops to 0 AND stays 0 for `idle_confirm_reads` polls, the run is truly done. Implementation sketch: new SKILL helper `pvtRunnerCountRunning(sess)` that opens the current-history rdb via `maeReadResDB`, walks the test list, returns count of `tst->status == 'running`. Plumbing exists (collector loads it already); just need to expose count and wire into the Python state machine as a parallel signal.
+
+**Code surface changes:**
+- SKILL: `pvtRunnerSubmit` (+13 lines), `pvtRunnerRename` (+25 lines), `pvtRunnerRun` slimmed to a thin wrapper over Submit+Rename for back-compat CIW use.
+- Python: `pvt_runner_run` rewritten with state machine + 8 kwargs; `pvt_runner_submit` / `pvt_runner_rename` exposed; `pvt_runner_get_status` gains handle-0 translation.
+- Tests: +13 Tier-1 SKILL cases (validation paths only); +9 Python state-machine cases including timeout, idle-confirm-requires-consecutive, dispatch_grace, handle-0 translation, empty-history rejection. Python suite 835 → 868 (+33). SKILL Tier-1 394/1 → 407/1.
+- Orchestrator: `execute()` gains `run_kwargs` passthrough for poll tuning.
+
+**Pre-existing breakage surfaced:** the `(load runTests.il)` atomic driver path is broken in this dev tree (fails at line 168 = first inner load) regardless of v1.1 changes; the alternative bypass-loop (load each file individually + `(pvtTestRun)`) gives a clean 407/1. Driver fix deferred — not v1.1 #1 scope.
+
+**Live cleanup owed to user:** the real-Spectre verify and the follow-up probe BOTH left a stuck-in-flight `Interactive.0` plus a renamed `orch_v11_real_1778936686`. Both are still locked by Maestro (verified via the ASSEMBLER-2423 trip during attempted delete). User clears via Maestro GUI History panel (right-click delete) once the sim is truly done. Cornerwise the session is back to the 3-row baseline (`TT` / `TT_pvt` / `TT_2p5G`).
+
+**CORRECTION 2026-05-16 (post-#56 diagnosis):** The "`axlGetRunStatus` is blind on this session" framing above is **almost certainly wrong**. Cross-session debugging with a parallel agent found the AXL worker was never dispatching Spectre at all — Maestro's `runICRP21` launcher was `cd`-ing to `/home/yusheng/cadence_work/simkit_p3b_dogfood` (no `cds.lib`), where session config fails with `asiGet: no applicable method`, the worker exits, the history sits in "pending" forever, AND Maestro keeps the `actively running` flag set so destructive ops trip ASSEMBLER-2423. The 90-second `[0,0]` polling result is actually **semantically correct**: there really is no run in flight — but for a config-error reason, not a "discriminator blind" reason. The wrong `cd` path came from `skill_bridge.py`'s `_prep` calling `changeWorkingDir(simkit_p3b_dogfood)` for the prior `pvt_corners_pull`, which Maestro then snapshotted at next `axlRunAllTests`. Fix is `_prep` cwd snapshot/restore (DECISIONS #56). Re-verify against a clean fnxSession0 should show `axlGetRunStatus` returning the [1,1]/[5,9] codes originally documented in DECISIONS #54.
+
+
+## #56 — Phase 3A v1.1 #1 root-cause correction: `_prep` cwd-leak crashes the AXL worker
+_Date: 2026-05-16_
+
+**Decision:** `skill_bridge.py` verbs that call `changeWorkingDir` (`_prep`, `_prep_measure`, `pvt_save`) now snapshot the parent Virtuoso's working directory on entry and restore it on exit. Implementation: convert `_prep` / `_prep_measure` from plain procedures to context managers; wrap `pvt_save`'s body in a new `_restore_cwd(ws)` context manager that saves cwd via `getWorkingDir()` and restores via `changeWorkingDir(orig)` in the `finally` clause. Verbs are migrated from `_prep(ws, path)` + body → `with _prep(ws, path): body`.
+
+**Why:** `axlRunAllTests` snapshots the parent Virtuoso's current working directory into the generated `runICRP<N>` launcher script (Maestro creates one per dispatch). If that cwd doesn't contain `cds.lib`, the AXL worker fails to find any library — `ddUpdateLibList` warning, `asiGet: no applicable method` error during session configuration — Spectre never dispatches, the history sits in `pending` forever, AND Maestro keeps the "actively running" flag set so any subsequent cleanup op (delete history, rename) trips the ASSEMBLER-2423 modal. **`changeWorkingDir` for one verb leaks into the cwd inherited by the NEXT verb's dispatch.**
+
+**Diagnostic incident (2026-05-16, parallel-agent investigation):** the v1.1 #1 live verify (DECISIONS #55) ran:
+1. `pvt_corners_pull(baseline)` — `_prep('/home/yusheng/cadence_work/simkit_p3b_dogfood/.pvtproject')` → `changeWorkingDir(simkit_p3b_dogfood)` (this is a `.pvtproject` data dir, NOT a Virtuoso project dir, so no `cds.lib`)
+2. `pvt_runner_run(...)` → `axlRunAllTests` → Maestro snapshots `simkit_p3b_dogfood` into `runICRP21` → worker boots there → AXL config fails (`asiGet: no applicable method for the classes ... list(symbol)`) → no spectre dispatched
+3. `axlGetRunStatus(sess)` returns `[0,0]` (correctly: no in-flight run) → state machine exits via dispatch_grace
+4. `pvtRunnerRename` succeeds (Maestro accepts rename on the empty `Interactive.<N>` shell)
+5. `pvtRunnerDeleteHistory` trips ASSEMBLER-2423 (Maestro thinks the run is still active because the worker never explicitly reported termination — it just crashed)
+
+The parallel agent's smoking gun was `cat runICRP21 | grep '^cd '` showing literal `cd /home/yusheng/cadence_work/simkit_p3b_dogfood`. Cross-verified via skillbridge: `ddGetObj("sim_yusheng")~>readPath` returned `/home/yusheng/cadence_work/Test/workarea/sim_yusheng`, confirming the correct workdir is `Test/workarea`, which is also where the parent Virtuoso's `$PWD` was at the time of inspection (just not at the time of axlRunAllTests). Manual GUI runs work because the user clicks Run from a state where parent `$PWD` is still `Test/workarea`.
+
+**Why the prior Phase 3A v1 dogfood "worked" anyway:** S1 succeeded because the corner was already cached — no real Spectre dispatch needed, so the worker config failure didn't bite. S2's "Real-Spectre wall-clock NOT measured" symptom (DECISIONS #54) is the same cwd-leak in disguise: PvtSave returned data because it walks the in-memory rdb (which still had Phase 3B v1.x runs in it), and the "real" sim never started.
+
+**Surface changes:**
+- `python/simkit/skill_bridge.py`: add `_restore_cwd(ws)` ctx manager + `from contextlib import contextmanager`; convert `_prep` / `_prep_measure` to `@contextmanager` form; wrap `pvt_corners_pull` / `pvt_corners_push` / `pvt_measure_push` / `pvt_measure_pull` / `pvt_measure_restore` / `pvt_save` bodies in `with` blocks.
+- Tests: `_make_mock_ws` in both `test_skill_bridge.py` and `test_skill_bridge_measure.py` gain a `getWorkingDir` mock returning sentinel `/orig/cwd/from/parent/virtuoso`. 4 existing `assert_called_once_with` cwd-pinning tests updated to assert `[enter, restore]` 2-call contract. +3 new tests: `pvt_save` happy-path restore, `pvt_save` restore-on-error, `pvt_corners_pull` restore-on-error. Python suite 868 → 871 / 0.
+- SKILL: untouched (the leak is purely on the Python orchestration side).
+
+**Re-verify owed:** with the cwd fix in place + bridge recovered, run S1 + S2 again on fnxSession0. Expectation: `runICRP<N>` should now `cd Test/workarea` (or wherever parent Virtuoso started), worker boots cleanly, Spectre dispatches, `axlGetRunStatus` returns the [1,1]/[5,9] codes DECISIONS #54 originally observed, cleanup-via-delete-history succeeds without modal. If verify holds, DECISIONS #55's "discriminator blindness" framing retires and v1.2 #1 (rdb-walker discriminator) drops from HIGH to "robustness improvement, do when convenient."
+
+**Re-verify result 2026-05-16 (LATER, post-bridge-recovery):** CWD FIX CONFIRMED WORKING. Job27.log was written to `/home/yusheng/cadence_work/Test/workarea/logs_yusheng/logs0/` (the correct dir with `cds.lib`), NOT `simkit_p3b_dogfood/logs_*/`. AXL worker boots cleanly. **Spectre actually dispatches** (vs. prior "no spectre processes" symptom) — proven by the per-corner netlist dir `.tmpADEDir_yusheng/Test/sim_yusheng_Test_config_spectre/netlist/input.scs` materialising and Spectre running far enough to emit its own error (SFE-73 on a synthetic test corner — unrelated to simkit, my TT_v11verify model substitution issue).
+
+Three discoveries from the re-verify:
+1. **Discriminator vindicated.** `axlGetRunStatus` returning `[0,0]` was correct all along — no in-flight run = `[0,0]`. v1.2 #1 (rdb-walker discriminator) is **demoted from HIGH to "robustness improvement, do when convenient"**, contingent on observing a successful real run's transitions.
+2. **ASSEMBLER-2423 on cleanup is a SEPARATE problem.** Even when Spectre exits (success OR error), Maestro keeps the history's `actively running` flag set until the worker formally finishes — a delete-history op meanwhile hits the lock. This is Maestro flag-stickiness, *independent* of the discriminator. A perfect "is-running" check wouldn't help. The right fix is one of: (a) wait for the worker process to actually exit (`ps -p <pid>` poll), (b) check `axlGetCurrentHistory`'s post-run state for a "done" marker, (c) catch the error and treat as "completed with error" instead of treating delete failure as crash. v1.2 takes this as a separate ticket.
+3. **The S2 "real-Spectre wall-clock NOT measured" symptom (DECISIONS #54)** retroactively explains itself: cwd-leak prevented worker boot, no Spectre, hence no wall-clock to measure. With #56 fixed, a clean real-Spectre dogfood is finally possible.
+
+**Robustness note:** the fix is "polite Python" (every entry has a matching exit) but doesn't fix the underlying Maestro quirk (cwd snapshot at dispatch time is non-obvious global state). If a user runs CIW commands that `changeWorkingDir` between simkit verbs, the cwd they end up in IS what Maestro will use. Document expectation: *the parent Virtuoso's cwd at any moment between simkit verbs should be a dir that contains `cds.lib`*. The fix means simkit never violates this; the user's own scripts still can.
+

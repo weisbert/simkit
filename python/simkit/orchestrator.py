@@ -335,6 +335,7 @@ def execute(
     push_union: bool = True,
     ingest_cb=None,
     item_done_cb=None,
+    run_kwargs: Optional[dict] = None,
 ) -> ExecuteReport:
     """Drive Maestro through the plan via ``bridge``. v1 sync-blocking path.
 
@@ -359,6 +360,11 @@ def execute(
                 ``simkit.ingest.ingest_run_dir``.
         item_done_cb: Optional callable(ItemResult) — invoked after each
                 item completes (for progress UI).
+        run_kwargs: Optional dict forwarded to ``bridge.pvt_runner_run``
+                per item. Use to tune ``poll_interval`` /
+                ``timeout_sec`` / ``idle_confirm_reads`` /
+                ``dispatch_grace_reads`` for unusually short or long
+                sims. None = bridge defaults.
     """
     import time
 
@@ -407,7 +413,9 @@ def execute(
                   f"running history={history} (this blocks until sim done)…")
             actual_history = history
             try:
-                rv = bridge.pvt_runner_run(history, session=session)
+                rv = bridge.pvt_runner_run(
+                    history, session=session, **(run_kwargs or {}),
+                )
                 # rv may be (status, sub) for legacy mocks or
                 # (status, sub, actual_name) for the live bridge.
                 if isinstance(rv, tuple) and len(rv) >= 3:

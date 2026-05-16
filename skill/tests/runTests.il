@@ -172,6 +172,7 @@
 (load (strcat PVT_SKILL_ROOT "/pvtCollect.il"))
 (load (strcat PVT_SKILL_ROOT "/pvtCorners.il"))
 (load (strcat PVT_SKILL_ROOT "/pvtMeasure.il"))
+(load (strcat PVT_SKILL_ROOT "/pvtRunner.il"))
 
 (load (strcat PVT_TEST_ROOT "/testPvtJson.il"))
 (load (strcat PVT_TEST_ROOT "/testPvtProject.il"))
@@ -179,5 +180,6 @@
 (load (strcat PVT_TEST_ROOT "/testPvtCollect.il"))
 (load (strcat PVT_TEST_ROOT "/testPvtCorners.il"))
 (load (strcat PVT_TEST_ROOT "/testPvtMeasure.il"))
+(load (strcat PVT_TEST_ROOT "/testPvtRunner.il"))
 
 (pvtTestRun)

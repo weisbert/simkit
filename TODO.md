@@ -248,7 +248,24 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 - [ ] **Gate R4** — Ad-hoc mode parity: `pvt run --tests T1 --union U.union.json` produces identical DB result rows to a single-item review with the same content.
 - [ ] Live dogfood on user's real BT2GRX-style or fnxSession0 review (whichever session the user picks). Observe friction, capture as DECISIONS / v1.1 backlog.
 
-### Deferred to Phase 3A v1.1 (do NOT block v1):
+### Phase 3A v1.1 — DONE 2026-05-16
+
+- [x] **#1 (architectural): split SKILL `pvtRunnerRun` → `pvtRunnerSubmit` + `pvtRunnerRename`** so Python can insert poll-to-idle between dispatch and rename (DECISIONS #55). Legacy `pvtRunnerRun` kept as a thin wrapper for direct CIW callers.
+- [x] **#1 (Python state machine):** `pvt_runner_run` rewritten — Submit → poll loop on `pvt_runner_get_status` with `saw_non_idle` + `idle_streak` + `dispatch_grace` exit branches → Rename. New kwargs: `poll_interval`, `timeout_sec`, `idle_confirm_reads`, `dispatch_grace_reads`, `initial_wait_sec`, `post_idle_quiesce_sec`.
+- [x] **#1 (handle-0 translation):** `axlGetRunStatus` throws an *uncatchable* C-level error when there's no in-flight run; Python wrapper catches the RuntimeError and translates the "handle 0" message to synthetic `(0, 0)` (errset can't trap this; probed 2026-05-16).
+- [x] **#1 (Tier-1):** new `skill/tests/testPvtRunner.il` covers validation paths (empty/nil/non-string `historyName` rejected by `pvtRunnerRename` and legacy `pvtRunnerRun`; `_pvtRunnerResolveSession` string-passthrough; existence of all 8 production procs). SKILL Tier-1 394/1 → 407/1.
+- [x] **#1 (Python tests):** 9 new state-machine cases in `tests/test_skill_bridge.py` (cached path, real-run path, handle-0 translation, timeout, idle_confirm_requires_consecutive, empty-name pre-submit rejection, get_status translation isolation). Python 835 → 868.
+- [x] **#1 (orchestrator):** `execute()` gains optional `run_kwargs` dict forwarded to `pvt_runner_run` per item, so callers can tune poll/timeout/grace without rewiring.
+- [x] **#1 (live verify):** cached path on `fnxSession0` → 3.4s, no ASSEMBLER-2423 on subsequent delete. Real-Spectre path on `fnxSession0` (TT_v11verify, temp=56) → exposed that `axlGetRunStatus` is BLIND on this installation; state machine exits via dispatch_grace too early; rename works mid-sim but post-run destructive ops still hit the modal. Documented as the v1.2 #1 follow-up.
+
+### Phase 3A v1.2 — IN PROGRESS (immediate next)
+
+- [ ] **#1 (priority HIGH): swap the polling discriminator.** Add SKILL `pvtRunnerCountRunning(sess)` that opens current-history rdb via `maeReadResDB`, walks `tst->pointID`, returns count of rows where `tst->status == 'running`. Wire into Python state machine as the PRIMARY signal; keep `axlGetRunStatus` as a secondary check for sessions where it does work. The collector's `_pvtCollWalkRdb` is the right call site — collector already proves walking the rdb is safe during the async tail (DECISIONS #54 #4).
+- [ ] **#2: `pvt corners push --replace`** — current ADD-semantics surface unexpectedly (per DECISIONS #54 #8). Either add `--replace` flag or change default. v1.1 live verify worked around by deleting the added corner directly via `axlRemoveElement` (which interestingly did NOT trip ASSEMBLER-2423 even with the setupdb lock active — interesting data point for the discriminator design).
+- [ ] **#3: per-corner failure detection + strategy chain wired in `execute()`** — §4 `Strategy` + `naive_retry` plumbing is in place; what's missing is post-PvtSave query against just-ingested DB rows to identify FAIL corners + dispatch the strategy chain. Depends on #1 being solid because per-corner verdict reading is meaningless until the run-completion signal is reliable.
+- [ ] **runTests.il atomic loader fix** — separate pre-existing breakage surfaced during v1.1 verify: `(load runTests.il)` fails at line 168 (first inner load) regardless of v1.1 changes; bypass-loop (load each file individually + `(pvtTestRun)`) is the workaround. Not on the v1.1 critical path; pin as a tools-clean-up task.
+
+### Deferred to Phase 3A v1.3 (do NOT block v1.2):
 
 - **`gmin_bump` strategy** — needs targeted `asi*` probe: `asiAddSimOption` signature + how to scope to single-corner / single-test override + how to revert.
 - **`trans_pss_ic` strategy** — needs `asiChangeAnalysis` / PSS-analysis-form probe: where IC field lives, how to point at a `spectre.fc` from a precursor trans, parameterizable trans duration + IC mapping.
