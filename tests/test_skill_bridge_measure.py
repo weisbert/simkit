@@ -350,10 +350,32 @@ class TestDataclasses(unittest.TestCase):
     def test_push_row_default_reason(self):
         r = PvtMeasurePushRow(name="x", status="added")
         self.assertIsNone(r.reason)
+        # v1.4 #5 — spec_status defaults to None (no spec on this row).
+        self.assertIsNone(r.spec_status)
+
+    def test_push_row_spec_status_field(self):
+        r = PvtMeasurePushRow(name="x", status="added", spec_status="ok")
+        self.assertEqual(r.spec_status, "ok")
 
     def test_push_report_default_rows_empty(self):
         rep = PvtMeasurePushReport(n_pushed=0)
         self.assertEqual(rep.rows, ())
+
+    def test_decode_push_row_captures_spec_status(self):
+        # v1.4 #5 — the SKILL push report attaches spec_status per row when
+        # the row carried a non-empty spec. _decode_push_row must surface it
+        # so the CLI table formatter can show it.
+        from simkit.skill_bridge import _decode_push_row
+        raw = {"name": "Rtime_Vout", "status": "added", "spec_status": "ok"}
+        r = _decode_push_row(raw)
+        self.assertEqual(r.name, "Rtime_Vout")
+        self.assertEqual(r.spec_status, "ok")
+
+    def test_decode_push_row_spec_status_absent(self):
+        from simkit.skill_bridge import _decode_push_row
+        raw = {"name": "Plain", "status": "added"}
+        r = _decode_push_row(raw)
+        self.assertIsNone(r.spec_status)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1169,9 +1169,32 @@ def _run_apply(args) -> int:
         f"applied{marker}: pushed {report.n_pushed} row(s) "
         f"to test={bundle.test_name!r}"
     )
+    # Width-align the output name column so the spec/reason fields line up.
+    name_col = max((len(r.name) for r in report.rows), default=0)
+    n_spec_ok = 0
+    n_spec_failed = 0
     for r in report.rows:
-        suffix = f"  -- {r.reason}" if r.reason else ""
-        print(f"  [{r.status:<14}] {r.name}{suffix}")
+        spec_text = ""
+        if r.spec_status is not None:
+            spec_text = f"  spec: {r.spec_status}"
+            if r.spec_status == "ok":
+                n_spec_ok += 1
+            else:
+                n_spec_failed += 1
+        reason_text = f"  -- {r.reason}" if r.reason else ""
+        print(
+            f"  [{r.status:<14}] {r.name:<{name_col}}{spec_text}{reason_text}"
+        )
+    # Summary tail when any row carried a spec — surfaces aggregate without
+    # forcing the user to grep the per-row table.
+    if n_spec_ok or n_spec_failed:
+        if n_spec_failed:
+            print(
+                f"  spec totals: {n_spec_ok} ok, {n_spec_failed} failed "
+                f"(spec failure does not abort the batch — see DECISIONS #45)"
+            )
+        else:
+            print(f"  spec totals: {n_spec_ok} ok")
     if args.dry_run:
         print(f"envelope kept at {tmp_path}")
     return 0

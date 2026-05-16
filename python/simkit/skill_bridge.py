@@ -223,11 +223,17 @@ class PvtMeasurePushRow:
     ``status`` is one of ``added`` / ``replaced`` / ``failed`` /
     ``would_add`` / ``would_replace``. ``reason`` is set when status is
     ``failed`` (or whenever the SKILL layer attaches one).
+
+    ``spec_status`` (v1.3+) reports the outcome of the optional
+    ``axlAddSpecToOutput`` call attached to this row. ``None`` when the row
+    carries no spec; ``"ok"`` on success; ``"failed: <reason>"`` on parse
+    or push failure. Spec failure does NOT down-grade the primary status.
     """
 
     name: str
     status: str
     reason: Optional[str] = None
+    spec_status: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -257,15 +263,18 @@ def _decode_push_row(raw: Any) -> PvtMeasurePushRow:
         name = raw.get("name", "")
         status = raw.get("status", "")
         reason = raw.get("reason")
+        spec_status = raw.get("spec_status")
     else:
         pairs = dict(raw)
         name = pairs.get("name", "")
         status = pairs.get("status", "")
         reason = pairs.get("reason")
+        spec_status = pairs.get("spec_status")
     return PvtMeasurePushRow(
         name=str(name) if name is not None else "",
         status=str(status) if status is not None else "",
         reason=(str(reason) if reason is not None else None),
+        spec_status=(str(spec_status) if spec_status is not None else None),
     )
 
 

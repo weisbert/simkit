@@ -824,6 +824,79 @@ class ApplyCliTests(unittest.TestCase):
         )
         self.assertEqual(rc, 2)
 
+    # v1.4 #5 — spec_status surfaced in apply CLI summary
+    # (data was already on pushReport per DECISIONS #45; just wiring the
+    # printer + summary tail).
+    def test_apply_shows_spec_status_ok(self):
+        report = PvtMeasurePushReport(
+            n_pushed=2,
+            rows=(
+                PvtMeasurePushRow(
+                    name="Rtime_Vout", status="added", spec_status="ok",
+                ),
+                PvtMeasurePushRow(name="Plain", status="added"),
+            ),
+        )
+        with patch(
+            "simkit.skill_bridge.pvt_measure_push", return_value=report,
+        ):
+            rc, out, err = _run(
+                "measure", "apply", str(self.bundle),
+                "--project", str(self.pvtproject),
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertIn("Rtime_Vout", out)
+        self.assertIn("spec: ok", out)
+        # The summary tail should call out the ok count when no failures.
+        self.assertIn("spec totals: 1 ok", out)
+        self.assertNotIn("failed", out)
+
+    def test_apply_shows_spec_status_failed(self):
+        report = PvtMeasurePushReport(
+            n_pushed=2,
+            rows=(
+                PvtMeasurePushRow(
+                    name="Rtime_Vout", status="added",
+                    spec_status="failed: unrecognised spec form: junk",
+                ),
+                PvtMeasurePushRow(
+                    name="Other", status="added", spec_status="ok",
+                ),
+            ),
+        )
+        with patch(
+            "simkit.skill_bridge.pvt_measure_push", return_value=report,
+        ):
+            rc, out, err = _run(
+                "measure", "apply", str(self.bundle),
+                "--project", str(self.pvtproject),
+            )
+        # Primary status was "added" for both, so apply must NOT fail the
+        # batch on a spec failure (DECISIONS #45 invariant).
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertIn("spec: failed", out)
+        self.assertIn("unrecognised spec form", out)
+        # Aggregate summary tail.
+        self.assertIn("spec totals: 1 ok, 1 failed", out)
+
+    def test_apply_no_spec_status_no_spec_column(self):
+        # When no row carries a spec, the SPEC column is omitted entirely
+        # and the totals tail does not appear.
+        report = PvtMeasurePushReport(
+            n_pushed=1,
+            rows=(PvtMeasurePushRow(name="Rtime_Vout", status="added"),),
+        )
+        with patch(
+            "simkit.skill_bridge.pvt_measure_push", return_value=report,
+        ):
+            rc, out, err = _run(
+                "measure", "apply", str(self.bundle),
+                "--project", str(self.pvtproject),
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertNotIn("spec:", out)
+        self.assertNotIn("spec totals", out)
+
 
 # --------------------------------------------------------------------------
 # pull (mocked)
