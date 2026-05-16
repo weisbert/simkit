@@ -1,0 +1,50 @@
+{
+  "_doc": "Phase 3A example review-suite sidecar. Shape locked by DECISIONS #50. Items run sequentially; each item bundles its own (tests, union, bundle).",
+  "review_schema_version": 1,
+  "name": "review_example",
+  "project": "example_block",
+
+  "on_failure": {
+    "default": "skip",
+    "strategies": [
+      {"name": "naive_retry", "max_attempts": 1}
+    ]
+  },
+
+  "items": [
+    {
+      "name": "BT2GRX trans PVT",
+      "tests": ["sim_BT2GRX", "sim_BT2GTX"],
+      "union": "unions/bt2grx_trans.union.json",
+      "bundle": "bundles/bt2grx_trans.measure.json"
+    },
+    {
+      "name": "BT2GRX PSS PN",
+      "tests": ["sim_BT2GRX"],
+      "union": "unions/bt2grx_pss.union.json",
+      "bundle": "bundles/bt2grx_pss_pn.measure.json"
+    },
+    {
+      "name": "LE mode trans PVT",
+      "tests": ["sim_LE"],
+      "union": "unions/le_trans.union.json",
+      "bundle": "bundles/le_trans.measure.json"
+    },
+    {
+      "name": "LE mode PSS PN",
+      "tests": ["sim_LE"],
+      "union": "unions/le_pss.union.json",
+      "bundle": "bundles/le_pss_pn.measure.json"
+    },
+    {
+      "name": "干扰仿真",
+      "tests": ["sim_interference"],
+      "union": "unions/interference.union.json",
+      "bundle": "bundles/interference.measure.json",
+      "enabled": true,
+      "on_failure": {
+        "item_policy": "halt"
+      }
+    }
+  ]
+}

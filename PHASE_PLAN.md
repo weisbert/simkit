@@ -28,9 +28,9 @@ Rationale for going B before A (sim orchestrator): Phase 3A explicitly waits on 
 
 ---
 
-## Phase 3A: simulation orchestrator (NEXT — user committed 2026-05-16)
+## Phase 3A: simulation orchestrator (IN PROGRESS — §1 spec DONE 2026-05-16)
 
-User has signalled to start Phase 3A in the next session. **First-session task: lock §1 spec** at `docs/phase3a_*_spec.md` + DECISIONS entries, same pattern as Phase 2 (`docs/phase2_pvt_union_spec.md`) and Phase 3B (`docs/phase3b_measure_template_spec.md`). Open questions to surface during the spec push (not pre-decided here):
+**§1 spec frozen** at `docs/phase3a_orchestrator_spec.md`. DECISIONS #50-53. Open questions below resolved during the §1 spec push (see DECISIONS); leaving the original list here for historical context:
 
 - **Driver style:** skillbridge (existing infra, no subprocess) vs. `virtuoso -nograph -replay` (fresh VM per run, isolation but slow startup). The bridge has been the Phase 1 / 2 / 3B-skeleton workhorse and just works; subprocess style is an option not a default.
 - **Review-suite sidecar shape:** YAML or JSON? Project convention is JSON sidecars (`.pvtproject`, `.union.json`, `.measure.json`, `.siggroup.json`, `.template.json`). YAML would be the first divergence — needs a reason or default to JSON for consistency.

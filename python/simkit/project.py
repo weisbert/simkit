@@ -32,6 +32,8 @@ _KNOWN_FIELDS = frozenset({
     "templatesDir",
     "signalGroupsDir",
     "measurementsDir",
+    # Phase 3A §1 (DECISIONS #50) — review-suite sidecar dir.
+    "reviewsDir",
 })
 
 

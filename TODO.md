@@ -188,3 +188,71 @@ User pointed out v1.2 silently discarded the Maestro Spec column on apply, even 
 - Cross-project template sharing (user-home `~/.simkit/templates/`).
 - Snapshot template match-back (reverse-engineer a pulled snapshot into bundle + parameters).
 - Offline acceptance gates M2 + M3 (currently live-verified; would need captured fixture pair like Phase 2 Gate U1).
+
+---
+
+## Phase 3A — Simulation Orchestrator (IN PROGRESS — kicked off 2026-05-16)
+
+**Goal:** Close the **execution** pillar. Engineer writes one `*.review.json` describing 5-15 named items (each = tests + union + bundle); `pvt run` drives Maestro through the whole battery, applies retry strategies on convergence failures, auto-ingests results.
+
+Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS.md` #50-53.
+
+### §1. Specification — DONE
+
+- [x] `docs/phase3a_orchestrator_spec.md` — problem, sidecar shape, item shape, orchestrator loop, failure semantics, strategy plugin contract, SKILL bridge surface, CLI surface, out-of-scope list, open decisions.
+- [x] `config/review_example.review.json` — 5-item BT2GRX-style example (trans PVT + PSS PN for two modes + interference sim).
+- [x] DECISIONS #50 (sidecar shape), #51 (per-corner skip + sequential items), #52 (strategy plugin + v1 scope = framework + naive_retry only; gmin/PSS-IC → v1.1), #53 (SKILL API map).
+- [ ] `docs/schema.md` §1 additive update — add `reviewsDir` field (default `./reviews`); additive per unknown-key policy (no version bump). **TODO during §2.**
+
+### §2. Python sidecar loader + validator
+
+- [ ] `python/simkit/review.py` — JSON → typed `Review` + `ReviewItem` dataclasses; validate every §2 invariant from spec.
+- [ ] `on_failure` deep-merge logic (item overrides suite).
+- [ ] Cross-reference validation: union/bundle paths resolve relative to review file; filename basename equals `name` field; `project` matches enclosing `.pvtproject`.
+- [ ] `python/simkit/project.py` — add `reviewsDir` field (default `./reviews`).
+- [ ] `tests/test_review.py` — every load-error invariant + the example file loads + happy-path merge + deep-merge edge cases.
+- [ ] **Verification gate:** `pytest tests/test_review.py` 100% green; `python -m simkit.review validate config/review_example.review.json` reports no errors (will warn on missing union/bundle paths since the example doesn't ship those — that's expected).
+
+### §3. SKILL run-control bridge
+
+- [ ] `skill/pvtRunner.il` — production-side helpers per DECISIONS #53 + spec §6:
+    - `pvtRunnerEnableOnly` / `pvtRunnerSnapshotTestState` / `pvtRunnerRestoreTestState`
+    - `pvtRunnerSubmit` (wraps `axlRunAllTestsWithCallback`)
+    - `pvtRunnerWait` / `pvtRunnerGetStatus`
+    - `pvtRunnerCollectHistory` (reuses Phase 1 `pvtCollIterateResults` per envelope shape)
+- [ ] `python/simkit/skill_bridge.py` — Python wrappers: `pvt_runner_enable_only`, `pvt_runner_submit`, `pvt_runner_wait`, `pvt_runner_collect_history`, etc.
+- [ ] `skill/tests/testPvtRunner.il` — Tier-1 mock-free cases for the pure helpers.
+- [ ] **§3.V Verification gate (live)**: against an open Maestro session, dry-fire `pvtRunnerSubmit` on a 1-test 1-corner setup, observe `axlGetRunStatus` transitions, capture the actual status code map → resolves open decisions 10.1 + 10.2 + 10.3.
+
+### §4. Failure-strategy plugin framework + 1 placeholder built-in
+
+- [ ] `python/simkit/strategies/__init__.py` — discovery (both built-in and `<project>/strategies/*.py`).
+- [ ] `python/simkit/strategies/base.py` — `Strategy` base class + `StrategyContext` + `StrategyResult` + Bridge facade.
+- [ ] `python/simkit/strategies/naive_retry.py` — built-in placeholder (no intervention, re-run up to N times).
+- [ ] `tests/test_strategies.py` — framework happy path + naive_retry + user-plugin discovery + revert-on-failure.
+- [ ] `docs/phase3a_writing_strategies.md` — one worked example showing how to write a custom strategy (anticipates the v1.1 gmin_bump shape).
+
+### §5. Orchestrator runtime + CLI
+
+- [ ] `python/simkit/orchestrator.py` — main loop per spec §3 pseudocode; session-state snapshot+restore wrapper; per-item result aggregator.
+- [ ] `python/simkit/cli/run.py` — `pvt run`, `pvt run --dry-run`, `pvt run --items`, `pvt run --tests/--union/--bundle` ad-hoc, `pvt run --list-strategies`.
+- [ ] `python/simkit/cli/review.py` — `pvt review init`, `pvt review validate`.
+- [ ] `tests/test_orchestrator.py` — pure-Python orchestration with mocked SKILL bridge: per-corner-fail skip behaviour, strategy chain invocation, dry-run no-side-effect, ad-hoc mode parity.
+- [ ] `tests/test_cli_run.py` — CLI smoke + arg parsing + exit codes.
+
+### §6. End-to-end acceptance + live dogfood
+
+- [ ] **Gate R1** — two-item review runs end-to-end on a synthetic captured session; orchestrator restores session state on suite exit (including mid-item kill via SIGINT).
+- [ ] **Gate R2** — `naive_retry` strategy: synthetic `sim_err` first attempt, verify re-run marks pass on second attempt.
+- [ ] **Gate R3** — `--dry-run` mode: produces the same plan a real run would execute, with zero side effects (verified by before/after snapshot diff).
+- [ ] **Gate R4** — Ad-hoc mode parity: `pvt run --tests T1 --union U.union.json` produces identical DB result rows to a single-item review with the same content.
+- [ ] Live dogfood on user's real BT2GRX-style or fnxSession0 review (whichever session the user picks). Observe friction, capture as DECISIONS / v1.1 backlog.
+
+### Deferred to Phase 3A v1.1 (do NOT block v1):
+
+- **`gmin_bump` strategy** — needs targeted `asi*` probe: `asiAddSimOption` signature + how to scope to single-corner / single-test override + how to revert.
+- **`trans_pss_ic` strategy** — needs `asiChangeAnalysis` / PSS-analysis-form probe: where IC field lives, how to point at a `spectre.fc` from a precursor trans, parameterizable trans duration + IC mapping.
+- **Per-test bundle dict** — `bundle: {"test_a": "a.measure.json", "test_b": "b.measure.json"}` form. Promote when a real case appears.
+- **Item dependency graph** — `depends_on: [item_name]`. Promote when "干扰仿真 must wait for PSS pass" type workflow surfaces.
+- **Multi-Maestro orchestration** — one review driving N parallel Maestro sessions.
+- **Report generator** — PDF/HTML with waveform PNG attachments. Its own phase per `PHASE_PLAN.md`.

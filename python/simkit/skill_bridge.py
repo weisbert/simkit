@@ -57,6 +57,15 @@ _PRODUCTION_MEASURE_SKILL_FILES = (
     "pvtMeasure.il",
 )
 
+# Phase 3A SKILL files. Same idempotent-load argument as the measure family.
+_PRODUCTION_RUNNER_SKILL_FILES = (
+    "pvtError.il",
+    "pvtJson.il",
+    "pvtProject.il",
+    "pvtCollect.il",   # PvtSave is invoked from the runner caller
+    "pvtRunner.il",
+)
+
 
 class SkillBridgeError(RuntimeError):
     """A ``pvt_err`` result surfaced from SKILL as a Python exception."""
@@ -461,6 +470,122 @@ def pvt_measure_restore(
             f"axlOutputsImportFromFile returned {rv!r} for {csv}",
             str(csv),
         )
+
+
+def _load_runner_skill_files(ws) -> None:
+    for fname in _PRODUCTION_RUNNER_SKILL_FILES:
+        ws["load"](str(_SKILL_DIR / fname))
+
+
+def pvt_runner_snapshot_test_state(
+    *, session: str, workspace: Any = None,
+) -> list[tuple[str, bool]]:
+    """Read every test's enable state in the given session.
+
+    Returns a list of (name, enabled) tuples — same shape the SKILL
+    `pvtRunnerSnapshotTestState` returns. Pure read, no side effects.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(ws["pvtRunnerSnapshotTestState"](session))
+    return [(name, bool(enabled)) for name, enabled in raw]
+
+
+def pvt_runner_restore_test_state(
+    snap: list[tuple[str, bool]], *, session: str, workspace: Any = None,
+) -> None:
+    """Restore each test's enable state from a snapshot tuple-list."""
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    payload = [[name, en] for name, en in snap]
+    _unwrap(ws["pvtRunnerRestoreTestState"](session, payload))
+
+
+def pvt_runner_enable_only(
+    test_names: list[str], *, session: str, workspace: Any = None,
+) -> list[tuple[str, bool, bool]]:
+    """Disable all tests except those in ``test_names``; enable those.
+
+    Returns the diff: list of (name, before, after) triples for every test
+    in the session. Raises :class:`SkillBridgeError` if any requested name
+    is unknown.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(ws["pvtRunnerEnableOnly"](session, list(test_names)))
+    return [(name, bool(b), bool(a)) for name, b, a in raw]
+
+
+def pvt_runner_run(
+    history_name: str, *, session: str, workspace: Any = None,
+) -> tuple[int, int, str]:
+    """Run all enabled tests on all enabled corners. BLOCKING.
+
+    Returns ``(status_code, sub_code, actual_history_name)``. The SKILL
+    side runs `axlRunAllTests` (which auto-names the new entry "Interactive.NN")
+    then renames it to ``history_name`` via `axlSetHistoryName`. The
+    returned actual name is what the caller should pass to `pvt_save`.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(ws["pvtRunnerRun"](session, history_name))
+    return (int(raw[0]), int(raw[1]), str(raw[2]))
+
+
+def pvt_runner_delete_history(
+    history_name: str, *, session: str, workspace: Any = None,
+) -> None:
+    """Drop a named history entry from the session.
+
+    Cleanup helper. Raises SkillBridgeError if the history isn't found
+    or Maestro refuses the delete.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    _unwrap(ws["pvtRunnerDeleteHistory"](session, history_name))
+
+
+def pvt_runner_get_status(
+    *, session: str, workspace: Any = None,
+) -> tuple[int, int]:
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(ws["pvtRunnerGetStatus"](session))
+    return (int(raw[0]), int(raw[1]))
+
+
+def pvt_save(
+    history_name: str, *,
+    pvtproject_path: Path,
+    session: Optional[str] = None,
+    label: Optional[str] = None,
+    note: Optional[str] = None,
+    workspace: Any = None,
+) -> str:
+    """Invoke the Phase 1 collector's PvtSave on a named history.
+
+    Returns the absolute path of the run-dir that PvtSave wrote (which the
+    Python ingester then walks via `pvt ingest`).
+
+    Pins PVT_PROJECT on the SKILL side (same pattern as `_prep`) so PvtSave's
+    `pvtLoadPvtProject` doesn't fall back to a cwd walker that wouldn't find
+    anything (the bridge process runs from Virtuoso's cwd, not Python's).
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    pvtproject_path = Path(pvtproject_path).expanduser().resolve()
+    ws["changeWorkingDir"](str(pvtproject_path.parent))
+    ws["setShellEnvVar"](f"PVT_PROJECT={pvtproject_path}")
+    kwargs: dict[str, Any] = {"histName": history_name}
+    if label is not None:
+        kwargs["label"] = label
+    if note is not None:
+        kwargs["note"] = note
+    if session is not None:
+        kwargs["explicitSess"] = session
+    raw = ws["PvtSave"](**kwargs)
+    # PvtSave returns (pvt_ok run-dir-path) on success.
+    return _unwrap(raw)
 
 
 def resolve_pvtproject_path(explicit: Optional[str]) -> Path:

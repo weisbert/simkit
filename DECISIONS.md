@@ -1013,3 +1013,94 @@ Motivating case: the v1.1 walkthrough's `dco2g_supplies.siggroup.json` — four 
 **Test coverage:** 11 new cases in `test_signal_group.AliasFormTests` (happy / mixed-with-strings / v1-rejects-alias / null-alias / optional-alias / bad-identifier / slash-in-alias / duplicate-alias / missing-net / unknown-key / cross-form-net-collision). 2 new cases in `test_template_render.SignalAliasRenderTests` (aliased group renders cleanly + bare-string regression). Python 784 → 797.
 
 **Not done:** No live skillbridge verification — pure-Python loader + renderer change; net paths reach SKILL identical to today (only output_name strings differ, which the SKILL push side has always treated opaquely).
+
+---
+
+## #50 — Phase 3A §1: review-suite sidecar (`*.review.json`) shape
+_Date: 2026-05-16_
+
+**Decision:** A "review" is a named, ordered list of **items**, where each item bundles its own (tests, union, bundle) triple. Sidecar at `<reviewsDir>/<name>.review.json`. Top-level fields: `review_schema_version: 1`, `name`, `project`, `items: [...]`, optional `on_failure: {...}`. Item fields: required `name` + `tests: list[str]` + `union: path`; optional `bundle: path | null`, `enabled: bool = true`, `on_failure` (deep-merges over suite-level). Suite-level `on_failure` carries `default: "skip" | "halt"`, optional `corner_policy` / `item_policy` overrides, and a `strategies: [...]` chain.
+
+**Why:** User explicitly clarified (2026-05-16) that real signoff workflow is **not** "one set of tests × one union" cartesian, but a list of 5-15 named items each pairing **its own** tests with **its own** corners — because trans tests need different corners than PSS (PSS often only wants typical/slow/fast for PN), different functional modes (BT2GRX / LE / interference) use different testbenches, etc. The list shape mirrors how the engineer thinks about a signoff battery: 10 named rows, each "a thing to do". Existing Phase 2 `.union.json` per-row `test` field already expresses per-test corner enables, so no schema work needed on that axis — items just compose existing sidecars.
+
+**Alternatives considered:** (a) Cartesian top-level (`tests × union × bundle`) — rejected after user pushback; doesn't match real workflow. (b) Item carries `tests: list[str] + bundles: dict[test, path]` for per-test bundle — deferred to v1.1 when a real per-test-bundle case appears (default v1: single shared bundle covers the common case). (c) Item dependency graph — deferred to v1.1; v1 is flat sequential by list order.
+
+**Resolves Phase 3A pre-§1 open questions:** sidecar shape (JSON), trigger surface (CLI primary + CIW callable), driver style (skillbridge), concurrency (delegated to Maestro/LSF intra-item; sequential inter-item), failure default (skip).
+
+---
+
+## #51 — Phase 3A §1: per-corner skip granularity + sequential item execution
+_Date: 2026-05-16_
+
+**Decision:** Failure handling is **per-corner**: if 1 of 21 corners in an item fails (sim_err / eval_err / non-convergence), mark only that corner FAIL in DB and **let the remaining 20 corners continue**. The item itself is not aborted unless explicitly configured via `on_failure: {item_policy: "halt"}` or all corners fail. Items run **sequentially in list order** — concurrency within one item is delegated to Maestro/LSF (orchestrator submits one `axlRunAllTestsWithCallback` per item and waits for the completion callback).
+
+**Why:** User explicitly chose per-corner skip over per-item halt (2026-05-16) — "21 个角点里 1 个 fail，剩下 20 个继续". Matches the user's stated concurrency answer ("Maestro/LSF 已有 job 分发"): if Maestro is already dispatching the 21 corners in parallel, the orchestrator's job ends at "I submitted, here's the per-corner result map" — fail granularity has to be per-corner to be useful. Sequential item execution keeps the progress log human-readable (one item-finished log line at a time) and avoids the orchestrator reimplementing the LSF semantics Maestro already handles.
+
+**Implementation:** Per-corner status comes from re-using Phase 1's `pvtCollIterateResults` — it already classifies each (corner, test) row as `ok` / `sim_err` / `eval_err` / `unknown`. Orchestrator wraps it in the new `pvtRunnerCollectHistory` SKILL verb after each item completes, hands the JSON envelope to `pvt ingest`, then walks the ingested rows for the failure-strategy decision.
+
+---
+
+## #52 — Phase 3A §1: failure-strategy plugin architecture; v1 ships framework + 1 placeholder
+_Date: 2026-05-16_
+
+**Decision:** Strategies are Python classes (`Strategy` base with `name`, `max_attempts`, `params`, `apply(ctx)`, `revert(ctx)`) discovered from both `simkit/strategies/` (built-in) and `<project>/strategies/*.py` (user-defined). The orchestrator wires the strategy chain from each item's `on_failure.strategies` array; chain entries shaped `{"name": "...", "max_attempts": int, ...params}` instantiate matching classes. v1 ships **only one built-in strategy** — `naive_retry` (no intervention, just re-run up to N times; covers transient license / disk / scheduler hiccups). The two production-relevant built-ins the user named (`gmin_bump`, `trans_pss_ic`) are deferred to v1.1.
+
+**Why:** Per-2026-05-16 probe, Spectre `gmin` and PSS initial-condition fields live in the `asi*` namespace (298 functions surfaced), not `axl*`. Locking those two strategies in v1 would require a fresh probe phase against asiAddSimOption / asiChangeAnalysis / asiAddAnalysisOption + their PSS-specific arity, which we haven't done. User confirmed (2026-05-16): "v1 只出框架，策略推 v1.1". This keeps Phase 3A v1 unblocked and lets the user dogfood the orchestrator skeleton immediately. v1.1 gets its own `asi*` probe → 2 built-in strategies + a worked-example doc on writing a custom one. The plugin architecture is in v1 from day one so user strategies can land before the asi* probe completes (e.g., a user-authored "retry with longer time step" strategy needs no asi* APIs).
+
+**Alternatives considered:** (a) Ship all 3 strategies in v1 — rejected, requires 1-3 more days of asi* probing user wasn't willing to wait for. (b) Ship 0 strategies, only framework — rejected, leaves the chain empty and the architecture untested; `naive_retry` is cheap and exercises the framework on real failures. (c) Built-ins only, no user-plugin discovery — rejected, user explicitly asked for user-extensible strategies.
+
+---
+
+## #53 — Phase 3A §1 probe: SKILL run-control + simulator-interface API map
+_Date: 2026-05-16_
+
+**Decision (catalog, not a behaviour choice):** Records the API map discovered by the 2026-05-16 skillbridge probe against `fnxSession0` (sim_yusheng/Test/maestro/config). Captured here so the §3 SKILL bridge implementation has the verified contract instead of guessing from PDFs.
+
+**Run-control (`axl*` namespace):**
+- `sdb = axlGetMainSetupDB(session_name)` — string session name → setupDB int handle. Required first step for almost every other call.
+- `axlGetEnabledTests(sdb)` → `[[handle, name], ...]` per enabled test.
+- `axlGetTest(sdb, name)` → test int handle; `axlGetTestName(h)` → name; `axlGetEnabled(h)` / `axlSetEnabled(h, t/nil)` → per-test on/off (set returns `1` on success).
+- `axlRunAllTests(sdb, historyName)` sync; `axlRunAllTestsWithCallback(sdb, historyName, callback_fn, ...)` async (orchestrator's main path). At least 3 args required; remaining arity to nail in §3 first implementation (open decision 10.2).
+- `axlGetRunStatus(session_string)` → `[code, sub]`. Idle = `[0, 0]`; running/done/failed transitions to be observed during §3 dogfood (open decision 10.1).
+- `axlGetResultsLocation(sdb)` → fs path Maestro writes results to (same path Phase 1 collector already knows).
+- `axlGetHistory(sdb)` + `axlGetHistoryResults(h)` + `axlGetHistoryName(h)` — post-run inspection.
+- `axlStop / axlStopAll / axlStopJob` — abort paths.
+- `axlGetTestToolArgs(h)` → `[[key, value], ...]` (sim engine, lib/cell/view, path). `axlSetTestToolArgs(h, args)` writes.
+
+**Simulator interface (`asi*` namespace, 298 functions — strategy-side):**
+- `asiAddSimOption` — Spectre simulator options (e.g. `gmin`). Likely target for v1.1 `gmin_bump` strategy. Exact signature to probe during v1.1 kickoff.
+- `asiChangeAnalysis` / `asiAddAnalysisOption` — analysis-level fields (PSS `ic` lives here). v1.1 `trans_pss_ic` strategy will use this path.
+- `asiAddEnvOption`, `asiAddDesignVarList`, `asiAddModelLibSelection` — adjacent knobs surfaced but not needed for v1.
+
+**Session-detection rule (gotcha from this probe):** skillbridge runs in CIW context. `axlGetWindowSession()` from CIW returns `nil` even when Maestro window is open. Workaround: the user passes the session name explicitly to every helper (same pattern Phase 2 / 3B helpers already use). Orchestrator CLI requires `--session NAME` or `PVT_SESSION` env var.
+
+**Bridge-restart gotcha (re-documented in `reference_skillbridge_recovery.md`):** bare `(pyStartServer)` defaults to `python` binary which doesn't exist on this host. Must call `(pyStartServer ?python "/usr/bin/python3")` or load `sbStart.il`. Surfaced during this probe when first `pyKillServer / pyStartServer` cycle exited with code 127.
+
+---
+
+## #54 — Phase 3A v1 dogfood: axlRunAllTests is async, modal-dialog wedges bridge
+_Date: 2026-05-16_
+
+**Decision (captured findings, not a behavior change):** Records the observed runtime characteristics of `axlRunAllTests` and the operational pitfall that fell out of the Phase 3A §6 live dogfood. v1.1's first task is to fix `pvtRunnerRun` to actually wait.
+
+**Findings:**
+
+1. **`axlRunAllTests(sess, x)` is fire-and-forget async.** Probed signature is `(string, string)` (type template `tt`, open decision 10.2 closed). The SKILL call returns immediately after dispatching the run to Maestro's job runner (LSF / local pool). Spectre processes continue to run in the background for the actual sim duration.
+2. **Second arg is NOT honoured as a history name.** Maestro always auto-names new entries `Interactive.<N+1>`. v1 workaround: post-run `axlSetHistoryName(handle, desiredName)` via `axlGetCurrentHistory(sess)`.
+3. **`axlGetRunStatus(sess)` returns a `[code, sub]` pair.** Observed values during dogfood: `[0,0]` = idle (initial state, also post-completion); `[1,1]` = post-cached-run (no real sim); `[5,9]` = post-real-run-completion. Full state-machine still under-observed; v1 uses "transition from any non-[0,0] back to [0,0]" as the "done" heuristic. Open decision 10.1 partially closed; full code map deferred.
+4. **PvtSave (read-only) is safe to call during the async tail.** This is why S1 dogfood saw "PvtSave succeeded immediately, schema_version 2 dump landed cleanly" even though the sim was still running in the background.
+5. **Any MUTATING op on the same setupdb during the async tail (axlRemoveElement, axlSetEnabled, axlPutCorner, etc.) can pop a modal `ADE Assembler Message 2423` dialog** that says "setupdb handle … has been temporarily locked … this history item is actively running. Wait for the temporary lock to end, before trying again." That modal blocks ALL skillbridge calls until the user clicks Close. `pyKillServer`/`pyStartServer` cycles DO NOT help while the dialog is up. Cost is repeated user-attention round-trips that look like the bridge is corrupted.
+6. **`axlRemoveElement` on a history that's still "actively running" triggers (5).** During cleanup of S1+S2 orphan histories, removing the orch_s1_* entry (which had PvtSave dump but the underlying run was still finalising) wedged the bridge. The 4 orphan Interactive.NN entries deleted cleanly because they were truly idle.
+7. **Mitigation rule (memory-pinned in `feedback_axl_run_async_wait_for_idle.md`):** before any destructive op post-`axlRunAllTests`, poll `axlGetRunStatus` until idle. Mirror the rule in `pvtRunnerRunBlocking` (v1.1 task — wraps `axlRunAllTests` + poll-to-idle + rename). When the bridge appears wedged, FIRST ask user to check Maestro for popups, BEFORE assuming bridge corruption.
+8. **`pvt corners push` semantics for non-existent corner names: it ADDS, doesn't REPLACE.** S2 pushed a 3-row union and the session ended up with 6 corners (3 original + 3 new). Restore via re-push of the snapshot didn't drop the new ones either. v1.1 likely needs an explicit "replace mode" push verb. Phase 2 spec §4.2 will need clarification on this if it's intentional.
+
+**S1 + S2 dogfood acceptance:**
+- ✅ snapshot/enable_only/run/rename/PvtSave/ingest/pvt-list round-trip end-to-end (S1; result row `c955d584-…` visible in DB alongside Phase 3B v1.3/v1.4 dogfood runs).
+- ⚠️ Real-Spectre wall-clock NOT measured (S2 reported "pending" status because polling-to-idle is unimplemented).
+- ⚠️ Cleanup left 2 orphan histories (`orch_s1_s1_baseline_TT_1778932203_1`, `orch_s2_s2_temp_sweep_1778932284_1`) — recommend user clears via Maestro GUI History panel (right-click delete).
+
+**v1.1 Phase 3A backlog (immediate):**
+- `pvtRunnerRunBlocking` with poll-to-idle (resolves the misleading "Run" semantics).
+- `pvt corners push --replace` mode (or clarify the v1 ADD-semantics).
+- Strategy chain wired into `execute()` per-corner failure detection (per #52 plumbing already in place).
+- `gmin_bump` + `trans_pss_ic` built-in strategies after asi* probe phase.

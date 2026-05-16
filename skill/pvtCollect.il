@@ -254,11 +254,19 @@
 ;; or pvtErr 'pvt_collect_session.
 ;; ============================================================================
 
-(procedure (_pvtCollResolveSession histName)
+(procedure (_pvtCollResolveSession histName @optional (explicitSess nil))
   (prog (sess hsdb histID resolvedName checkpoint runMode)
-    ;; --- 1. session in current window
-    (setq sess (errset (axlGetWindowSession) nil))
-    (setq sess (cond ((listp sess) (car sess)) (t nil)))
+    ;; --- 1. session
+    ;; If caller passed an explicit session name (typical for the Phase 3A
+    ;; orchestrator running from CIW context, where axlGetWindowSession is
+    ;; nil), trust it. Otherwise fall back to the original window-current
+    ;; behaviour (Phase 1 dialog / interactive PvtSave).
+    (cond
+      ((and explicitSess (stringp explicitSess) (not (equal explicitSess "")))
+        (setq sess explicitSess))
+      (t
+        (setq sess (errset (axlGetWindowSession) nil))
+        (setq sess (cond ((listp sess) (car sess)) (t nil)))))
     (cond
       ((null sess)
         (return (pvtErr 'pvt_collect_session
@@ -1328,7 +1336,7 @@
 ;; ============================================================================
 
 (procedure (PvtSave @key (histName nil) (label nil) (note nil)
-                        (captureScreenshot nil))
+                        (captureScreenshot nil) (explicitSess nil))
   (prog (projR proj sessR sessTuple sess hsdb histID resolvedName
          captR runMeta iterR iterPair firstTest results
          runDirR runDir netlistPath specsR outputSpecs
@@ -1337,8 +1345,9 @@
     (setq projR (pvtLoadPvtProject))
     (cond ((pvtIsErr projR) (return projR)))
     (setq proj (pvtUnwrap projR))
-    ;; --- 2. session + history
-    (setq sessR (_pvtCollResolveSession histName))
+    ;; --- 2. session + history (Phase 3A: optional explicitSess for
+    ;;     orchestrator runs from CIW context where axlGetWindowSession is nil)
+    (setq sessR (_pvtCollResolveSession histName explicitSess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessTuple (pvtUnwrap sessR))
     (setq sess         (nthelem 1 sessTuple))
