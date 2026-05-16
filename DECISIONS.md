@@ -954,3 +954,24 @@ _Date: 2026-05-16_
 **Test coverage:** SKILL Tier-1 +9 cases on `_pvtMeasureParseSpec` dotted-range branch (5 happy + 4 reject), bringing Tier-1 376 → 385. Python +2 cases on `test_measure_bundle.SpecPassthroughTests` for dotted-range bundle load + negative-range bundle load.
 
 **Live verification:** Parser exercised against 16 cases on fnxSession0 — all 5 happy decimals/ints/negative/SI/whitespace yield `(range V1 V2)`; all 4 reject paths return `pvt_err pvt_validation` with informative messages; all 5 v1.3 regression cases (bracket, range-kw, lt, ge, tol) unchanged. Cleanup path verified by removing the 2 dogfood specs via the overwrite-import recipe above; post-clean `_pvtCollCaptureSpecs` returns an empty table and the outputs CSV reverts to the 11-row baseline with all Spec columns empty.
+
+---
+
+## #47 — Phase 3B v1.5 #2: inclusive `>=` / `<=` specs dispatch via `?range`, not `?min` / `?max`
+_Date: 2026-05-16_
+
+**Decision:** `axlAddSpecToOutput ?min X` is stored by Maestro as `"minimize X"` (ADE-XL target-style: pass = value ≤ X); `?max X` as `"maximize X"` (pass = value ≥ X). These are optimization goals, not inclusive bounds — the **semantic opposite** of what `>=X` / `<=X` mean in a user-written bundle spec. v1.3 mapped `>=X` → `?min` and `<=X` → `?max`, which would flip pass/fail on every inclusive-bound spec. v1.4 dogfood didn't catch this because the only specs in use were `<` / `>`.
+
+Fix: in `_pvtMeasureApplyParsedSpec`, dispatch `("ge" v)` → `axlAddSpecToOutput ?range (v _PVT_MEASURE_SPEC_HUGE)` and `("le" v)` → `?range ((minus _PVT_MEASURE_SPEC_HUGE) v)` with `_PVT_MEASURE_SPEC_HUGE = 1.0e30`. axlSKILL has no `?ge` / `?le` keyword; `?range` is the only inclusive-bound API surface. Cadence stores the result as `"range V 1e+30"` / `"range -1e+30 V"`, which Python `spec_eval.parse_spec` already evaluates as inclusive intervals.
+
+Also renamed SKILL parser tags `"min"` → `"ge"`, `"max"` → `"le"` to match Python `spec_eval` convention and disambiguate from the ADE-XL `minimize` / `maximize` semantics.
+
+**Why 1.0e30:** Beyond any physical quantity an analog-IC designer would put on a spec (frequencies, capacitances, resistances all fit in 1e20). Simple constant, visible in CSV exports — `range V 1e+30` reads obviously as "effectively unbounded above". No need to probe for an ADE-XL-internal infinity sentinel.
+
+**Side effect on snapshot byte-identity:** v1.3 round-trip on `>=X` was already broken (push `>=X` → store `minimize X` → pull back `"minimize X"`). The fix changes the stored form to `"range X 1e+30"` — semantically correct, but a different string than the bundle source. `spec_eval` evaluates the read-back form identically to the bundle intent, so downstream pass/fail is unaffected. Snapshot-vs-bundle byte equality on inclusive-bound specs was never achievable given Cadence's storage normalisation.
+
+**`minimize X` / `maximize X` bundle vocabulary NOT added.** Python parser accepts them on read (ADE-XL convention preserved); bundle write side still rejects. Promote to v1.6 if a user ever wants to express target-style optimization semantics in a bundle (versus inclusive bounds).
+
+**Test coverage:** SKILL Tier-1 2 cases retagged (`measure/parseSpec/inclusive-{upper,lower}` from `inclusive-{max,min}`); count 394/1 unchanged.
+
+**Live verification:** On fnxSession0, `>= 1e-10` on `Rtime_clkout` → CSV shows `range 1e-10 1e+30`; `<= -100` on `PN_1M` → `range -1e+30 -100`. Python `spec_eval.evaluate_spec` classifies 2.13e-11 vs `range 1e-10 1e+30` as `fail` and -167 vs `range -1e+30 -100` as `pass` — both correct under the inclusive-bound intent. Cleanup via overwrite-import (#46 G); fnxSession0 restored to 11-row baseline.

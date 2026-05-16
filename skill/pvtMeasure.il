@@ -410,11 +410,15 @@
         (return (pvtOk (list "range" (pvtUnwrap v1) (pvtUnwrap v2))))))
 
     ;; Comparison operators — handle the 2-char ones first (<=, >=) then 1-char.
+    ;; Tag names match the Python spec_eval convention. Note: ge/le are
+    ;; inclusive bounds, which axlSKILL has no dedicated keyword for. Dispatch
+    ;; emits ?range with a HUGE sentinel; see _pvtMeasureApplyParsedSpec and
+    ;; DECISIONS #47.
     (cond
       ((and (greaterp (strlen s) 2) (equal (substring s 1 2) "<="))
-        (setq op "max") (setq rest (substring s 3)))
+        (setq op "le") (setq rest (substring s 3)))
       ((and (greaterp (strlen s) 2) (equal (substring s 1 2) ">="))
-        (setq op "min") (setq rest (substring s 3)))
+        (setq op "ge") (setq rest (substring s 3)))
       ((and (greaterp (strlen s) 1) (equal (substring s 1 1) "<"))
         (setq op "lt") (setq rest (substring s 2)))
       ((and (greaterp (strlen s) 1) (equal (substring s 1 1) ">"))
@@ -455,7 +459,16 @@
 ;; --------------------------------------------------------------------------
 ;; v1.3 — dispatch a parsed spec to axlAddSpecToOutput with the correct
 ;; mutually-exclusive keyword. Returns t on success, string reason on fail.
+;;
+;; v1.5 #2 (DECISIONS #47): ge/le are inclusive bounds. axlAddSpecToOutput
+;; has no ?le/?ge keyword; ?min/?max would map to "minimize X"/"maximize X"
+;; which Maestro stores as target-style (pass = value ≤ X / value ≥ X),
+;; the SEMANTIC OPPOSITE of what the user wrote. Emit ?range with the
+;; _PVT_MEASURE_SPEC_HUGE sentinel so the inclusive-bound intent survives
+;; the round-trip. Cadence stores these as "range X 1e+30" / "range -1e+30 Y".
 ;; --------------------------------------------------------------------------
+(defvar _PVT_MEASURE_SPEC_HUGE 1.0e30)
+
 (procedure (_pvtMeasureApplyParsedSpec sdb testName outName parsed)
   "Call axlAddSpecToOutput with the keyword arg implied by the parsed tag.
    `parsed` is the (kindStr v1 [v2]) list produced by _pvtMeasureParseSpec.
@@ -470,10 +483,12 @@
           (errset (axlAddSpecToOutput sdb testName outName ?lt v1) nil))
         ((equal kind "gt")
           (errset (axlAddSpecToOutput sdb testName outName ?gt v1) nil))
-        ((equal kind "min")
-          (errset (axlAddSpecToOutput sdb testName outName ?min v1) nil))
-        ((equal kind "max")
-          (errset (axlAddSpecToOutput sdb testName outName ?max v1) nil))
+        ((equal kind "ge")
+          (errset (axlAddSpecToOutput sdb testName outName
+                                      ?range (list v1 _PVT_MEASURE_SPEC_HUGE)) nil))
+        ((equal kind "le")
+          (errset (axlAddSpecToOutput sdb testName outName
+                                      ?range (list (minus _PVT_MEASURE_SPEC_HUGE) v1)) nil))
         ((equal kind "range")
           (errset (axlAddSpecToOutput sdb testName outName
                                       ?range (list v1 v2)) nil))

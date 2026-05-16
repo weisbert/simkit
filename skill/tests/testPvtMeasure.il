@@ -262,15 +262,17 @@
     (let ((r (_pvtMeasureParseSpec ">-140")))
       (pvtAssert (pvtUnwrap r) '("gt" -140) ">-140 -> (gt -140)"))))
 
-(pvtTestRegister "measure/parseSpec/inclusive-max"
+(pvtTestRegister "measure/parseSpec/inclusive-upper"
   (lambda ()
     (let ((r (_pvtMeasureParseSpec "<= 1e-10")))
-      (pvtAssert (pvtUnwrap r) '("max" 1e-10) "<= maps to ?max"))))
+      (pvtAssert (pvtUnwrap r) '("le" 1e-10)
+                 "<= maps to (le v) — dispatches via ?range -HUGE..v"))))
 
-(pvtTestRegister "measure/parseSpec/inclusive-min"
+(pvtTestRegister "measure/parseSpec/inclusive-lower"
   (lambda ()
     (let ((r (_pvtMeasureParseSpec ">=0")))
-      (pvtAssert (pvtUnwrap r) '("min" 0) ">= maps to ?min"))))
+      (pvtAssert (pvtUnwrap r) '("ge" 0)
+                 ">= maps to (ge v) — dispatches via ?range v..HUGE"))))
 
 (pvtTestRegister "measure/parseSpec/range-keyword"
   (lambda ()

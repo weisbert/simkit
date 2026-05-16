@@ -112,10 +112,10 @@ The ingester denormalises these onto every `results` row (writing the spec strin
 |--------------------|----------------------------------------|
 | `<X` / `< X`       | value < X                              |
 | `>X` / `> X`       | value > X                              |
-| `<=X` / `<= X`     | value ≤ X                              |
-| `>=X` / `>= X`     | value ≥ X                              |
-| `minimize X`       | value ≤ X  (Maestro CSV form of `?min`) |
-| `maximize X`       | value ≥ X  (Maestro CSV form of `?max`) |
+| `<=X` / `<= X`     | value ≤ X (push-side stores as `range -1e+30 X`; see DECISIONS #47) |
+| `>=X` / `>= X`     | value ≥ X (push-side stores as `range X 1e+30`; see DECISIONS #47) |
+| `minimize X`       | value ≤ X  (Maestro CSV form of `?min` — target-style, accepted on read only) |
+| `maximize X`       | value ≥ X  (Maestro CSV form of `?max` — target-style, accepted on read only) |
 | `range X Y`        | X ≤ value ≤ Y                          |
 | `[X:Y]`            | alias for `range X Y`                  |
 | `X..Y`             | alias for `range X Y` (v1.4 addition)  |

@@ -98,7 +98,12 @@ class MeasureApply:
     raw_eval_type: str = "point"
     # v1.3 — Cadence-native spec string passthrough (e.g. "<100p", "> -140",
     # "range -150 -100"). SKILL push parses via evalstring + dispatches to
-    # axlAddSpecToOutput's exclusive ?lt/?gt/?range/?min/?max/?tol keyword.
+    # axlAddSpecToOutput. Mapping (see DECISIONS #45 + #47):
+    #   <X / >X     → ?lt / ?gt
+    #   >=X         → ?range (X, 1e30)   — inclusive lower bound via sentinel
+    #   <=X         → ?range (-1e30, X)  — inclusive upper bound via sentinel
+    #   range / [:] / ..  → ?range
+    #   tol X       → ?tol
     # A single spec string applies uniformly to every row the entry yields
     # (sweep × signal_group expansion all share it).
     spec: Optional[str] = None
@@ -723,11 +728,11 @@ def _validate_param_sweep(
 
 
 # v1.3 — bundle-side spec validation. We accept the Cadence-native string
-# forms verified live against fnxSession0 (see DECISIONS #45):
+# forms verified live against fnxSession0 (see DECISIONS #45, #47):
 #   "<X"     → strict less-than           → SKILL ?lt
 #   ">X"     → strict greater-than        → SKILL ?gt
-#   "<=X"    → inclusive upper bound      → SKILL ?max
-#   ">=X"    → inclusive lower bound      → SKILL ?min
+#   "<=X"    → inclusive upper bound      → SKILL ?range (-1e30, X)
+#   ">=X"    → inclusive lower bound      → SKILL ?range (X, 1e30)
 #   "range X Y" or "[X:Y]" or "X..Y"      → SKILL ?range
 #   "tol X"  → tolerance form             → SKILL ?tol
 # The framework only does light prefix sanity at load time. The number tokens

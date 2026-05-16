@@ -45,7 +45,7 @@ Only after Phase 2's helper is in daily use.
 Items deferred from v1.4 or surfaced during it (top is highest priority):
 
 1. **Spec weight pull + push round-trip** — v1.4 #3 scope-shrunk after live probe (DECISIONS #46): weight IS readable via `axlGetSpecWeight(int_handle)`, info is NOT. User confirmed they don't touch weights in practice (all default to 1.0). Promote when a real "this spec is more important" workflow surfaces.
-2. **`?min`/`?max` vs `>=`/`<=` semantic alignment** — v1.3 maps `>=X` → `?min` and `<=X` → `?max`, but Maestro stores those as `minimize X` / `maximize X` (target-style, pass = value ≤ X / value ≥ X), NOT inclusive bounds. Latent round-trip bug; v1.4 #1 dogfood didn't exercise it (only used `<`/`>`). Either change v1.3 push mapping (e.g. emit `?range X 1e30` for inclusive lower bound), or document as user-facing and rename bundle field.
+2. ~~**`?min`/`?max` vs `>=`/`<=` semantic alignment**~~ — **DONE 2026-05-16** (DECISIONS #47). Push mapping changed to `?range X 1e30` / `?range -1e30 X` with `_PVT_MEASURE_SPEC_HUGE = 1e30` sentinel; parser tags renamed `min`/`max` → `ge`/`le` to match Python convention. Cadence stores as `"range X 1e+30"` / `"range -1e+30 X"`; spec_eval evaluates correctly.
 3. **Per-iteration spec on sweep entries** — parallel `specs: [...]` array alongside `output_names` (PN @ 1MHz `<-100` vs PN @ 100MHz `<-140`).
 4. **Per-signal alias map** — absorb the `Iavg_1`/`Iavg_2` hand-numbering idiom from v1.1 walkthrough.
 5. **Multi-axis param_sweep** — v1.2 enforces single-axis; promote when a real "freq × temperature" 2-D case appears.
