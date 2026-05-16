@@ -350,102 +350,286 @@ def _resolve_results_root(pvtproject_path: Path) -> Path:
     return candidate
 
 
-def _set_ic_for_item(
-    item: ReviewItem,
-    bridge,
-    session: str,
-    pvtproject_path: Path,
-    history_by_item: dict[str, str],
-    notes: list[str],
-) -> Optional[str]:
-    """Resolve corner-1's IC for this item's source + set it on every test.
+def _resolve_one_corner_ic(
+    ic_from: IcFromRef,
+    source_history: str,
+    corner_idx: int,
+    test_name: str,
+    results_root: Path,
+):
+    """Wrapper around ic_source.resolve_ic_path that returns None on any
+    failure (caller treats that as "naked retry" per DECISIONS #57)."""
+    try:
+        return resolve_ic_path(
+            results_root, source_history, corner_idx=corner_idx,
+            test_name=test_name, file_kind=ic_from.file,
+            explicit_subdir=ic_from.subdir if ic_from.subdir else None,
+        )
+    except IcSourceError:
+        return None
 
-    v1.2 v1 limitation (DECISIONS #57): the consumer item runs all
-    corners as one batch with corner-1's IC. v1.2.1 will iterate corners
-    one-by-one with per-corner IC. Until then, this helper takes the
-    first available corner dir of the source history's results.
 
-    Returns the previous option value (so the orchestrator can restore
-    it via :func:`pvt_runner_clear_ic_source` after the run), or
-    ``None`` if no IC was set (in which case the orchestrator should
-    skip the clear step too).
+def _execute_batch_item(
+    item, idx, total, bridge, session, pvtproject_path,
+    history_prefix, timestamp, run_kwargs, ingest_cb, notes,
+):
+    """Run all of an item's corners in one axlRunAllTests batch.
+
+    The original v1 execution path — used when ``item.ic_from`` is None.
+    Returns ``(histories, run_dirs, completed)``.
     """
-    ic_from: IcFromRef = item.ic_from  # caller has already null-guarded
+    sanitized = _sanitize_history(item.name)
+    history = f"{history_prefix}_{sanitized}_{timestamp}_{idx}"
+
+    print(f"[orch {idx}/{total}] {item.name!r}: "
+          f"running history={history} (this blocks until sim done)…")
+    actual_history = history
+    completed = False
+    try:
+        rv = bridge.pvt_runner_run(
+            history, session=session, **(run_kwargs or {}),
+        )
+        if isinstance(rv, tuple) and len(rv) >= 3:
+            actual_history = rv[2]
+            if actual_history != history:
+                notes.append(f"Maestro renamed history -> {actual_history}")
+        completed = True
+    except Exception as exc:
+        notes.append(f"axlRunAllTests error: {exc}")
+        print(f"           ! run errored: {exc}")
+        return ([], [], False)
+
+    histories = [actual_history]
+    run_dirs: list[Path] = []
+    try:
+        run_dir = bridge.pvt_save(
+            actual_history,
+            pvtproject_path=pvtproject_path,
+            session=session,
+        )
+        run_dirs.append(Path(run_dir))
+        print(f"           dumped to {run_dir}")
+    except Exception as exc:
+        notes.append(f"PvtSave error: {exc}")
+        print(f"           ! PvtSave errored: {exc}")
+        return (histories, run_dirs, completed)
+
+    try:
+        if ingest_cb is None:
+            _default_ingest(Path(run_dirs[0]), pvtproject_path)
+        else:
+            ingest_cb(str(run_dirs[0]))
+        print(f"           ingested")
+    except Exception as exc:
+        notes.append(f"ingest error: {exc}")
+        print(f"           ! ingest errored: {exc}")
+    return (histories, run_dirs, completed)
+
+
+def _execute_per_corner_item(
+    item, idx, total, corner_count,
+    bridge, session, pvtproject_path,
+    history_prefix, timestamp, run_kwargs, ingest_cb,
+    history_by_item, notes,
+):
+    """Run each corner of a consumer item as its own one-corner submit
+    with per-corner IC pointing at the upstream item's spectre.<kind>.
+
+    Phase 3A v1.2 stage-2 — DECISIONS #57. For each corner_idx 1..N:
+      1. Resolve the upstream's per-corner IC path (None → naked retry)
+      2. Set additionalArgs via pvt_runner_set_ic_source
+      3. Enable ONLY that corner via pvt_runner_enable_corner_by_index
+      4. Run, PvtSave, ingest
+      5. Clear IC (restore prev value)
+    Wraps the loop in snapshot/restore of the corner enable mask so the
+    next item / the user's session see the original state.
+
+    Returns ``(histories, run_dirs, completed)``. ``completed`` is True
+    iff at least one corner ran without erroring; per-corner failures
+    are recorded in ``notes`` and do not abort the loop.
+    """
+    ic_from: IcFromRef = item.ic_from
+    sanitized = _sanitize_history(item.name)
+
     source_name = ic_from.item
     source_history = history_by_item.get(source_name)
     if source_history is None:
         notes.append(
             f"ic_from: source item {source_name!r} has no recorded history "
-            f"(did it complete?). Running this item without IC."
+            f"(did it complete?). Running consumer in BATCH mode without IC."
         )
-        print(f"           ! ic_from: no upstream history; naked retry")
-        return None
+        print(f"           ! ic_from: no upstream history; falling back to batch")
+        return _execute_batch_item(
+            item, idx, total, bridge, session, pvtproject_path,
+            history_prefix, timestamp, run_kwargs, ingest_cb, notes,
+        )
 
     try:
         results_root = _resolve_results_root(pvtproject_path)
     except OrchestratorError as exc:
         notes.append(f"ic_from: {exc}")
         print(f"           ! ic_from: {exc}")
-        return None
-
-    # v1 simplification: use corner-1 (first non-default corner dir);
-    # all corners of this batch share the same IC path. Test name is the
-    # consumer's first test (in practice the typical PSS item names ONE
-    # test). Multi-test items would need finer-grained handling.
-    test_for_ic = item.tests[0]
-    explicit_subdir = ic_from.subdir if ic_from.subdir else None
-    try:
-        resolved = resolve_ic_path(
-            results_root, source_history, corner_idx=1,
-            test_name=test_for_ic, file_kind=ic_from.file,
-            explicit_subdir=explicit_subdir,
+        return _execute_batch_item(
+            item, idx, total, bridge, session, pvtproject_path,
+            history_prefix, timestamp, run_kwargs, ingest_cb, notes,
         )
-    except IcSourceError as exc:
-        notes.append(f"ic_from path resolve failed: {exc}")
-        print(f"           ! ic_from resolve: {exc}")
-        return None
 
-    if resolved is None:
+    if not corner_count or corner_count < 1:
         notes.append(
-            f"ic_from: corner 1's spectre.{ic_from.file} not found under "
-            f"{results_root}/{source_history}/1/{test_for_ic}/. Naked retry."
+            f"ic_from: consumer corner_count={corner_count!r} (union not loaded?), "
+            f"cannot iterate. Falling back to batch."
         )
-        print(f"           ! ic_from: corner-1 IC missing; naked retry")
-        return None
+        return _execute_batch_item(
+            item, idx, total, bridge, session, pvtproject_path,
+            history_prefix, timestamp, run_kwargs, ingest_cb, notes,
+        )
 
-    # Set the IC on every test of this consumer item. Capture the
-    # FIRST test's prev value as the restore baseline — all tests in
-    # the consumer item share the same simulator session in practice
-    # (same cell/view), so a single restore covers them.
-    prev_value: Optional[str] = None
-    for tname in item.tests:
+    # Per-corner test target. v1.2 assumes one test per ic_from consumer
+    # item (the typical PSS-after-trans case). Multi-test items would
+    # need per-(corner, test) IC pairing — promoted to v1.3 if a real
+    # case appears.
+    test_for_ic = item.tests[0]
+
+    histories: list[str] = []
+    run_dirs: list[Path] = []
+    completed = False
+
+    print(f"[orch {idx}/{total}] {item.name!r}: ic_from chain on "
+          f"{corner_count} corners (source={source_name!r})…")
+
+    # Snapshot corner enable state so we can restore after the loop.
+    try:
+        corner_snap = bridge.pvt_runner_snapshot_corners_enable(session=session)
+    except Exception as exc:
+        notes.append(f"ic_from: snapshot corner-enable failed: {exc}")
+        print(f"           ! snapshot corners: {exc}")
+        return ([], [], False)
+
+    try:
+        for corner_idx in range(1, corner_count + 1):
+            # 1. Resolve the per-corner IC path from the upstream history.
+            resolved = _resolve_one_corner_ic(
+                ic_from, source_history, corner_idx, test_for_ic, results_root,
+            )
+            ic_prev_value: Optional[str] = None
+            if resolved is None:
+                notes.append(
+                    f"ic_from: corner {corner_idx} {ic_from.file} not found, "
+                    f"running naked"
+                )
+                print(f"           [corner {corner_idx}/{corner_count}] "
+                      f"no IC; running naked")
+            else:
+                try:
+                    ic_prev_value = bridge.pvt_runner_set_ic_source(
+                        test_for_ic, str(resolved.abs_path), ic_from.mode,
+                        session=session,
+                    )
+                    print(f"           [corner {corner_idx}/{corner_count}] "
+                          f"set {ic_from.mode}={resolved.abs_path.name} "
+                          f"(subdir={resolved.subdir})")
+                except Exception as exc:
+                    notes.append(
+                        f"ic_from corner {corner_idx} set failed: {exc}"
+                    )
+                    print(f"           ! [corner {corner_idx}] set: {exc}")
+                    ic_prev_value = ""  # ensure clear runs to nudge back
+
+            # 2. Enable only this corner
+            try:
+                enabled_name = bridge.pvt_runner_enable_corner_by_index(
+                    corner_idx, session=session,
+                )
+            except Exception as exc:
+                notes.append(
+                    f"ic_from corner {corner_idx} enable failed: {exc}; "
+                    f"skipping this corner"
+                )
+                print(f"           ! [corner {corner_idx}] enable: {exc}")
+                # Still need to clear IC if we set it
+                if ic_prev_value is not None:
+                    try:
+                        bridge.pvt_runner_clear_ic_source(
+                            test_for_ic, ic_from.mode, ic_prev_value,
+                            session=session,
+                        )
+                    except Exception:
+                        pass
+                continue
+
+            # 3. Run + PvtSave + ingest for this single corner
+            history = (f"{history_prefix}_{sanitized}_c{corner_idx}_"
+                       f"{timestamp}_{idx}")
+            actual_history = history
+            try:
+                rv = bridge.pvt_runner_run(
+                    history, session=session, **(run_kwargs or {}),
+                )
+                if isinstance(rv, tuple) and len(rv) >= 3:
+                    actual_history = rv[2]
+                    if actual_history != history:
+                        notes.append(
+                            f"corner {corner_idx}: Maestro renamed "
+                            f"history -> {actual_history}"
+                        )
+                histories.append(actual_history)
+                completed = True  # at least one corner ran cleanly
+            except Exception as exc:
+                notes.append(
+                    f"corner {corner_idx} ({enabled_name!r}) run failed: {exc}"
+                )
+                print(f"           ! [corner {corner_idx}] run: {exc}")
+                # fall through to clear so we don't leak IC into next iter
+
+            # 4. PvtSave for the corner that just ran (if it did)
+            if actual_history in histories:
+                try:
+                    run_dir = bridge.pvt_save(
+                        actual_history,
+                        pvtproject_path=pvtproject_path,
+                        session=session,
+                    )
+                    run_dirs.append(Path(run_dir))
+                except Exception as exc:
+                    notes.append(
+                        f"corner {corner_idx} PvtSave failed: {exc}"
+                    )
+                    print(f"           ! [corner {corner_idx}] PvtSave: {exc}")
+                else:
+                    try:
+                        if ingest_cb is None:
+                            _default_ingest(Path(run_dir), pvtproject_path)
+                        else:
+                            ingest_cb(run_dir)
+                    except Exception as exc:
+                        notes.append(
+                            f"corner {corner_idx} ingest failed: {exc}"
+                        )
+
+            # 5. Clear IC (restore prev_value) — always, even if run/save errored
+            if ic_prev_value is not None:
+                try:
+                    bridge.pvt_runner_clear_ic_source(
+                        test_for_ic, ic_from.mode, ic_prev_value,
+                        session=session,
+                    )
+                except Exception as exc:
+                    notes.append(
+                        f"corner {corner_idx} clear-IC failed: {exc}"
+                    )
+    finally:
+        # Always restore the corner enable mask so other items / the
+        # user session see the original state.
         try:
-            pv = bridge.pvt_runner_set_ic_source(
-                tname, str(resolved.abs_path), ic_from.mode,
-                session=session,
+            bridge.pvt_runner_restore_corners_enable(
+                corner_snap, session=session,
             )
-            if prev_value is None:
-                prev_value = pv
+            print(f"           restored corner enable mask")
         except Exception as exc:
-            notes.append(
-                f"ic_from: pvt_runner_set_ic_source({tname!r}) failed: {exc}. "
-                f"Bridge writes to the test's 'additionalArgs' sim option — "
-                f"check it's not in a read-only / locked state."
-            )
-            print(f"           ! ic_from set on {tname!r}: {exc}")
-            # If we partially set on earlier tests, attempt to clear them
-            # before bailing — best-effort.
-            return prev_value if prev_value is not None else ""
+            notes.append(f"ic_from corner restore failed: {exc}")
+            print(f"           ! restore corners: {exc}")
 
-    print(
-        f"           ic_from: set {ic_from.mode}={resolved.abs_path} "
-        f"(from {source_name}, corner=1, subdir={resolved.subdir}) "
-        f"[v1.2 v1: all corners share this IC]"
-    )
-    notes.append(
-        f"ic_from: {ic_from.mode}=corner1's {ic_from.file} from {source_name}"
-    )
-    return prev_value if prev_value is not None else ""
+    return (histories, run_dirs, completed)
 
 
 def execute(
@@ -509,10 +693,7 @@ def execute(
     try:
         for idx, planned in enumerate(plan.planned, start=1):
             item = planned.item
-            histories: list[str] = []
-            run_dirs: list[Path] = []
             notes: list[str] = []
-            completed = False
 
             # 1. enable only this item's tests
             bridge.pvt_runner_enable_only(list(item.tests), session=session)
@@ -532,93 +713,36 @@ def execute(
             #    when pvt_measure_push wiring is needed; for S1 dogfood we
             #    rely on whatever Outputs table the session already has).
 
-            # 3b. ic_from (Phase 3A v1.2, DECISIONS #57) — point Spectre at
-            # the upstream item's per-corner IC. v1.2 v1 limitation: we
-            # set ONE shared IC path (corner-1's) for the whole batch
-            # because per-corner enable-and-run iteration needs a SKILL
-            # helper that doesn't exist yet (tracked as v1.2.1). True
-            # per-corner-distinct IC will land then. For now this still
-            # delivers value: the orchestrator handles the cross-item
-            # plumbing + path resolution + restore-on-exit, the user just
-            # gets a less-than-ideal "all corners share corner-1's IC"
-            # behavior until v1.2.1.
-            ic_prev_value: Optional[str] = None
-            if item.ic_from is not None:
-                ic_prev_value = _set_ic_for_item(
-                    item, bridge, session, pvtproject_path,
+            # 4. Branch on ic_from: batch path vs. per-corner path
+            if item.ic_from is None:
+                histories, run_dirs, completed = _execute_batch_item(
+                    item, idx, len(plan.planned),
+                    bridge, session, pvtproject_path,
+                    history_prefix, timestamp, run_kwargs, ingest_cb,
+                    notes,
+                )
+            else:
+                # Per-corner iteration with IC (Phase 3A v1.2 stage-2,
+                # DECISIONS #57). Each corner submitted as its own
+                # axlRunAllTests with only that corner enabled, IC set
+                # via additionalArgs, results PvtSaved + ingested
+                # independently. Wraps the per-corner loop in
+                # snapshot/restore of the corner enable mask so other
+                # items see the original state.
+                histories, run_dirs, completed = _execute_per_corner_item(
+                    item, idx, len(plan.planned), planned.corner_count,
+                    bridge, session, pvtproject_path,
+                    history_prefix, timestamp, run_kwargs, ingest_cb,
                     history_by_item, notes,
                 )
 
-            # 4. run synchronously
-            sanitized = _sanitize_history(item.name)
-            history = f"{history_prefix}_{sanitized}_{timestamp}_{idx}"
-
-            print(f"[orch {idx}/{len(plan.planned)}] {item.name!r}: "
-                  f"running history={history} (this blocks until sim done)…")
-            actual_history = history
-            try:
-                rv = bridge.pvt_runner_run(
-                    history, session=session, **(run_kwargs or {}),
-                )
-                # rv may be (status, sub) for legacy mocks or
-                # (status, sub, actual_name) for the live bridge.
-                if isinstance(rv, tuple) and len(rv) >= 3:
-                    actual_history = rv[2]
-                    if actual_history != history:
-                        notes.append(f"Maestro renamed history -> {actual_history}")
-                histories.append(actual_history)
-                completed = True
-            except Exception as exc:
-                notes.append(f"axlRunAllTests error: {exc}")
-                print(f"           ! run errored: {exc}")
-
-            # 4b. clear the IC we set in 3b — independent of run success
-            # so the next item starts clean even if this one errored.
-            if item.ic_from is not None and ic_prev_value is not None:
-                try:
-                    for test_name in item.tests:
-                        bridge.pvt_runner_clear_ic_source(
-                            test_name, item.ic_from.mode, ic_prev_value,
-                            session=session,
-                        )
-                except Exception as exc:
-                    notes.append(f"ic_from clear error: {exc}")
-                    print(f"           ! ic clear errored: {exc}")
-
-            # 5. dump via PvtSave
-            run_dir = None
-            if completed:
-                try:
-                    run_dir = bridge.pvt_save(
-                        actual_history,
-                        pvtproject_path=pvtproject_path,
-                        session=session,
-                    )
-                    run_dirs.append(Path(run_dir))
-                    print(f"           dumped to {run_dir}")
-                except Exception as exc:
-                    notes.append(f"PvtSave error: {exc}")
-                    print(f"           ! PvtSave errored: {exc}")
-
-            # 6. ingest (default: real ingest into project DB)
-            if run_dir:
-                try:
-                    if ingest_cb is None:
-                        _default_ingest(Path(run_dir), pvtproject_path)
-                    else:
-                        ingest_cb(run_dir)
-                    print(f"           ingested")
-                except Exception as exc:
-                    notes.append(f"ingest error: {exc}")
-                    print(f"           ! ingest errored: {exc}")
-
-            # 7. TODO (v1.x): per-corner failure detection + strategy chain.
-            #    For the initial dogfood we mark the item completed and
-            #    leave per-corner verdict reading to `pvt list` post-run.
-
             # Capture history for any downstream consumer's ic_from lookup.
+            # For per-corner items, this is the FIRST history (each corner
+            # has its own); resolve_ic_path will compute the right per-corner
+            # subdir from any of them since they all share <results>/<hist>/.
+            # For batch items, this is the single history covering all corners.
             if completed and histories:
-                history_by_item[item.name] = histories[-1]
+                history_by_item[item.name] = histories[0]
 
             result = ItemResult(
                 item_name=item.name,

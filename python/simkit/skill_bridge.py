@@ -792,6 +792,60 @@ def pvt_runner_clear_ic_source(
     )
 
 
+def pvt_runner_snapshot_corners_enable(
+    *, session: str, workspace: Any = None,
+) -> list[tuple[str, bool]]:
+    """Capture per-corner enable state for later restore.
+
+    Returns a list of ``(corner_name, enabled_bool)`` pairs in the order
+    ``axlGetCorners(sdb)`` returns names (which matches the explode order
+    of the source union, which matches the /1, /2, ... result dir
+    numbering). Pass the result back into
+    :func:`pvt_runner_restore_corners_enable` after a per-corner loop.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    raw = _unwrap(ws["pvtRunnerSnapshotCornersEnable"](session))
+    out: list[tuple[str, bool]] = []
+    for pair in raw or []:
+        if isinstance(pair, (list, tuple)) and len(pair) >= 2:
+            out.append((str(pair[0]), bool(pair[1])))
+    return out
+
+
+def pvt_runner_enable_corner_by_index(
+    idx: int, *, session: str, workspace: Any = None,
+) -> str:
+    """Disable every corner except the one at 1-based ``idx``.
+
+    Returns the enabled corner's name (so the caller can log it).
+    Raises :class:`SkillBridgeError` if ``idx`` is out of range.
+    """
+    if not isinstance(idx, int) or idx < 1:
+        raise SkillBridgeError(
+            "pvt_validation",
+            f"idx must be a positive integer (1-based), got {idx!r}",
+        )
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    return str(_unwrap(ws["pvtRunnerEnableCornerByIndex"](session, idx)))
+
+
+def pvt_runner_restore_corners_enable(
+    snap: list[tuple[str, bool]], *, session: str, workspace: Any = None,
+) -> None:
+    """Restore per-corner enable state from a snapshot.
+
+    Pairs missing from ``snap`` (e.g. corners added between
+    snapshot and restore) are silently no-op'd by the SKILL helper.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    # SKILL wants a list of [name, bool] pairs
+    payload = [[name, bool(en)] for name, en in snap]
+    _unwrap(ws["pvtRunnerRestoreCornersEnable"](session, payload))
+
+
 def pvt_runner_delete_history(
     history_name: str, *, session: str, workspace: Any = None,
 ) -> None:

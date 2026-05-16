@@ -1213,6 +1213,29 @@ _Date: 2026-05-16_
 
 **v1 caveat:** `additionalArgs` is shared with whatever else the user might put there. We snapshot the prev value on entry and pass it back to ClearIcSource for restore — but if the user relies on `additionalArgs` for OTHER per-test needs (logging level, debug flags) and runs ic_from concurrently, our write clobbers theirs for the duration of the consumer item's run. v1.2.1 follow-up if dogfood shows this matters: append-with-marker instead of replace-wholesale.
 
+---
+
+**Stage-2 follow-up 2026-05-16: true per-corner iteration** — the initial stage-1 had a "all corners share corner-1's IC" limitation because the orchestrator's existing `axlRunAllTests` path submitted the whole batch at once, so we could only set ONE additionalArgs value per item. Stage-2 fixes that:
+
+1. New SKILL helpers (pvtRunner.il):
+   - `pvtRunnerSnapshotCornersEnable(sess)` → list of `(name, enabled)` pairs in `axlGetCorners(sdb)` order (which matches the /1, /2, ... result-dir numbering).
+   - `pvtRunnerEnableCornerByIndex(sess, idx)` → disables every corner except 1-based idx via `axlSetEnabled(cornerHandle, t/nil)`.
+   - `pvtRunnerRestoreCornersEnable(sess, snap)` → apply snapshot.
+
+2. Orchestrator (`_execute_per_corner_item`): for items with `ic_from`, wraps a per-corner loop in snapshot/restore. Each iteration: resolve per-corner IC → set additionalArgs → enable one corner → axlRunAllTests → PvtSave → ingest → clear additionalArgs. Per-corner failures don't abort the loop (recorded in notes). Live-verified on `fnxSession0` (TT/TT_pvt/TT_2p5G): snapshot returns `[['TT', None], ['TT_pvt', True], ['TT_2p5G', None]]`, enable-by-index round-trips cleanly, bad-idx rejection (0, -1, 999) all surface as `pvt_validation`.
+
+3. Trade-off: per-corner = N submits instead of 1. For N=5-10 corner real PSS sweeps this is slow vs. cached batch (each submit pays Maestro's per-corner overhead). Acceptable for v1.2 because IC injection requires it; if dogfood reveals this is the bottleneck, v1.3 candidate is a per-corner-IC-aware single-batch netlist injection.
+
+4. Fallback semantics: if upstream item has no recorded history (e.g. trans crashed pre-PvtSave), consumer falls back to batch-without-IC so the run still produces *something* observable. If results_root can't be resolved (.pvtproject in unexpected layout), same fallback. Per-corner missing-IC = naked retry for that corner (not whole item).
+
+5. Stage-2 tests:
+   - SKILL Tier-1: +7 cases (3 existence + 4 idx-validation for the new helpers) → 419 → 426 / 1. (A "positive-int-accepts-validation" smoke test was dropped because calling with `"fakeSession"` reaches `axlGetMainSetupDB` which raises a C-level error errset can't trap — same class as DECISIONS #55; the positive-int path is covered live by the bridge round-trip on fnxSession0 above.)
+   - Python: rewrote 4 `ExecuteIcFromTests` cases to assert per-corner semantics (N set / N clear / N enable_corner_by_index / N+1 runs; snapshot+restore once; missing-IC partial fallback; snapshot restored even on run errors). Suite stays 912 / 0.
+
+Stage-1's "v1 limitation: all corners share corner-1" is now gone. The ic_from feature delivers what the original user request asked for: "不同的corner读取不同的ic condition."
+
+
+
 **Why bump schema_version (not additive):** the orchestrator's per-corner control loop differs structurally when `ic_from` is present — it iterates corners itself and calls SetIcSource/ClearIcSource around each, vs. v1's "submit one axlRunAllTests for the whole item, walk away." Loaders running v1 code against a v2 sidecar would silently ignore `ic_from` and submit the consumer item with no IC — which would converge-fail every PSS corner. Version bump makes the failure loud (loader rejects unknown schema).
 
 **Promoted from v1.3 to v1.2 by user request (real workflow):** v1.2 backlog items (rdb-walker discriminator demoted in #56; `pvt corners push --replace`; per-corner verdict + strategy chain) reslot to v1.3.

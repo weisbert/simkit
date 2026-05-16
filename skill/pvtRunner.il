@@ -473,4 +473,118 @@
     (return (pvtOk t))))
 
 
-(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.2: + SetIcSource / ClearIcSource via additionalArgs)\n")
+;; --- per-corner enable/disable for Phase 3A v1.2 stage-2 ----------------
+;;
+;; The IC piping (SetIcSource above) gives us per-corner IC values, but
+;; the legacy axlRunAllTests submits ALL enabled corners in one batch —
+;; so different IC per corner needs us to actually run corners ONE AT A
+;; TIME. These helpers let the Python orchestrator iterate corners
+;; sequentially: snapshot current enable mask → for each idx, enable
+;; only that one → run → restore.
+;;
+;; Live-probe 2026-05-16 (DECISIONS #57 stage-2): axlSetEnabled accepts
+;; a corner handle (returned by axlGetCorner(sdb, name)) and a t/nil
+;; payload. Round-trip TT_pvt True→nil→True confirmed working on
+;; fnxSession0. axlGetCorners(sdb) returns [containerHandle, names-list]
+;; — names-list ORDER matches the explode order of the source union,
+;; which matches the /1, /2, ... result-dir numbering Phase 1 collector
+;; sees post-run. So 1-based corner_idx is consistent across:
+;;   - ic_source.resolve_ic_path(corner_idx=N)
+;;   - this helper's enable index
+;;   - the per-corner result dir on disk
+;;
+;; pvtRunnerSnapshotCornersEnable(sess)
+;;   -> (pvtOk ((cornerName cornerEnabledBool) ...))
+;;     Snapshot serialised as list-of-pairs so the Python orchestrator
+;;     can stash it through a Restore call after the loop. Same shape
+;;     as pvtRunnerSnapshotTestState for symmetry.
+;;
+;; pvtRunnerEnableCornerByIndex(sess, idx)
+;;   -> (pvtOk enabledCornerName)
+;;   -> (pvtErr 'pvt_validation msg) on idx out of range
+;;     Disables every corner except the one at 1-based idx. Returns the
+;;     enabled corner's name so the caller can log it.
+;;
+;; pvtRunnerRestoreCornersEnable(sess, snap)
+;;   -> (pvtOk snap)
+;;     Apply snapshot. Missing names = no-op (snapshot was taken before
+;;     a corner was added; nothing to restore).
+
+(procedure (pvtRunnerSnapshotCornersEnable sess)
+  (prog (sessR sdbR sdb cornersRaw names out h en)
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sdbR (_pvtRunnerGetSdb (pvtUnwrap sessR)))
+    (cond ((pvtIsErr sdbR) (return sdbR)))
+    (setq sdb (pvtUnwrap sdbR))
+    (setq cornersRaw (errset (axlGetCorners sdb) nil))
+    (setq cornersRaw (cond ((listp cornersRaw) (car cornersRaw)) (t nil)))
+    (cond
+      ((or (null cornersRaw) (lessp (length cornersRaw) 2))
+        (return (pvtErr 'pvt_runner_snapshot_corners
+                        "axlGetCorners returned nil or wrong shape"))))
+    (setq names (cadr cornersRaw))
+    (setq out nil)
+    (foreach name names
+      (setq h (errset (axlGetCorner sdb name) nil))
+      (setq h (cond ((listp h) (car h)) (t nil)))
+      (cond
+        (h
+          (setq en (errset (axlGetEnabled h) nil))
+          (setq en (cond ((and en (car en)) t) (t nil)))
+          (setq out (cons (list name en) out)))))
+    (return (pvtOk (reverse out)))))
+
+
+(procedure (pvtRunnerEnableCornerByIndex sess idx)
+  (prog (sessR sdbR sdb cornersRaw names targetName h)
+    (cond
+      ((or (null idx) (not (integerp idx)) (lessp idx 1))
+        (return (pvtErr 'pvt_validation
+                        (lsprintf "idx must be a positive integer (1-based), got %L"
+                                  idx)))))
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sdbR (_pvtRunnerGetSdb (pvtUnwrap sessR)))
+    (cond ((pvtIsErr sdbR) (return sdbR)))
+    (setq sdb (pvtUnwrap sdbR))
+    (setq cornersRaw (errset (axlGetCorners sdb) nil))
+    (setq cornersRaw (cond ((listp cornersRaw) (car cornersRaw)) (t nil)))
+    (cond
+      ((or (null cornersRaw) (lessp (length cornersRaw) 2))
+        (return (pvtErr 'pvt_runner_enable_corner
+                        "axlGetCorners returned nil or wrong shape"))))
+    (setq names (cadr cornersRaw))
+    (cond
+      ((greaterp idx (length names))
+        (return (pvtErr 'pvt_validation
+                        (lsprintf "idx %d out of range (only %d corners)"
+                                  idx (length names))))))
+    (setq targetName (nthelem idx names))  ; nthelem is 1-based in SKILL
+    (foreach name names
+      (setq h (errset (axlGetCorner sdb name) nil))
+      (setq h (cond ((listp h) (car h)) (t nil)))
+      (cond
+        (h
+          (axlSetEnabled h (if (equal name targetName) t nil)))))
+    (return (pvtOk targetName))))
+
+
+(procedure (pvtRunnerRestoreCornersEnable sess snap)
+  (prog (sessR sdbR sdb pair name want h)
+    (setq sessR (_pvtRunnerResolveSession sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sdbR (_pvtRunnerGetSdb (pvtUnwrap sessR)))
+    (cond ((pvtIsErr sdbR) (return sdbR)))
+    (setq sdb (pvtUnwrap sdbR))
+    (foreach pair snap
+      (setq name (car pair))
+      (setq want (cadr pair))
+      (setq h (errset (axlGetCorner sdb name) nil))
+      (setq h (cond ((listp h) (car h)) (t nil)))
+      (cond
+        (h (axlSetEnabled h (if want t nil)))))
+    (return (pvtOk snap))))
+
+
+(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.2 stage-2: + per-corner enable helpers)\n")

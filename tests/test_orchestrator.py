@@ -243,49 +243,63 @@ class ExecuteSkeletonTests(unittest.TestCase):
 
 
 class ExecuteIcFromTests(unittest.TestCase):
-    """End-to-end execute() with a 2-item review that pipes IC from trans → PSS.
+    """End-to-end execute() with a 2-item review piping IC from trans → PSS.
 
-    Synthetic on-disk results tree + mock bridge that records every
-    pvt_runner_set_ic_source / clear call. v1.2 v1 behaviour pinned:
-    set+clear fire once per consumer item, against corner-1's IC.
+    Phase 3A v1.2 stage-2 (DECISIONS #57): the PSS item is run ONE CORNER
+    AT A TIME, each corner with its own IC pointing at the upstream
+    trans's per-corner spectre.fc. These tests pin:
+      * happy path: N corners → N set / N clear / N run calls
+      * upstream-failed → consumer falls back to batch (no IC)
+      * one corner's IC missing → that corner runs naked, others succeed
+      * corner-enable snapshot/restore wraps the loop
     """
 
+    # 3-corner union shared by both items (same content; loader requires
+    # source.union == consumer.union so we just emit it once).
+    UNION_DOC = {
+        "union_schema_version": 1,
+        "name": "u",
+        "project": "myproj",
+        "testbench_id": "tb",
+        "rows": [
+            {"row_name": "C1", "vars": {"VDD": "1.0"}, "models": []},
+            {"row_name": "C2", "vars": {"VDD": "1.1"}, "models": []},
+            {"row_name": "C3", "vars": {"VDD": "1.2"}, "models": []},
+        ],
+    }
+    N_CORNERS = 3
+
     def setUp(self):
-        import tempfile
         self.tmp = Path(tempfile.mkdtemp(prefix="simkit_orch_ic_"))
-        # Lay out: <tmp>/results/maestro/<hist>/1/<test>/netlist/spectre.fc
-        # Project file sits at <tmp>/<name>.pvtproject (its parent is
-        # the session dir; _resolve_results_root joins ./results/maestro).
         self.pvt_path = self.tmp / "myproj.pvtproject"
         self.pvt_path.write_text('{"schema_version":1,"project":"myproj"}\n')
-        # Use the history name the mock bridge will generate so the IC
-        # resolver finds the .fc file we plant.
-        # _sanitize_history("trans") = "trans"; the orch builds
-        # "<prefix>_trans_<ts>_<idx>" — too dynamic. We override
-        # MockBridge.pvt_runner_run to return a fixed string.
-        self.fixed_hist = "fixed_trans_hist"
-        corner_dir = (self.tmp / "results" / "maestro" / self.fixed_hist
-                      / "1" / "sim_trans" / "netlist")
-        corner_dir.mkdir(parents=True)
-        (corner_dir / "spectre.fc").write_text("# fake fc\n")
+        # The MockBridge returns a fixed trans-history name; orchestrator
+        # uses it as history_by_item["trans"], and the IC resolver looks
+        # for <results>/<hist>/<N>/<test>/netlist/spectre.fc on disk.
+        self.trans_hist = "fixed_trans_hist"
+        for corner_idx in range(1, self.N_CORNERS + 1):
+            d = (self.tmp / "results" / "maestro" / self.trans_hist
+                 / str(corner_idx) / "sim_test" / "netlist")
+            d.mkdir(parents=True)
+            (d / "spectre.fc").write_text(f"# fake fc corner {corner_idx}\n")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _make_review(self):
-        """2-item review: trans → pss, same union, ic_from on pss."""
+        """2-item review: trans (batch) → pss (per-corner ic_from)."""
         union_path = self.tmp / "unions" / "u.union.json"
         union_path.parent.mkdir(exist_ok=True)
-        union_path.write_text("{}")  # plan_review tolerates unloadable
+        union_path.write_text(json.dumps(self.UNION_DOC))
         doc = {
             "review_schema_version": 2,
             "name": "icfrom",
             "project": "myproj",
             "items": [
-                {"name": "trans", "tests": ["sim_trans"],
+                {"name": "trans", "tests": ["sim_test"],
                  "union": "unions/u.union.json"},
-                {"name": "pss", "tests": ["sim_trans"],  # same test name so
-                 "union": "unions/u.union.json",          # IC dir matches
+                {"name": "pss", "tests": ["sim_test"],
+                 "union": "unions/u.union.json",
                  "ic_from": {"item": "trans", "file": "fc", "mode": "readns"}},
             ],
         }
@@ -293,82 +307,113 @@ class ExecuteIcFromTests(unittest.TestCase):
         review_path.write_text(json.dumps(doc))
         return load_review(review_path)
 
-    def _make_bridge(self, fixed_hist: str, *, set_returns: str = "/old/path"):
-        """MockBridge that returns a fixed history name + records ic calls."""
+    def _make_bridge(self, trans_hist: str):
+        """MockBridge with all the v1.2 stage-2 surface methods."""
         class MockBridge:
             def __init__(self):
-                self.calls = []
                 self.ic_set_calls = []
                 self.ic_clear_calls = []
+                self.enable_corner_calls = []
+                self.run_histories = []
+                self.run_n = 0
+                self.snap_called = 0
+                self.restore_called = 0
 
             def pvt_runner_snapshot_test_state(self, *, session):
-                self.calls.append(("snap",))
-                return [("sim_trans", True)]
+                return [("sim_test", True)]
 
             def pvt_runner_restore_test_state(self, snap, *, session):
-                self.calls.append(("restore",))
+                pass
 
             def pvt_runner_enable_only(self, names, *, session):
-                self.calls.append(("enable_only", tuple(names)))
+                pass
 
             def pvt_runner_run(self, hist, *, session, **kwargs):
-                self.calls.append(("run", hist))
-                return (0, 0, fixed_hist)
+                self.run_n += 1
+                self.run_histories.append(hist)
+                # First run is the trans batch item — return fixed name
+                # so the IC resolver finds spectre.fc on disk. Subsequent
+                # per-corner runs return their own caller-provided name.
+                if self.run_n == 1:
+                    return (0, 0, trans_hist)
+                return (0, 0, hist)
 
             def pvt_save(self, hist, *, pvtproject_path, session):
-                self.calls.append(("save", hist))
                 return str(Path("/tmp") / f"fake_dump_{hist}")
 
             def pvt_corners_push(self, path, **kwargs):
-                self.calls.append(("push",))
+                pass
 
             def pvt_runner_set_ic_source(self, test, path, mode, *, session):
                 self.ic_set_calls.append((test, path, mode))
-                return set_returns
+                return "/orig/additionalArgs"
 
             def pvt_runner_clear_ic_source(self, test, mode, prev, *, session):
                 self.ic_clear_calls.append((test, mode, prev))
 
+            def pvt_runner_snapshot_corners_enable(self, *, session):
+                self.snap_called += 1
+                return [("C1", True), ("C2", False), ("C3", True)]
+
+            def pvt_runner_enable_corner_by_index(self, idx, *, session):
+                self.enable_corner_calls.append(idx)
+                return f"C{idx}"
+
+            def pvt_runner_restore_corners_enable(self, snap, *, session):
+                self.restore_called += 1
+
         return MockBridge()
 
-    def test_happy_path_sets_and_clears_ic(self):
+    def test_per_corner_happy_path(self):
         review = self._make_review()
         plan = plan_review(review)
-        bridge = self._make_bridge(self.fixed_hist)
-        execute(
+        bridge = self._make_bridge(self.trans_hist)
+        report = execute(
             plan, bridge,
             session="fake_session",
             pvtproject_path=self.pvt_path,
             push_union=False,
             ingest_cb=lambda d: None,
         )
-        # set called once on the consumer item, with corner-1's resolved .fc
-        self.assertEqual(len(bridge.ic_set_calls), 1)
-        test_name, path, mode = bridge.ic_set_calls[0]
-        self.assertEqual(test_name, "sim_trans")
-        self.assertEqual(mode, "readns")
-        self.assertTrue(path.endswith("/1/sim_trans/netlist/spectre.fc"))
-        # clear called once, restoring the prev value the mock returned
-        self.assertEqual(len(bridge.ic_clear_calls), 1)
-        self.assertEqual(bridge.ic_clear_calls[0],
-                         ("sim_trans", "readns", "/old/path"))
+        # N corners → N set / N clear / N enable_corner / N+1 runs
+        # (+1 for the upstream trans batch run).
+        self.assertEqual(len(bridge.ic_set_calls), self.N_CORNERS)
+        self.assertEqual(len(bridge.ic_clear_calls), self.N_CORNERS)
+        self.assertEqual(bridge.enable_corner_calls, [1, 2, 3])
+        self.assertEqual(len(bridge.run_histories), 1 + self.N_CORNERS)
 
-    def test_no_upstream_history_runs_naked(self):
-        # Make the upstream item fail (run returns OK but we pretend its
-        # history never makes it into history_by_item by simulating an
-        # error — the cleanest way is to break pvt_runner_run on item 0).
+        # IC set paths point at distinct per-corner .fc files
+        paths = [c[1] for c in bridge.ic_set_calls]
+        self.assertTrue(paths[0].endswith("/1/sim_test/netlist/spectre.fc"))
+        self.assertTrue(paths[1].endswith("/2/sim_test/netlist/spectre.fc"))
+        self.assertTrue(paths[2].endswith("/3/sim_test/netlist/spectre.fc"))
+
+        # Clear always sees the prev value the set returned
+        for c in bridge.ic_clear_calls:
+            self.assertEqual(c, ("sim_test", "readns", "/orig/additionalArgs"))
+
+        # Corner enable mask snapshot + restore both fired exactly once
+        self.assertEqual(bridge.snap_called, 1)
+        self.assertEqual(bridge.restore_called, 1)
+
+        # PSS item completed with N run_dirs
+        pss = next(r for r in report.items if r.item_name == "pss")
+        self.assertTrue(pss.completed)
+        self.assertEqual(len(pss.run_dirs), self.N_CORNERS)
+
+    def test_upstream_failed_falls_back_to_batch(self):
         review = self._make_review()
         plan = plan_review(review)
-        bridge = self._make_bridge(self.fixed_hist)
+        bridge = self._make_bridge(self.trans_hist)
 
+        # Make the trans item's run raise
         orig_run = bridge.pvt_runner_run
-        call_n = {"n": 0}
-        def failing_first_run(hist, *, session, **kwargs):
-            call_n["n"] += 1
-            if call_n["n"] == 1:
-                raise RuntimeError("trans died")
+        def bomb_first(hist, *, session, **kwargs):
+            if bridge.run_n == 0:
+                bridge.run_n = 1
+                raise RuntimeError("trans crashed")
             return orig_run(hist, session=session, **kwargs)
-        bridge.pvt_runner_run = failing_first_run
+        bridge.pvt_runner_run = bomb_first
 
         report = execute(
             plan, bridge,
@@ -377,28 +422,25 @@ class ExecuteIcFromTests(unittest.TestCase):
             push_union=False,
             ingest_cb=lambda d: None,
         )
-        # No IC set/clear because source never recorded a history
+        # No per-corner activity since upstream had no history
         self.assertEqual(bridge.ic_set_calls, [])
-        self.assertEqual(bridge.ic_clear_calls, [])
-        # PSS item should still have run + completed, with a note
-        pss_result = next(r for r in report.items if r.item_name == "pss")
-        self.assertTrue(pss_result.completed)
-        self.assertIn("no recorded history", pss_result.notes)
+        self.assertEqual(bridge.enable_corner_calls, [])
+        self.assertEqual(bridge.snap_called, 0)
+        pss = next(r for r in report.items if r.item_name == "pss")
+        self.assertIn("no recorded history", pss.notes)
+        self.assertTrue(pss.completed)  # ran naked via batch fallback
 
-    def test_ic_file_missing_runs_naked(self):
-        # Plant the upstream history in history_by_item by letting it run,
-        # but DELETE its IC file before the consumer item runs. Easiest
-        # path: rename the spectre.fc so resolve_ic_path returns None.
+    def test_one_corner_missing_ic_runs_naked(self):
+        # Delete corner-2's spectre.fc; corners 1 and 3 should still work.
         review = self._make_review()
         plan = plan_review(review)
-        bridge = self._make_bridge(self.fixed_hist)
+        bridge = self._make_bridge(self.trans_hist)
+        ic2 = (self.tmp / "results" / "maestro" / self.trans_hist
+               / "2" / "sim_test" / "netlist" / "spectre.fc")
 
-        # Use item_done_cb to delete the file between items
-        ic_file = (self.tmp / "results" / "maestro" / self.fixed_hist
-                   / "1" / "sim_trans" / "netlist" / "spectre.fc")
         def after_each(result):
             if result.item_name == "trans":
-                ic_file.unlink()
+                ic2.unlink()
         report = execute(
             plan, bridge,
             session="fake_session",
@@ -407,37 +449,47 @@ class ExecuteIcFromTests(unittest.TestCase):
             ingest_cb=lambda d: None,
             item_done_cb=after_each,
         )
-        # No IC set/clear because the file was missing at lookup time
-        self.assertEqual(bridge.ic_set_calls, [])
-        self.assertEqual(bridge.ic_clear_calls, [])
-        pss_result = next(r for r in report.items if r.item_name == "pss")
-        self.assertTrue(pss_result.completed)
-        self.assertIn("corner 1", pss_result.notes)
+        # Only corners 1 and 3 got set_ic; corner 2 ran naked
+        self.assertEqual(len(bridge.ic_set_calls), 2)
+        paths = [c[1] for c in bridge.ic_set_calls]
+        self.assertTrue(paths[0].endswith("/1/sim_test/netlist/spectre.fc"))
+        self.assertTrue(paths[1].endswith("/3/sim_test/netlist/spectre.fc"))
+        # All 3 corners enabled (even the IC-less one)
+        self.assertEqual(bridge.enable_corner_calls, [1, 2, 3])
+        pss = next(r for r in report.items if r.item_name == "pss")
+        self.assertIn("corner 2", pss.notes)
 
-    def test_set_ic_raises_skips_clear(self):
+    def test_corner_enable_snapshot_restored_even_on_run_error(self):
+        # Per-corner-run failures should NOT skip the restore in finally.
         review = self._make_review()
         plan = plan_review(review)
-        bridge = self._make_bridge(self.fixed_hist)
-        def explode(test, path, mode, *, session):
-            raise RuntimeError("readns not registered")
-        bridge.pvt_runner_set_ic_source = explode
+        bridge = self._make_bridge(self.trans_hist)
 
-        report = execute(
+        orig_run = bridge.pvt_runner_run
+        def fail_corner_2(hist, *, session, **kwargs):
+            bridge.run_n += 1
+            bridge.run_histories.append(hist)
+            if bridge.run_n == 3:  # 1=trans batch, 2=corner1, 3=corner2
+                raise RuntimeError("corner 2 spectre died")
+            if bridge.run_n == 1:
+                return (0, 0, self.trans_hist)
+            return (0, 0, hist)
+        bridge.pvt_runner_run = fail_corner_2
+
+        execute(
             plan, bridge,
             session="fake_session",
             pvtproject_path=self.pvt_path,
             push_union=False,
             ingest_cb=lambda d: None,
         )
-        # Clear should NOT have run (no successful set to roll back)
-        # — actually our helper returns "" sentinel on partial-set so the
-        # orchestrator does call clear with "". Pin that explicit behaviour:
-        # if a SET-attempt errored before producing a real prev, clear is
-        # called once with "" to nudge the option back to empty.
-        self.assertEqual(len(bridge.ic_clear_calls), 1)
-        self.assertEqual(bridge.ic_clear_calls[0][2], "")
-        pss_result = next(r for r in report.items if r.item_name == "pss")
-        self.assertIn("readns not registered", pss_result.notes)
+        # Snapshot + restore both ran exactly once regardless of error
+        self.assertEqual(bridge.snap_called, 1)
+        self.assertEqual(bridge.restore_called, 1)
+        # All 3 corners attempted enable (loop didn't break early)
+        self.assertEqual(bridge.enable_corner_calls, [1, 2, 3])
+        # IC cleared after every corner (even corner 2 which errored on run)
+        self.assertEqual(len(bridge.ic_clear_calls), self.N_CORNERS)
 
 
 if __name__ == "__main__":

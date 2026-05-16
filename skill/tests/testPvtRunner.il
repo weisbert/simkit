@@ -170,3 +170,49 @@
   (lambda ()
     (let ((rv (pvtRunnerClearIcSource "fakeSession" "" "readns" "")))
       (pvtAssertErrCategory rv 'pvt_validation "empty testName in clear"))))
+
+
+;; --- v1.2 stage-2: per-corner enable helpers ------------------------------
+
+(pvtTestRegister "runner/snapshotCornersEnable/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerSnapshotCornersEnable)) t
+               "pvtRunnerSnapshotCornersEnable defined")))
+
+(pvtTestRegister "runner/enableCornerByIndex/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerEnableCornerByIndex)) t
+               "pvtRunnerEnableCornerByIndex defined")))
+
+(pvtTestRegister "runner/restoreCornersEnable/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerRestoreCornersEnable)) t
+               "pvtRunnerRestoreCornersEnable defined")))
+
+;; idx validation — must be positive integer
+(pvtTestRegister "runner/enableCornerByIndex/zero-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerEnableCornerByIndex "fakeSession" 0)))
+      (pvtAssertErrCategory rv 'pvt_validation "idx=0"))))
+
+(pvtTestRegister "runner/enableCornerByIndex/negative-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerEnableCornerByIndex "fakeSession" -3)))
+      (pvtAssertErrCategory rv 'pvt_validation "negative idx"))))
+
+(pvtTestRegister "runner/enableCornerByIndex/nil-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerEnableCornerByIndex "fakeSession" nil)))
+      (pvtAssertErrCategory rv 'pvt_validation "nil idx"))))
+
+(pvtTestRegister "runner/enableCornerByIndex/non-integer-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerEnableCornerByIndex "fakeSession" "two")))
+      (pvtAssertErrCategory rv 'pvt_validation "string idx"))))
+
+;; Positive-int-accepts-validation: NOT included here because invoking
+;; with a fake session reaches axlGetMainSetupDB("fakeSession"), which
+;; raises a C-level "no such session" error that errset does not trap
+;; (same class of issue as DECISIONS #55's axlGetRunStatus). The
+;; positive-int path IS covered live by the bridge-side round-trip
+;; against fnxSession0 documented in DECISIONS #57.

@@ -104,7 +104,9 @@ Workflow: PSS / HB convergence is hard from cold start. Engineer wants to run a 
 
 **Corner mapping rule (v2):** consumer and source items MUST reference the **same `.union.json` path** (resolved-equal). Per-corner pairing is positional under that union's explode order. This guarantees zero-ambiguity matching with no name-string heuristics. Loader rejects mismatch at validate time.
 
-**Source item failure handling:** if a corner failed in the source item (no `.fc` produced), the orchestrator runs the corresponding consumer corner **without** the IC (naked retry) and logs a warning. PSS / HB without IC usually still finishes but may fail to converge — the user sees a normal per-corner FAIL row, not an orchestrator error.
+**Orchestrator behaviour:** ic_from triggers a **per-corner execution** path. The consumer item runs corners **one at a time** — for each `corner_idx` from 1 to N: resolve the upstream's per-corner IC, set `additionalArgs` on the test, enable only that one corner via `axlSetEnabled`, `axlRunAllTests`, `PvtSave`, ingest, clear IC, advance. The corner enable mask is snapshot/restored across the loop so the next item / the user's interactive session see the original state.
+
+**Source item failure handling:** if a corner failed in the source item (no `.fc` produced for that corner_idx), the orchestrator runs the corresponding consumer corner **without** the IC (naked retry) and logs a warning. PSS / HB without IC usually still finishes but may fail to converge — the user sees a normal per-corner FAIL row, not an orchestrator error. If the entire source item has no recorded history (it crashed pre-PvtSave), the consumer falls back to **batch mode without IC** (one axlRunAllTests for all corners).
 
 **Simulator subdir auto-detection:** Spectre stores IC files under `<corner_dir>/<test>/netlist/spectre.{fc,ic,dc}`. Alps (国产 simulator) stores them under `<corner_dir>/<test>/psf/spectre.{fc,ic,dc}` (TBC at first work-env dogfood). The resolver tries known subdirs in order, picks the first that has the file; user can pin via `ic_from.subdir` override if a new simulator surfaces.
 
@@ -133,15 +135,24 @@ for item in review.items:
             push_bundle(item.bundle)            # Phase 3B pvtMeasurePush
         history_name = f"review_{review.name}_{item.name}_{ts}"
         if item.ic_from:                        # schema v2 (§2.5)
-            # iterate corners ourselves so IC can be set per-corner
-            for corner_idx in range(1, n_corners + 1):
-                ic_path = resolve_ic_path(item.ic_from, corner_idx)
-                if ic_path:
-                    set_ic_source(item.tests, ic_path, item.ic_from.mode)
-                else:
-                    log.warn(item, corner_idx, "upstream IC missing; naked retry")
-                run_one_corner(history_name, corner_idx)
-                clear_ic_source(item.tests, item.ic_from.mode)
+            corner_snap = snapshot_corners_enable()
+            try:
+                for corner_idx in range(1, n_corners + 1):
+                    ic_path = resolve_ic_path(item.ic_from, corner_idx)
+                    if ic_path:
+                        prev = set_ic_source(item.tests, ic_path, item.ic_from.mode)
+                    else:
+                        log.warn(item, corner_idx, "upstream IC missing; naked")
+                        prev = None
+                    enable_corner_by_index(corner_idx)
+                    history = f"{base}_c{corner_idx}"
+                    run_one_corner_submit(history)
+                    pvt_save(history)
+                    ingest(history)
+                    if prev is not None:
+                        clear_ic_source(item.tests, item.ic_from.mode, prev)
+            finally:
+                restore_corners_enable(corner_snap)
         else:
             await _run_with_strategies(history_name, item.on_failure)
         per_corner_status = collect_results()   # Phase 1 PvtSave path
@@ -230,8 +241,11 @@ New file: `skill/pvtRunner.il`. Production-side helpers (all return `(pvt_ok val
 | `pvtRunnerWait` | session, token, timeout-sec | blocks until callback fires or timeout |
 | `pvtRunnerGetStatus` | session | `[runStatusCode, subCode, latestHistoryName]` |
 | `pvtRunnerCollectHistory` | session, history-name | JSON-shaped per-(corner, test) status table — feeds Phase 1 ingester directly |
-| `pvtRunnerSetIcSource` | session, testName, icPath, mode | Sets `readns="<path>"` or `readic="<path>"` on the test's PSS / HB analysis via `asiChangeAnalysis`. v1.2. |
-| `pvtRunnerClearIcSource` | session, testName, mode | Clears the readns / readic field. v1.2. |
+| `pvtRunnerSetIcSource` | session, testName, icPath, mode | Writes `+nodeset <path>` (readns) or `+ic <path>` (readic) into the test's `additionalArgs` sim option via `asiSetSimOptionVal`. Returns prev value for restore. v1.2 stage-1. |
+| `pvtRunnerClearIcSource` | session, testName, mode, prevValue | Restores `additionalArgs` to prevValue. v1.2 stage-1. |
+| `pvtRunnerSnapshotCornersEnable` | session | List of `(name, bool)` per-corner enable state. v1.2 stage-2. |
+| `pvtRunnerEnableCornerByIndex` | session, idx | Disable all corners except the one at 1-based idx (in `axlGetCorners` order). Returns enabled corner's name. v1.2 stage-2. |
+| `pvtRunnerRestoreCornersEnable` | session, snap | Apply snapshot to restore corner enable mask. v1.2 stage-2. |
 
 `pvtRunnerCollectHistory` reuses `pvtCollIterateResults` from Phase 1 — same row classification (`ok` / `sim_err` / `eval_err` / `unknown`), same JSON envelope shape, so the orchestrator can pipe its output straight into `pvt ingest` with no schema work.
 
