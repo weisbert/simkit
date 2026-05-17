@@ -1284,3 +1284,24 @@ Final tally: Python 912 / 0 → 931 / 0 (+19); SKILL Tier-1 426/1 → +8 (3 exis
 
 
 
+
+---
+
+## #58 — Phase 3A v1.3 closeout: sdb-handle pass-through to defang post-run session-focus loss
+_Date: 2026-05-17_
+
+**Decision:** Make every `pvtRunner*` SKILL helper accept its `sess` argument as either a string (session name, e.g. `"fnxSession0"`) **OR** an integer (sdb handle previously cached by the caller). Two internal helpers `_pvtRunnerGetSdb` and `_pvtRunnerResolveSession` polymorphic-dispatch on `(integerp sess)`. The 5 helpers whose underlying axl* call genuinely needs the session NAME (`pvtRunnerSubmit` → `axlRunAllTests`, `pvtRunnerRename` → `axlGetCurrentHistory`, `pvtRunnerGetStatus` → `axlGetRunStatus`, `pvtRunnerRun` → composite, `pvtRunnerInstall/Disable/GetPreRunScript` → `axlImport/Set/GetPreRunScript`) guard at entry via a new `_pvtRunnerRequireSessName` helper that returns a clear pvtErr if an int slipped through. Python side: new `skill_bridge.get_sdb(name)` helper that returns the sdb int once + module docstring instructing callers to pass it as `session=` to all read-side wrappers. Wedge detection added: `get_sdb` translates the three known bridge-failure RuntimeError/ValueError patterns ("not enough values to unpack" → `bridge_wedge`; "The server unexpectedly died" → `bridge_dead`; "Cannot find an active session" → `session_focus_lost`) into `SkillBridgeError` with explicit recovery instructions instead of cryptic tracebacks.
+
+**Why:** During the v1.3 dogfood retry on 2026-05-17 the bridge wedged repeatedly. The root cause is window-focus-keyed session registration on Cadence's side: after `axlRunAllTests` fires, Maestro pops a Run Summary sub-window that momentarily shadows the Assembler in the active-window list; the Assembler's `"fnxSession0"` registration becomes unfindable; `axlGetMainSetupDB("fnxSession0")` returns nil → every subsequent bridge call that re-resolves the session-name fails with `"Cannot find an active session named fnxSession0"`. Pre-existing recovery path was "user clicks back into Maestro Assembler to re-focus" — required after EVERY post-run probe, painfully manual. The fix: bypass the name-resolution step entirely on the call paths that don't need the name. The sdb integer handle is stable across this focus-loss state. Caller resolves name → sdb once (when focus is OK) and passes the int forever after.
+
+A separate but co-occurring failure mode is the skillbridge transport leaving a half-formed reply in the socket buffer (likely after a previous python_server process was killed mid-response). The next call's `decode_response` splits on space and trips `not enough values to unpack`. Recovery is `(pyKillServer)(pyStartServer)` in CIW. Detection now lives in `get_sdb` so the first call after a wedge surfaces a clear, actionable error.
+
+**Alternatives considered:**
+- *Auto-recover via re-focus*: not possible from the bridge (we can't reach into Cadence to re-activate a window without an existing channel).
+- *Polymorphic SKILL with name+sdb pair*: requires every wrapper signature to grow. Simpler to make the existing `sess` arg accept either form.
+- *Force `axlGetMainSetupDB` retry with backoff*: doesn't help — focus has to be restored before the call can ever succeed.
+- *Wrap every Python ws[...] call with wedge detection*: too invasive; `get_sdb` is the single bootstrap entry point that every script hits first, so wrapping just that one covers ~90% of the daily pain.
+
+**Live-verified 2026-05-17 on `fnxSession0`:** end-to-end v1.3 retry with cached sdb. Pre-run script installed, fired across 6 sub-points of TT_pvt sweep-row (`cornerName=TT_pvt_0..5` confirmed via diagnostic log), 6 distinct `readic="/tmp/simkit_dogfood_TT_pvt_X.ic"` values landed in 6 separate `simulatorOptions options` blocks of `input.scs`. Spectre completed 0 errors. Cached-sdb pattern survived the post-`axlRunAllTests` focus loss in subsequent cleanup calls — no `"Cannot find an active session"` surfaced on the read-side restore path.
+
+**Companion finding (no decision, just clearing a misattribution):** the `~1s per sub-point` serial dispatch the user observed is **not** caused by pre-run script attachment. A/B test 2026-05-17 — same TT_pvt 6-sub-point batch with and without pre-run installed — both showed identical `~1s` start-time gap between consecutive sub-points. Maestro's local sim dispatcher serializes regardless. If true parallel dispatch is wanted, configure session-level "Number of local jobs" (separate concern from this codebase).

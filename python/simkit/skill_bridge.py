@@ -90,6 +90,81 @@ def _open_workspace():
     return Workspace.open()
 
 
+def get_sdb(session: str, *, workspace: Any = None) -> int:
+    """Look up the sdb handle for a session by name, ONCE.
+
+    Pass the returned int as the ``session=`` arg to subsequent read-side
+    wrappers (snapshot/install/get/restore — anything that doesn't wrap
+    ``axlRunAllTests`` / ``axlGetRunStatus`` / ``axlGetCurrentHistory``).
+    The SKILL helpers accept either a session-name string or this int.
+
+    Why bother: after ``axlRunAllTests`` fires, Maestro pops a Run Summary
+    sub-window that momentarily shadows the Assembler in Cadence's
+    window-focus-keyed session registry. Until the user clicks back into
+    the Assembler, ``axlGetMainSetupDB(<session_name>)`` returns nil and
+    every wrapper that re-resolves the name fails with
+    ``"Cannot find an active session named X"``. The sdb HANDLE is stable
+    across this state — pass it directly and the wrappers skip the broken
+    name-lookup step.
+
+    Run-side wrappers (``pvt_runner_run`` / ``pvt_runner_submit`` /
+    ``pvt_runner_get_status`` / ``pvt_runner_rename``) still need the
+    session name string — they wrap axl* calls that don't accept an sdb.
+
+    Example::
+
+        sdb = skill_bridge.get_sdb("fnxSession0")
+        # read-side: pass sdb, immune to focus loss
+        snap = pvt_runner_snapshot_corners_enable(session=sdb)
+        pre  = pvt_runner_get_pre_run_script("Test_trans", session=sdb)
+        # run-side: still pass name (active during the run anyway)
+        pvt_runner_run("simkit_v13_retry", session="fnxSession0")
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    try:
+        raw = ws["axlGetMainSetupDB"](session)
+    except ValueError as exc:
+        # skillbridge channel.decode_response splits on space; a malformed /
+        # half-sent reply trips "not enough values to unpack". Classic wedge
+        # left by a prior axlRunAllTests call's tail. Restart fixes it.
+        if "not enough values to unpack" in str(exc):
+            raise SkillBridgeError(
+                "bridge_wedge",
+                "skillbridge transport is wedged (stale half-response). "
+                "Fix: in Virtuoso CIW type `(pyKillServer)(pyStartServer)` "
+                "then re-run.",
+                session,
+            ) from exc
+        raise
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "The server unexpectedly died" in msg:
+            raise SkillBridgeError(
+                "bridge_dead",
+                "skillbridge python_server process crashed or socket lost. "
+                "Fix: kill all stale python_server processes from the shell, "
+                "then in CIW type `(pyStartServer)` once.",
+                session,
+            ) from exc
+        if "Cannot find an active session" in msg:
+            raise SkillBridgeError(
+                "session_focus_lost",
+                f"axlGetMainSetupDB({session!r}) failed: Cadence's session "
+                f"registry is window-focus-keyed and the Maestro Assembler "
+                f"is not currently the active ADE-XL window. "
+                f"Fix: click the Maestro Assembler window, then re-run.",
+                session,
+            ) from exc
+        raise
+    if raw is None or raw == 0:
+        raise SkillBridgeError(
+            "pvt_validation",
+            f"axlGetMainSetupDB returned nil/0 for {session!r}",
+            session,
+        )
+    return int(raw)
+
+
 def _load_production_files(ws) -> None:
     for fname in _PRODUCTION_SKILL_FILES:
         ws["load"](str(_SKILL_DIR / fname))

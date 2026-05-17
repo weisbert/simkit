@@ -58,11 +58,18 @@
 ;; --- helpers ---------------------------------------------------------------
 
 (procedure (_pvtRunnerResolveSession sess)
-  ;; Same convention as Phase 2/3B helpers. nil sess means try the current
-  ;; window — but skillbridge usually runs in CIW context where axlGetWindowSession
-  ;; returns nil; in practice callers pass the session name explicitly.
+  ;; Polymorphic input — accepts either:
+  ;;   * string: session name (e.g. "fnxSession0") — passes through
+  ;;   * integer: an sdb handle that the caller cached upstream (see
+  ;;     _pvtRunnerGetSdb below for why this matters) — passes through
+  ;;   * nil: window-based fallback (vestigial; in practice callers always
+  ;;     pass an explicit value)
+  ;; Functions that downstream feed `sess` into axl* calls requiring a NAME
+  ;; (axlRunAllTests / axlGetRunStatus / axlGetCurrentHistory) MUST guard
+  ;; against the integer form at their entry — see e.g. pvtRunnerSubmit.
   (prog (resolved win)
     (cond
+      ((integerp sess) (return (pvtOk sess)))
       ((and sess (stringp sess))
         (return (pvtOk sess))))
     (setq win (errset (car (hiGetWindowList)) nil))
@@ -78,14 +85,41 @@
 
 
 (procedure (_pvtRunnerGetSdb sess)
-  ;; Returns (pvtOk sdb_integer) or pvtErr if session is not active.
+  ;; Polymorphic input — accepts either:
+  ;;   * integer: passes through as-is (caller cached the sdb handle via
+  ;;     skill_bridge.get_sdb() to avoid the post-axlRunAllTests failure
+  ;;     mode where axlGetMainSetupDB(name) returns nil until user clicks
+  ;;     back into the Maestro Assembler window — root cause: Cadence's
+  ;;     session-name registry is window-focus tied, and Run Summary
+  ;;     pop-up momentarily shadows the Assembler).
+  ;;   * string: calls axlGetMainSetupDB(name) the normal way.
   (prog (r)
+    (cond
+      ((integerp sess) (return (pvtOk sess))))
     (setq r (errset (axlGetMainSetupDB sess) nil))
     (cond
       ((or (null r) (null (car r)))
         (return (pvtErr 'pvt_validation
                         (lsprintf "axlGetMainSetupDB failed for session %L" sess))))
       (t (return (pvtOk (car r)))))))
+
+
+(procedure (_pvtRunnerRequireSessName sess)
+  ;; Guard for functions whose underlying axl* call needs a session NAME
+  ;; (axlRunAllTests, axlGetRunStatus, axlGetCurrentHistory). Returns
+  ;; (pvtOk sess) only if sess is a non-empty string; (pvtErr ...) if
+  ;; caller passed an sdb handle (integer) or nil — those forms are fine
+  ;; for read-side fns but the underlying axl* call here doesn't accept them.
+  (cond
+    ((and sess (stringp sess) (not (equal sess "")))
+      (pvtOk sess))
+    ((integerp sess)
+      (pvtErr 'pvt_validation
+              (lsprintf "this fn needs session NAME (string), got sdb handle %L — Submit/Rename/Run/GetStatus/DeleteHistory wrap axl* calls that don't accept sdb"
+                        sess)))
+    (t
+      (pvtErr 'pvt_validation
+              (lsprintf "session must be a non-empty string, got %L" sess)))))
 
 
 (procedure (_pvtRunnerTestNames sdb)
@@ -200,7 +234,7 @@
   ;;
   ;; Returns (pvtOk t).
   (prog (sessR sessName rc)
-    (setq sessR (_pvtRunnerResolveSession sess))
+    (setq sessR (_pvtRunnerRequireSessName sess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessName (pvtUnwrap sessR))
     (setq rc (errset (axlRunAllTests sessName "") nil))
@@ -224,7 +258,7 @@
       ((or (null historyName) (not (stringp historyName)) (equal historyName ""))
         (return (pvtErr 'pvt_validation
                         "historyName must be a non-empty string"))))
-    (setq sessR (_pvtRunnerResolveSession sess))
+    (setq sessR (_pvtRunnerRequireSessName sess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessName (pvtUnwrap sessR))
 
@@ -257,7 +291,7 @@
     (setq renameR (pvtRunnerRename sess historyName))
     (cond ((pvtIsErr renameR) (return renameR)))
     (setq hname (pvtUnwrap renameR))
-    (setq sessR (_pvtRunnerResolveSession sess))
+    (setq sessR (_pvtRunnerRequireSessName sess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessName (pvtUnwrap sessR))
     (setq statusR (errset (axlGetRunStatus sessName) nil))
@@ -273,15 +307,12 @@
   ;; Uses axlSetHistoryName + ... wait, no — Maestro doesn't expose a
   ;; direct delete. Instead use axlSetHistoryLock(h, nil) + the GUI's
   ;; equivalent (axlRemoveElement on the history handle).
-  (prog (sessR sessName sdb h r)
-    (setq sessR (_pvtRunnerResolveSession sess))
-    (cond ((pvtIsErr sessR) (return sessR)))
-    (setq sessName (pvtUnwrap sessR))
-    (setq sdb (errset (axlGetMainSetupDB sessName) nil))
-    (setq sdb (cond ((listp sdb) (car sdb)) (t nil)))
-    (cond ((null sdb)
-            (return (pvtErr 'pvt_validation
-                            "axlGetMainSetupDB failed"))))
+  (prog (sessR sdbR sdb h r)
+    ;; sess may be string-name OR cached int sdb-handle — _pvtRunnerGetSdb
+    ;; handles both. axlGetHistoryEntry + axlRemoveElement only need sdb.
+    (setq sdbR (_pvtRunnerGetSdb sess))
+    (cond ((pvtIsErr sdbR) (return sdbR)))
+    (setq sdb (pvtUnwrap sdbR))
     (setq h (errset (axlGetHistoryEntry sdb historyName) nil))
     (setq h (cond ((listp h) (car h)) (t nil)))
     (cond
@@ -313,7 +344,7 @@
   ;; [1,1] post-cached-run, [5,9] post-real-run-completion (DECISIONS
   ;; #54 #3).
   (prog (sessR r)
-    (setq sessR (_pvtRunnerResolveSession sess))
+    (setq sessR (_pvtRunnerRequireSessName sess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq r (errset (axlGetRunStatus (pvtUnwrap sessR)) nil))
     (cond
@@ -640,7 +671,8 @@
         (return (pvtErr 'pvt_validation
                         (lsprintf "scriptPath %L does not exist on disk"
                                   scriptPath)))))
-    (setq sessR (_pvtRunnerResolveSession sess))
+    ;; axlImportPreRunScript + axlSetPreRunScriptEnabled need session NAME.
+    (setq sessR (_pvtRunnerRequireSessName sess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessName (pvtUnwrap sessR))
     (setq r (errset (axlImportPreRunScript sessName testName scriptPath) nil))
@@ -659,7 +691,8 @@
     (cond
       ((or (null testName) (not (stringp testName)) (equal testName ""))
         (return (pvtErr 'pvt_validation "testName must be a non-empty string"))))
-    (setq sessR (_pvtRunnerResolveSession sess))
+    ;; axlSetPreRunScriptEnabled needs session NAME.
+    (setq sessR (_pvtRunnerRequireSessName sess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessName (pvtUnwrap sessR))
     (errset (axlSetPreRunScriptEnabled sessName testName nil) nil)
@@ -671,7 +704,8 @@
     (cond
       ((or (null testName) (not (stringp testName)) (equal testName ""))
         (return (pvtErr 'pvt_validation "testName must be a non-empty string"))))
-    (setq sessR (_pvtRunnerResolveSession sess))
+    ;; axlGetPreRunScript needs session NAME.
+    (setq sessR (_pvtRunnerRequireSessName sess))
     (cond ((pvtIsErr sessR) (return sessR)))
     (setq sessName (pvtUnwrap sessR))
     (setq r (errset (axlGetPreRunScript sessName testName) nil))
