@@ -258,7 +258,25 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 - [x] **#1 (orchestrator):** `execute()` gains optional `run_kwargs` dict forwarded to `pvt_runner_run` per item, so callers can tune poll/timeout/grace without rewiring.
 - [x] **#1 (live verify):** cached path on `fnxSession0` → 3.4s, no ASSEMBLER-2423 on subsequent delete. Real-Spectre path on `fnxSession0` (TT_v11verify, temp=56) → exposed that `axlGetRunStatus` is BLIND on this installation; state machine exits via dispatch_grace too early; rename works mid-sim but post-run destructive ops still hit the modal. Documented as the v1.2 #1 follow-up.
 
-### Phase 3A v1.2 — IN PROGRESS (immediate next)
+### Phase 3A v1.3 — DONE 2026-05-17 PM
+
+- [x] **Cross-item IC piping (`ic_from` schema + orchestrator + SKILL pre-run script generator)** — DECISIONS #57 / 5 commits 503fa0b → efb4cac landed 2026-05-16/17 AM.
+- [x] **`readic="<path>"` syntax fix** (efb4cac) verified end-to-end on `fnxSession0` 2026-05-17 PM. 6 sub-points of TT_pvt each received the correct per-corner IC path in their `simulatorOptions options` block.
+- [x] **Diagnostic confirmation** that `axlGetCornerNameForCurrentPointInRun` emits exploded sub-point names (`TT_pvt_0..5`) for sweep-row corners — original v1.3 cornerMap keys were always correct; earlier "failed" retry had been mis-scoped to single-point TT corner.
+- [x] **sdb-handle pass-through infrastructure** (DECISIONS #58) — `skill_bridge.get_sdb()` + polymorphic `sess` in `pvtRunner.il`. Bypasses Cadence's window-focus-keyed session-name resolution after `axlRunAllTests`. Wedge detection translates 3 known failure patterns into actionable `SkillBridgeError`.
+- [x] **A/B test cleared serial-dispatch misattribution** — `~1s per sub-point` is Maestro's local sim default, not pre-run-script overhead. Same TT_pvt 6-sub-point batch with vs without pre-run script showed identical timing.
+- [x] **All 7 commits (5 stage-2/3 + 1 AM handoff doc + 1 closeout) pushed to `origin/main` as of `f8e5f69`.**
+
+### Phase 3A v1.4 candidates (no priority assigned yet — pick next session):
+
+- v1.3 known-gap fix #1: capture + restore prior `additionalArgs` simoption alongside pre-run script (currently clobbered then cleared on cleanup)
+- v1.3 known-gap fix #2: per-test pre-run scripts for multi-test consumer items
+- v1.3 known-gap fix #3: 3-item chain dogfood (v1.3 → v1.3 → v1.3) to confirm `_resolve_ic_path` handles the per-corner-history case
+- v1.2 leftovers (see "IN PROGRESS" section below): #1 `pvtRunnerCountRunning` rdb-walker, #2 `pvt corners push --replace`, #3 per-corner verdict + strategy chain dispatch, runTests.il atomic loader fix
+
+### Phase 3A v1.2 leftovers — RESLOTTED to v1.4 (no longer "immediate next" — v1.3 took the slot)
+
+These were planned as v1.2 #1-3 but got pre-empted by the v1.3 IC-piping request. Still valid candidates; pick whichever feels real-workflow-relevant next session.
 
 - [ ] **#1 (priority HIGH): swap the polling discriminator.** Add SKILL `pvtRunnerCountRunning(sess)` that opens current-history rdb via `maeReadResDB`, walks `tst->pointID`, returns count of rows where `tst->status == 'running`. Wire into Python state machine as the PRIMARY signal; keep `axlGetRunStatus` as a secondary check for sessions where it does work. The collector's `_pvtCollWalkRdb` is the right call site — collector already proves walking the rdb is safe during the async tail (DECISIONS #54 #4).
 - [ ] **#2: `pvt corners push --replace`** — current ADD-semantics surface unexpectedly (per DECISIONS #54 #8). Either add `--replace` flag or change default. v1.1 live verify worked around by deleting the added corner directly via `axlRemoveElement` (which interestingly did NOT trip ASSEMBLER-2423 even with the setupdb lock active — interesting data point for the discriminator design).

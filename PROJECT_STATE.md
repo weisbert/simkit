@@ -151,32 +151,43 @@ _2026-05-16 v1.4 push (4 commits): #4 X..Y parser, #5 apply CLI spec_status, #1 
 
 ## What's NEXT (the deferred-work shelf)
 
-**Primary next action: finish the v1.3 dogfood retry** — run the 8-corner trans→PSS pre-run script test once more with the readns="<path>" fix; if clean, mark v1.3 fully done and push the 5 commits. Quick session bootstrap at `docs/session_bootstrap.md`.
+**Phase 3A v1.3 is DONE.** Today (2026-05-17 PM) closed the morning's pending retry: readic syntax verified end-to-end on 6 sub-points of TT_pvt, sdb-caching infrastructure landed, two suspected v1.3 bugs (serial dispatch / multi-rf018.scs) proven non-bugs via A/B test. 7 commits pushed to `origin/main`. **Pick a fresh thread next session** — see candidates below in priority order.
 
-**Owed back from user (housekeeping after this session):**
-- Maestro GUI: delete histories `Interactive.0`, `Interactive.1`, `Interactive.2` (probe leftovers from the v1.3 dogfood)
-- `rm /tmp/simkit_dogfood_*.ic` (8 fake IC files used as probe payload)
+**Owed back from user (housekeeping, partially carried over from AM handoff):**
+- `fnxSession0` Spectre Options form: clear `additionalArgs` field if it still has `+ic /tmp/ic` leftover (cosmetic; source of harmless SFE-1994 noise in pre-flight `/1/` subdir of any v1.3 run)
+- Maestro GUI: delete the timestamp-named dogfood histories from today: `simkit_E_probe_*`, `simkit_v13_diag_*`, `simkit_v13_retry2_*`, `simkit_v13_baseline_*`, plus AM-handoff leftovers `Interactive.0/1/2`
+- `rm /tmp/simkit_dogfood_*.ic` (8 fake IC files used as probe payload — still on disk)
 - `rm -rf /tmp/simkit_dogfood_workdir/` (generated pre-run scripts cache)
-- `rm /tmp/probe_prerun.il` (early probe script — may be re-attached to Test_trans, the orchestrator's cleanup re-installs it on cleanup so don't worry if it's still wired)
-- In `fnxSession0` Spectre Options form, clear `additionalArgs` if it still has `+ic /tmp/ic` leftover from earlier probes
+- `rm /tmp/orch_v13_diag.py /tmp/orch_v13_retry2.py /tmp/orch_v13_baseline.py /tmp/orch_probe_e.py /tmp/probe_v13_log.il /tmp/simkit_probe_ic_wrap.scs /tmp/simkit_v13_diag.log` (today's probe scripts)
+- `rm /tmp/probe_prerun.il` (the early Claude-written probe script — may still be wired as Test_trans's pre-run; harmless)
 
-**v1.3 known gaps (v1.4 candidates if dogfood reveals they bite):**
-1. **`additionalArgs` prior-value snapshot/restore** — we capture & restore the user's prior PRE-RUN SCRIPT (axlGetPreRunScript) but NOT the prior `additionalArgs` simoption value. Our pre-run script overwrites it per-corner; orchestrator cleanup clears to `""` regardless of what was there before. If user has a non-empty manual additionalArgs (e.g. `+log debug`), it gets clobbered.
-2. **Multi-test consumer items** — v1.3 picks `item.tests[0]` as the IC-resolution test. If a consumer item has multiple tests with different signal nets, per-test IC needs per-test pre-run scripts (currently same script attached to each test).
-3. **Per-corner→per-corner chains** — `_resolve_ic_path` expects upstream = batch (one history with N corner subdirs). If upstream is itself a v1.3 ic_from consumer (per-corner history in this consumer model = 1 history with N subdirs — actually fine since v1.3 IS single-batch), this should work. Confirm during a 3-item chain dogfood.
+**v1.3 known gaps (truly bite-when-they-bite, not blocking):**
+1. **`additionalArgs` prior-value snapshot/restore** — orchestrator captures & restores the user's prior PRE-RUN SCRIPT but NOT the prior `additionalArgs` simoption value. v1.3 pre-run overwrites it per-corner; cleanup clears to `""`. If user has a non-empty manual additionalArgs (e.g. `+log debug`), it gets clobbered. Fix is ~20 lines (mirror `prior_scripts` capture with `prior_addl_args` from `asiGetSimOptionVal`).
+2. **Multi-test consumer items** — v1.3 picks `item.tests[0]` as the IC-resolution test. Multi-test items with different signal nets would need per-test pre-run scripts.
+3. **Per-corner→per-corner chains** — `_resolve_ic_path` expects upstream = batch (one history with N corner subdirs). Should work for v1.3-downstream-of-v1.3 since v1.3 also produces single batch, but confirm during a 3-item chain dogfood.
 
 **Original Phase 3A v1.2 candidates (reslot to v1.4):** flag-stickiness mitigation, `pvt corners push --replace`, per-corner verdict reading + strategy chain dispatch. None blocking.
 
-**Operational note for next session — bridge session-focus dance:**
-When orchestrator's `axlRunAllTests` fires, Maestro takes window focus and `axlGetMainSetupDB(sess_name)` from the bridge starts returning "Cannot find an active session" until user clicks back into Maestro. Bridge can also wedge into "not enough values to unpack" stale-response mode requiring `(pyKillServer)(pyStartServer)` in CIW. Both pinned in user-memory `reference_bridge_session_focus.md`. Plan probes to minimize the "submit → bridge wedges → wait for user → retry" loop.
+**Operational notes for next session:**
+- **Bridge bootstrap is now ONE focus per session, not per-call.** Cache sdb at start of any probe via `skill_bridge.get_sdb(name)`; pass the returned int as `session=` to all read-side wrappers (snapshot/install/get/restore). Run-side wrappers (`pvt_runner_run` / `_submit` / `_get_status` / `_rename`) still need the session-name string — but those only fire during/around the actual `axlRunAllTests`, so focus is naturally present.
+- **`get_sdb` now translates the 3 known bridge failure modes** into clear `SkillBridgeError` messages: `bridge_wedge` (unpack-mode → CIW `(pyKillServer)(pyStartServer)`), `bridge_dead` (socket lost → shell kill stale processes then CIW `(pyStartServer)`), `session_focus_lost` (Maestro Assembler not focused → click it). No more cryptic Python tracebacks for these.
+- **Multi-pair stacking trap** (observed today): repeated `(pyKillServer)(pyStartServer)` cycles over a long session can leave **N orphaned `python_server.py` + `cdsServIpc` pairs** all bound to the same `/tmp/skill-server-default.sock`. After 7 hours we found 7 pairs. Symptoms: random `RuntimeError: The server unexpectedly died`. Fix: `pkill -f "python_server.py default INFO" && pkill -f "cdsServIpc.*skillbridge_skill.log"` from shell, then **one** `(pyStartServer)` in CIW (no preceding pyKillServer — there's nothing left to kill). Pinned in memory `reference_skillbridge_recovery.md`.
 
 **Phase 3A v1.3 mechanism cheatsheet (for next session):**
 - Generator: `simkit/pre_run_script.py::write_pre_run_script(PreRunSpec, workdir)` → writes `.simkit/pre_run/pre_run_<item>_<hash>.il`
-- Bridge wrappers: `pvt_runner_install_pre_run_script` / `_disable_` / `_get_`
+- Bridge wrappers: `pvt_runner_install_pre_run_script` / `_disable_` / `_get_` (need session NAME, not sdb)
 - SKILL: `pvtRunnerInstallPreRunScript` / `_Disable_` / `_Get_` in `skill/pvtRunner.il`
-- Script template: `(let ((cornerName nil) (cornerMap (list (list "TT" "readns=\"/path\"") ...))) (setq cornerName (car (errset (axlGetCornerNameForCurrentPointInRun) nil))) (when ... (asiSetSimOptionVal asi "additionalArgs" (cadr entry))) t)`
+- Script template: `(let ((cornerName nil) (cornerMap (list (list "TT_pvt_0" "readic=\"/path\"") ...))) (setq cornerName (car (errset (axlGetCornerNameForCurrentPointInRun) nil))) (when ... (asiSetSimOptionVal asi "additionalArgs" (cadr entry))) t)`
 - Worker-VM SKILL quirks: NO `let*` with errset-wrapped initials; NO `(cons k v)` for non-list v; ALWAYS return `t` (nil aborts that corner)
-- additionalArgs is appended into netlist's `simulatorOptions options` block (NOT spectre CLI)
+- additionalArgs is appended into netlist's `simulatorOptions options` block (NOT spectre CLI) — value syntax is `readns="<path>"` / `readic="<path>"`
+- For sweep-row corners (1 row with internal DV sweep + multi-section model file): `axlGetCornerNameForCurrentPointInRun` emits the **exploded sub-point name** (e.g. `TT_pvt_0..5` for a 2 VDD × 3 section row, 6 total). VDD inner-sweep doesn't fire its own pre-run (handled inside Spectre's parametric sweep). Confirmed by diagnostic log 2026-05-17.
+
+**Architectural paths explored + rejected today (don't re-walk these):**
+1. **Per-corner additionalArgs API (Option D)** — Maestro doesn't expose one; the Corners Setup form only supports per-corner overrides for Design Vars / Model Files / Device Parameters / Temperature, never simulator options. Two Explore agents confirmed.
+2. **Per-corner Model File include trick (Option E)** — `axlPutModel` registers the entry but Maestro's netlister silently drops it from `input.scs`. Probed with both bare wrapper (no section) and `section simkit_ic ... endsection` wrapper + `axlSetModelSection`; both registered post-add but neither emitted include. Maestro likely has implicit validation that filters non-PDK-shape model files.
+3. **Per-sub-point Model File (Option E')** — same Maestro-netlister filtering as E above, plus would need to explode `TT_pvt` sweep-row into 6 standalone rows (heavy corner-table mutation).
+4. **Per-corner submit + GUI grouping (Option A')** — Cadence's `axlGetHistoryGroup*` API is read-only; there is no `axlPutHistoryGroup` setter to merge N siblings under one parent. So N submits = N siblings in the GUI, can't paper over.
+5. **Conclusion (DECISIONS #58 companion finding):** v1.3 pre-run-script remains the only viable architecture for per-sub-point IC delivery; A/B test then proved its perceived costs (serial / multi-rf018.scs) were not actually pre-run's fault.
 
 **Phase 3B v1.5 follow-ups (parked until they bite):**
 
