@@ -29,6 +29,10 @@ from simkit.project import PvtProjectError, load_pvtproject
 # 100-character terminal; longer strings are truncated with an ellipsis.
 _COL_WIDTHS = {
     "run_id": 8,
+    # Maestro history this run was dumped from. Truncated at 22 because real
+    # orchestrator names (e.g. "v17gmin_v17_gmin_demo_1779086137_1") run 30+
+    # chars but the leading testbench/item prefix is enough to ID by eye.
+    "history": 22,
     "timestamp": 25,
     "project": 14,
     "testbench": 22,
@@ -134,7 +138,8 @@ def _print_table(rows: List[RunRow]) -> None:
     # v1.4 — only render the "specs" column if any run has specs. Keeps
     # the table compact for pre-v2 / spec-less data.
     show_specs = any(r.n_has_spec > 0 for r in rows)
-    headers = ["run_id", "timestamp", "project", "testbench", "label", "note"]
+    headers = ["run_id", "history", "timestamp", "project", "testbench",
+               "label", "note"]
     if show_specs:
         headers.append("specs")
     widths = [_COL_WIDTHS[h] for h in headers]
@@ -151,11 +156,12 @@ def _print_table(rows: List[RunRow]) -> None:
     for r in rows:
         cells = [
             r.run_id[:8],
-            _trunc(r.timestamp, widths[1]),
-            _trunc(r.project_id, widths[2]),
-            _trunc(r.testbench_alias or r.testbench_id, widths[3]),
-            _trunc(r.label or "", widths[4]),
-            _trunc(r.note or "", widths[5]),
+            _trunc(r.history_name or "", widths[1]),
+            _trunc(r.timestamp, widths[2]),
+            _trunc(r.project_id, widths[3]),
+            _trunc(r.testbench_alias or r.testbench_id, widths[4]),
+            _trunc(r.label or "", widths[5]),
+            _trunc(r.note or "", widths[6]),
         ]
         if show_specs:
             cells.append(_format_specs(r))

@@ -1533,3 +1533,33 @@ _Date: 2026-05-18_
 - Auto-probe `baseline_value` from asi at strategy startup (D4 deferral) — needs `pvt_runner_get_sim_option_val` bridge wrapper.
 - Per-attempt corner-enable tracer log (queued in v1.6 too).
 - v1.3 known-gap #1: `additionalArgs` prior-value snapshot/restore.
+
+---
+
+## #64 — Phase 3A v1.8 #3: `run.json history_name: None` is a phantom; real gap is CLI display
+_Date: 2026-05-18 EOD (post v1.7)_
+
+**Decision:** Close v1.8 #3 by adding a `history` column to `pvt list` table output (CLI-display fix). No SKILL change; no run.json schema change.
+
+**Why:** v1.5 closeout (PROJECT_STATE 2026-05-18 PM) recorded "`pvtCollect.il::PvtSave` doesn't write the passed `histName` into the envelope" as a v1.6+ followup. Investigating before scheduling — per [[feedback-pm-mode-verification]] — found three things:
+
+1. **Write side is correct.** `_pvtCollAutoCapture` (pvtCollect.il:410) calls `(setarray tab "history_name" histName)`. `_pvtCollBuildEnvelope` (pvtCollect.il:1271) puts the runMeta table at `env["run"]`. Result: `d["run"]["history_name"]` carries the right string in every run.json from v1.5 PM onward (`8e882e98` 13:16 → `6704c1ac` 14:36 all show valid `"v1dog_…"` / `"orch_…"` / `"v16_chain_demo__retry1"` / `"v17_gmin_demo__gmin2"` etc.).
+2. **DB side is correct.** `runs.history_name` populated for every row in `simkit_p3b_dogfood/simkit_data/simkit.duckdb` since v1.5 PM. `--json` output already surfaces it.
+3. **The "None" report was a `dict.get()` misread.** The investigator's spot-check did `d.get("history_name")` against the top-level envelope, which legitimately has 5 keys `[schema_version, run, results, artifacts, output_specs]`. `.get()` returned None for the missing top-level key — but the field LIVES in nested `d["run"]`, not at top level.
+
+The actual user-visible gap: `pvt list`'s pretty-table headers were `[run_id, timestamp, project, testbench, label, note]` (cli/list_runs.py:137). No history column. To correlate a DB run to a Maestro history entry the user had to `--json` dump and grep `history_name`.
+
+**Implementation:**
+- Insert `"history": 22` into `_COL_WIDTHS` between `run_id` and `timestamp`. Width chosen so real names like `v17gmin_v17_gmin_demo_1779086137_1` (34 chars) truncate gracefully with the existing `_trunc` helper (keeps width-1 chars, appends `…`).
+- Append `"history"` to the headers tuple and `r.history_name` to the cells tuple in `_print_table`.
+- `--json` output unchanged (already had the field via `RunRow.to_dict()`).
+- 2 new tests in `tests/test_cli_list.py`: `test_table_shows_history_column` (fixture `syn_min` + `simkit_verify` both surface) and `test_table_truncates_long_history_with_ellipsis` (40-char name truncates to `v17gmin_v17_gmin_demo…`). `_ingest_v2_into` helper gained an optional `history_name` kwarg.
+
+Python suite 1028 → 1030 (+2). SKILL Tier-1 unchanged.
+
+**Alternatives rejected:**
+- (B) Also annotate `pvt diff` header with the two histories. Defer — diff already accepts run_id prefixes the user typed in, so they know which is which; adding a header line bloats short diffs.
+- (C) Opt-in `--show-history` flag. Rejected — the default surface should answer "where did this row come from" without a flag. Total table width grows by 22 chars, the existing `note=30` column already pushes it past 100 anyway.
+- (D) No-op + just close the ticket. Rejected — the display gap is real even if the originally-reported bug isn't.
+
+**How to apply (for future similar investigations):** Before scheduling a "fix" for something reported as broken, dump the actual artifact (run.json text, not `dict.get()`) and check the schema expectations vs the load path. v1.5 PROJECT_STATE recorded a wrong cause; v1.7 follow-up notes already hedged "may already be fixed — verify before scheduling." Heeding that hedge saved a no-op SKILL touch.

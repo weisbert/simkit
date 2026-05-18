@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Optional
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -63,6 +64,31 @@ class CliListTests(unittest.TestCase):
         # Both runs shown (short form).
         self.assertIn(_SYN_MIN_RUN_ID[:8], out)
         self.assertIn(_REAL_RUN_ID[:8], out)
+
+    def test_table_shows_history_column(self):
+        # v1.8 — history_name surfaces as its own column so the user can
+        # correlate a DB row to a Maestro history entry without dropping to
+        # --json. Fixture history_names: 'syn_min' and 'simkit_verify'.
+        rc, out, err = _run("list", "--db", str(self.db))
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertIn("history", out.splitlines()[0])
+        self.assertIn("syn_min", out)
+        self.assertIn("simkit_verify", out)
+
+    def test_table_truncates_long_history_with_ellipsis(self):
+        # Real-orchestrator names like "v17gmin_v17_gmin_demo_1779086137_1"
+        # exceed the 22-char column. The trunc helper appends "…" and never
+        # blows the column width.
+        long_hist = "v17gmin_v17_gmin_demo_1779086137_1_extra"
+        self._ingest_v2_into(
+            "cccccccc-3333-4333-8333-cccccccccccc",
+            "< 1e-10", 5e-11, history_name=long_hist,
+        )
+        rc, out, _err = _run("list", "--db", str(self.db))
+        self.assertEqual(rc, 0)
+        # _trunc keeps width-1 chars then appends "…". width=22 → 21 chars.
+        self.assertIn("v17gmin_v17_gmin_demo…", out)
+        self.assertNotIn(long_hist, out)
 
     def test_json_emits_array(self):
         rc, out, err = _run(
@@ -138,7 +164,10 @@ class CliListTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertNotIn("specs", out)
 
-    def _ingest_v2_into(self, run_uuid: str, spec: str, value: float) -> None:
+    def _ingest_v2_into(
+        self, run_uuid: str, spec: str, value: float,
+        history_name: Optional[str] = None,
+    ) -> None:
         from datetime import datetime, timezone
         dump = {
             "schema_version": 2,
@@ -148,7 +177,7 @@ class CliListTests(unittest.TestCase):
                 "timestamp": "2026-05-16T15:00:00+08:00",
                 "author": "tester", "label": None, "note": None,
                 "netlist_path": "input.scs",
-                "history_name": f"v14_{run_uuid[:8]}",
+                "history_name": history_name or f"v14_{run_uuid[:8]}",
             },
             "results": [{
                 "point": 1, "corner": "TT", "test": "Test",
