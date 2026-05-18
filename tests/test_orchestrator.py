@@ -24,12 +24,14 @@ from simkit.orchestrator import (  # noqa: E402
     OrchestratorError,
     PlannedItem,
     RunPlan,
+    _pick_baseline_corner,
     dry_run,
     execute,
     plan_review,
     synthesize_adhoc_review,
 )
 from simkit.review import load_review  # noqa: E402
+from simkit.union import ModelEntry, Union, UnionRow  # noqa: E402
 
 
 _EXAMPLE_REVIEW = _REPO_ROOT / "config" / "review_example.review.json"
@@ -513,6 +515,331 @@ class ExecuteIcFromTests(unittest.TestCase):
         self.assertEqual(len(install_paths), 2)
         self.assertIn(".simkit", install_paths[0])
         self.assertEqual(install_paths[1], "/tmp/user_owned.il")
+
+
+# ---------------------------------------------------------------------------
+# Phase 3A v1.4: baseline-corner preservation (DECISIONS #59)
+
+
+def _mk_union(rows: list[UnionRow]) -> Union:
+    return Union(
+        union_schema_version=1, name="u", project="p", testbench_id="tb",
+        rows=tuple(rows),
+    )
+
+
+def _scalar(name: str, vdd: str = "1.0") -> UnionRow:
+    return UnionRow(
+        row_name=name, vars={"VDD": (vdd,)}, models=(), enabled=True,
+    )
+
+
+def _sweep_vars(name: str) -> UnionRow:
+    return UnionRow(
+        row_name=name, vars={"VDD": ("1.0", "1.1")}, models=(),
+        sweep_var_keys=frozenset({"VDD"}), enabled=True,
+    )
+
+
+def _sweep_models(name: str) -> UnionRow:
+    return UnionRow(
+        row_name=name,
+        vars={"VDD": ("1.0",)},
+        models=(ModelEntry(
+            file="rf018.scs", block="Global", test="All",
+            section=("tt", "ss"),
+        ),),
+        sweep_model_indices=frozenset({0}),
+        enabled=True,
+    )
+
+
+class PickBaselineCornerTests(unittest.TestCase):
+    """Pure-function picker (DECISIONS #59 A4 policy)."""
+
+    def test_auto_picks_first_scalar_in_declared_order(self):
+        u = _mk_union([_scalar("TT"), _scalar("FF"), _sweep_vars("TT_pvt")])
+        self.assertEqual(_pick_baseline_corner(u, None), "TT")
+
+    def test_auto_skips_sweep_rows(self):
+        u = _mk_union([_sweep_vars("TT_pvt"), _scalar("TT"), _scalar("FF")])
+        # First scalar is TT (the second row); first row is sweep so skipped.
+        self.assertEqual(_pick_baseline_corner(u, None), "TT")
+
+    def test_auto_skips_model_sweep_rows(self):
+        u = _mk_union([_sweep_models("TT_models"), _scalar("TT_2p5G")])
+        self.assertEqual(_pick_baseline_corner(u, None), "TT_2p5G")
+
+    def test_auto_raises_when_table_has_no_scalar(self):
+        u = _mk_union([_sweep_vars("TT_pvt"), _sweep_models("TT_models")])
+        with self.assertRaises(OrchestratorError) as cm:
+            _pick_baseline_corner(u, None)
+        self.assertIn("no scalar", str(cm.exception))
+
+    def test_override_returns_named_corner_when_it_exists(self):
+        u = _mk_union([_scalar("TT"), _scalar("SS")])
+        self.assertEqual(_pick_baseline_corner(u, "SS"), "SS")
+
+    def test_override_raises_when_name_unknown(self):
+        u = _mk_union([_scalar("TT")])
+        with self.assertRaises(OrchestratorError) as cm:
+            _pick_baseline_corner(u, "FF")
+        self.assertIn("baseline_corner='FF'", str(cm.exception))
+        self.assertIn("TT", str(cm.exception))
+
+    def test_override_permits_sweep_row_when_user_explicit(self):
+        # Power-user case: user knows they want the sweep row as baseline
+        # for some reason. We honor it (the picker is permissive on
+        # explicit override; the auto path is the conservative one).
+        u = _mk_union([_scalar("TT"), _sweep_vars("TT_pvt")])
+        self.assertEqual(_pick_baseline_corner(u, "TT_pvt"), "TT_pvt")
+
+
+class ExecuteBaselineCornerTests(unittest.TestCase):
+    """Orchestrator wiring: snapshot/pick/restore around the v1.3 chain.
+
+    Pins the v1.4 fix from the user-observed cosmetic bug: when
+    `_execute_ic_chained_item` runs with all scalar corners disabled,
+    Maestro inserts a `nom` subdir with all-section model includes.
+    Fix: snapshot enable state → flip one scalar to enabled → run →
+    restore on the way out (DECISIONS #59).
+    """
+
+    UNION_DOC = {
+        "union_schema_version": 1,
+        "name": "u", "project": "myproj", "testbench_id": "tb",
+        "rows": [
+            {"row_name": "C1", "vars": {"VDD": "1.0"}, "models": []},
+        ],
+    }
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_v14_"))
+        self.pvt_path = self.tmp / "myproj.pvtproject"
+        self.pvt_path.write_text('{"schema_version":1,"project":"myproj"}\n')
+        self.trans_hist = "fixed_trans_hist"
+        d = (self.tmp / "results" / "maestro" / self.trans_hist
+             / "1" / "sim_test" / "netlist")
+        d.mkdir(parents=True)
+        (d / "spectre.fc").write_text("# fake fc\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_review(self, baseline_corner: str | None = None):
+        """Two-item review: trans (batch) → pss (ic_from)."""
+        union_path = self.tmp / "unions" / "u.union.json"
+        union_path.parent.mkdir(exist_ok=True)
+        union_path.write_text(json.dumps(self.UNION_DOC))
+        pss_item = {
+            "name": "pss", "tests": ["sim_test"],
+            "union": "unions/u.union.json",
+            "ic_from": {"item": "trans", "file": "fc", "mode": "readns"},
+        }
+        if baseline_corner is not None:
+            pss_item["baseline_corner"] = baseline_corner
+        doc = {
+            "review_schema_version": 2,
+            "name": "icfrom", "project": "myproj",
+            "items": [
+                {"name": "trans", "tests": ["sim_test"],
+                 "union": "unions/u.union.json"},
+                pss_item,
+            ],
+        }
+        review_path = self.tmp / "icfrom.review.json"
+        review_path.write_text(json.dumps(doc))
+        return load_review(review_path)
+
+    def _make_bridge(self, table_rows: list[dict], snap_state: list[tuple[str, bool]]):
+        """MockBridge with v1.3 + v1.4 surface (corner snapshot/restore + pull).
+
+        ``table_rows`` is what pvt_corners_pull returns as the live union;
+        ``snap_state`` is what pvt_runner_snapshot_corners_enable returns.
+        """
+        trans_hist = self.trans_hist
+        # Real SKILL pvtCornersPull writes name = file basename; mirror
+        # that here so load_union's basename==name check passes.
+        rows_for_pull = table_rows
+
+        class MockBridge:
+            def __init__(self):
+                self.run_n = 0
+                self.run_histories = []
+                self.installs = []
+                self.disables = []
+                self.get_prerun_calls = []
+                self.clear_ic_calls = []
+                # v1.4 surface
+                self.snapshot_calls = 0
+                self.restore_calls = []  # list of snaps passed in
+                self.pulls = []
+
+            def pvt_runner_snapshot_test_state(self, *, session):
+                return [("sim_test", True)]
+
+            def pvt_runner_restore_test_state(self, snap, *, session):
+                pass
+
+            def pvt_runner_enable_only(self, names, *, session):
+                pass
+
+            def pvt_runner_run(self, hist, *, session, **kwargs):
+                self.run_n += 1
+                self.run_histories.append(hist)
+                if self.run_n == 1:
+                    return (0, 0, trans_hist)
+                return (0, 0, hist)
+
+            def pvt_save(self, hist, *, pvtproject_path, session):
+                return str(Path("/tmp") / f"fake_dump_{hist}")
+
+            def pvt_corners_push(self, path, **kwargs):
+                pass
+
+            def pvt_runner_get_pre_run_script(self, test, *, session):
+                self.get_prerun_calls.append(test)
+                return ""
+
+            def pvt_runner_install_pre_run_script(self, test, path, *, session):
+                self.installs.append((test, path))
+                return path
+
+            def pvt_runner_disable_pre_run_script(self, test, *, session):
+                self.disables.append(test)
+
+            def pvt_runner_clear_ic_source(self, test, mode, prev, *, session):
+                self.clear_ic_calls.append((test, mode, prev))
+
+            # v1.4 baseline-corner surface
+            def pvt_runner_snapshot_corners_enable(self, *, session):
+                self.snapshot_calls += 1
+                return list(snap_state)
+
+            def pvt_runner_restore_corners_enable(self, snap, *, session):
+                self.restore_calls.append(list(snap))
+
+            def pvt_corners_pull(self, out_path, *, pvtproject_path, session):
+                self.pulls.append(str(out_path))
+                basename = Path(out_path).name
+                # strip ".union.json" suffix to match load_union's expectation
+                stem = basename[:-len(".union.json")] if basename.endswith(".union.json") else basename
+                doc = {
+                    "union_schema_version": 1,
+                    "name": stem, "project": "p", "testbench_id": "tb",
+                    "rows": rows_for_pull,
+                }
+                Path(out_path).write_text(json.dumps(doc))
+                return str(out_path)
+
+        return MockBridge()
+
+    def test_auto_picks_scalar_and_restores_snapshot(self):
+        # Live table: 1 disabled scalar (TT) + 1 enabled sweep (TT_pvt).
+        # Auto-picker should flip TT to enabled; restore in finally.
+        review = self._make_review()
+        plan = plan_review(review)
+        snap = [("TT", False), ("TT_pvt", True)]
+        rows = [
+            {"row_name": "TT", "vars": {"VDD": "1.0"}, "models": []},
+            {"row_name": "TT_pvt",
+             "vars": {"VDD": ["1.0", "1.1"]}, "models": []},
+        ]
+        bridge = self._make_bridge(rows, snap)
+        execute(
+            plan, bridge,
+            session="fake_session", pvtproject_path=self.pvt_path,
+            push_union=False, ingest_cb=lambda d: None,
+        )
+        # First restore: target snap with TT flipped to enabled.
+        # Second restore: original snap (TT back to disabled).
+        self.assertEqual(bridge.snapshot_calls, 1)
+        self.assertEqual(len(bridge.restore_calls), 2)
+        self.assertEqual(
+            sorted(bridge.restore_calls[0]),
+            sorted([("TT", True), ("TT_pvt", True)]),
+            "first restore enables TT alongside the sweep row",
+        )
+        self.assertEqual(
+            sorted(bridge.restore_calls[1]),
+            sorted(snap),
+            "finally restore returns to original snapshot",
+        )
+
+    def test_explicit_override_beats_auto(self):
+        # Two scalars: TT (first) + SS. Auto would pick TT; override
+        # says SS, so picker must pick SS.
+        review = self._make_review(baseline_corner="SS")
+        plan = plan_review(review)
+        snap = [("TT", False), ("SS", False), ("TT_pvt", True)]
+        rows = [
+            {"row_name": "TT", "vars": {"VDD": "1.0"}, "models": []},
+            {"row_name": "SS", "vars": {"VDD": "0.9"}, "models": []},
+            {"row_name": "TT_pvt",
+             "vars": {"VDD": ["1.0", "1.1"]}, "models": []},
+        ]
+        bridge = self._make_bridge(rows, snap)
+        execute(
+            plan, bridge,
+            session="fake_session", pvtproject_path=self.pvt_path,
+            push_union=False, ingest_cb=lambda d: None,
+        )
+        target = bridge.restore_calls[0]
+        self.assertEqual(
+            sorted(target),
+            sorted([("TT", False), ("SS", True), ("TT_pvt", True)]),
+            "override flips SS, not TT",
+        )
+
+    def test_picker_failure_propagates_as_orchestrator_error(self):
+        # Live table has only sweep rows + no override → hard fail.
+        # Existing v1.3 cleanup still runs (try/finally), so pre-run
+        # disables fire even though the run was never submitted.
+        review = self._make_review()
+        plan = plan_review(review)
+        snap = [("TT_pvt", True), ("TT_models", True)]
+        rows = [
+            {"row_name": "TT_pvt",
+             "vars": {"VDD": ["1.0", "1.1"]}, "models": []},
+            {"row_name": "TT_models",
+             "vars": {"VDD": "1.0"}, "models": [
+                 {"file": "rf018.scs", "block": "Global", "test": "All",
+                  "section": ["tt", "ss"]},
+             ]},
+        ]
+        bridge = self._make_bridge(rows, snap)
+        with self.assertRaises(OrchestratorError) as cm:
+            execute(
+                plan, bridge,
+                session="fake_session", pvtproject_path=self.pvt_path,
+                push_union=False, ingest_cb=lambda d: None,
+            )
+        self.assertIn("no scalar", str(cm.exception))
+        # Run was NOT submitted for the pss item (only trans's 1 run).
+        self.assertEqual(len(bridge.run_histories), 1)
+        # Pre-run cleanup still fired (finally block ran).
+        self.assertEqual(bridge.disables, ["sim_test"])
+
+    def test_v13_compat_when_bridge_lacks_v14_methods(self):
+        # Old MockBridge w/o snapshot/restore/pull methods: v1.4 code
+        # catches AttributeError, logs a note, and v1.3 proceeds.
+        # This is the safety net so partial bridge upgrades don't
+        # break existing pipelines.
+        review = self._make_review()
+        plan = plan_review(review)
+        # Reuse the original ExecuteIcFromTests's bridge (no v1.4 methods).
+        helper = ExecuteIcFromTests()
+        helper.tmp = self.tmp
+        helper.trans_hist = self.trans_hist
+        bridge = helper._make_bridge(self.trans_hist)
+        report = execute(
+            plan, bridge,
+            session="fake_session", pvtproject_path=self.pvt_path,
+            push_union=False, ingest_cb=lambda d: None,
+        )
+        pss = next(r for r in report.items if r.item_name == "pss")
+        self.assertTrue(pss.completed)
+        self.assertIn("baseline-corner setup failed", pss.notes)
 
 
 if __name__ == "__main__":

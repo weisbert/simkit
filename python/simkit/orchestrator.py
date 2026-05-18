@@ -426,6 +426,72 @@ def _execute_batch_item(
     return (histories, run_dirs, completed)
 
 
+def _pick_baseline_corner(
+    live_union: Union,
+    explicit_override: str | None,
+) -> str:
+    """Return the corner name to keep enabled as baseline (DECISIONS #59).
+
+    Pure function. ``live_union`` is the current Maestro corner-table state
+    pulled via ``pvt_corners_pull``; ``explicit_override`` is the user's
+    sidecar ``baseline_corner:`` field if present.
+
+    Selection rule (A4 policy):
+      1. If ``explicit_override`` is non-None, it must match a row in
+         ``live_union`` exactly (case-sensitive). Sweep-row overrides are
+         allowed — user knows what they're doing — but warned in the caller.
+      2. Else auto-pick the first scalar (non-sweep) row in declared
+         order. A row is scalar iff it has neither sweep_var_keys nor
+         sweep_model_indices populated.
+
+    Raises ``OrchestratorError`` if no candidate can be found, so the
+    caller does NOT silently let Maestro fall back to a ``nom`` baseline
+    (which would re-introduce the 24-include cosmetic bug v1.4 closes).
+    """
+    table_names = [r.row_name for r in live_union.rows]
+    if explicit_override is not None:
+        if explicit_override not in table_names:
+            raise OrchestratorError(
+                f"baseline_corner={explicit_override!r} does not match any "
+                f"corner in the live table (available: {table_names!r})"
+            )
+        return explicit_override
+    for row in live_union.rows:
+        if not row.sweep_var_keys and not row.sweep_model_indices:
+            return row.row_name
+    raise OrchestratorError(
+        "ic_from item has no scalar (non-sweep) baseline corner in the "
+        "live corner table; declare baseline_corner: \"<name>\" on the "
+        "item's review entry, or add a scalar corner to the union"
+    )
+
+
+def _load_live_corner_table(
+    bridge, *, session: str, pvtproject_path: Path,
+) -> Union:
+    """Pull the live ADE-XL corner table via bridge into a temp sidecar
+    and parse it as a :class:`Union`. Used by ``_execute_ic_chained_item``
+    to feed ``_pick_baseline_corner``.
+
+    SKILL ``pvtCornersPull`` requires ``outPath`` end with ``.union.json``
+    AND emits ``name = basename`` into the JSON. ``load_union`` requires
+    ``name == basename``. Pull to a fixed ``baselinepick.union.json`` so
+    all three constraints agree without a rename dance.
+    """
+    import tempfile
+    tdir = Path(tempfile.mkdtemp(prefix="simkit_baseline_pick_"))
+    target = tdir / "baselinepick.union.json"
+    try:
+        bridge.pvt_corners_pull(
+            str(target),
+            pvtproject_path=pvtproject_path,
+            session=session,
+        )
+        return load_union(target)
+    finally:
+        shutil.rmtree(tdir, ignore_errors=True)
+
+
 def _execute_ic_chained_item(
     item, idx, total, planned_union,
     bridge, session, pvtproject_path,
@@ -587,7 +653,58 @@ def _execute_ic_chained_item(
     completed = False
     histories: list[str] = []
     run_dirs: list[Path] = []
+    # Baseline-corner state (Phase 3A v1.4, DECISIONS #59). Initialised
+    # here so the finally block can see them whether or not setup runs.
+    corners_snap: list[tuple[str, bool]] = []
+    baseline_applied = False
     try:
+        # 4b. Baseline-corner preservation (Phase 3A v1.4, DECISIONS #59).
+        # Snapshot current per-corner enable state, then enable one scalar
+        # corner as baseline so Maestro doesn't auto-insert a `nom` subdir.
+        # Restored in this try-finally's cleanup. Lives INSIDE the outer
+        # try so OrchestratorError from the picker still triggers the
+        # pre-run cleanup in finally.
+        try:
+            corners_snap = bridge.pvt_runner_snapshot_corners_enable(
+                session=session,
+            )
+            live_union = _load_live_corner_table(
+                bridge, session=session, pvtproject_path=pvtproject_path,
+            )
+            baseline_name = _pick_baseline_corner(
+                live_union, item.baseline_corner,
+            )
+            if baseline_name not in {n for n, _ in corners_snap}:
+                # picked from live_union but missing from enable-snapshot —
+                # snapshot includes every corner the SKILL layer knows about,
+                # so this can only happen on a transient name-mismatch.
+                raise OrchestratorError(
+                    f"baseline_corner={baseline_name!r} present in pulled "
+                    f"union but absent from enable-state snapshot; corner "
+                    f"table may have changed mid-flight"
+                )
+            target_snap = [
+                (name, True if name == baseline_name else en)
+                for name, en in corners_snap
+            ]
+            bridge.pvt_runner_restore_corners_enable(
+                target_snap, session=session,
+            )
+            baseline_applied = True
+            source = ("override" if item.baseline_corner else "auto")
+            print(f"           baseline corner: {baseline_name!r} ({source})")
+        except OrchestratorError:
+            # Hard fail per DECISIONS #59 — let finally clean pre-run,
+            # then propagate so the user sees the error and addresses it
+            # rather than silently getting a `nom` baseline subdir.
+            raise
+        except Exception as exc:
+            notes.append(f"baseline-corner setup failed: {exc}")
+            print(f"           ! baseline-corner setup: {exc}")
+            # Soft fail: continue with the run. Maestro will insert `nom`
+            # as before; the cosmetic `/1/` subdir reappears but v1.3
+            # functionality (per-corner readic/readns) is preserved.
+
         try:
             rv = bridge.pvt_runner_run(
                 history, session=session, **(run_kwargs or {}),
@@ -626,6 +743,18 @@ def _execute_ic_chained_item(
                     notes.append(f"ingest error: {exc}")
                     print(f"           ! ingest errored: {exc}")
     finally:
+        # 7a. Restore per-corner enable state (Phase 3A v1.4, DECISIONS #59).
+        # Mirror the pre-run script restore: undo our baseline mutation
+        # so the user's corner-table state is byte-identical to entry.
+        if baseline_applied and corners_snap:
+            try:
+                bridge.pvt_runner_restore_corners_enable(
+                    corners_snap, session=session,
+                )
+            except Exception as exc:
+                notes.append(f"baseline-corner restore failed: {exc}")
+                print(f"           ! baseline restore: {exc}")
+
         # 7. Cleanup: disable our pre-run, reattach user's original if any.
         # If we wrote junk to additionalArgs via the pre-run script, that
         # value lives in the asi session — restore by reattaching the

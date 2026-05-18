@@ -148,6 +148,12 @@ class ReviewItem:
     enabled: bool
     on_failure: OnFailurePolicy
     ic_from: IcFromRef | None = None
+    # Phase 3A v1.4 (DECISIONS #59): name of a scalar corner to keep enabled
+    # as the baseline during a v1.3 chained run. Without one, Maestro
+    # auto-inserts a `nom` subdir that gets all-section model includes.
+    # None = auto-pick first scalar from the live corner table.
+    # Only meaningful when ic_from is set; rejected otherwise.
+    baseline_corner: str | None = None
 
 
 @dataclass(frozen=True)
@@ -498,9 +504,19 @@ def _validate_item(
         schema_version=schema_version,
     )
 
+    # baseline_corner (schema v2 only; meaningful only with ic_from) —
+    # DECISIONS #59. Auto-pick if absent.
+    baseline_corner = _validate_baseline_corner(
+        path, raw.get("baseline_corner"),
+        where=f"{where}.baseline_corner",
+        schema_version=schema_version,
+        has_ic_from=ic_from_ref is not None,
+    )
+
     # unknown keys
     known_item_keys = {
         "name", "tests", "union", "bundle", "enabled", "on_failure", "ic_from",
+        "baseline_corner",
     }
     unknown = set(raw.keys()) - known_item_keys
     if unknown:
@@ -517,7 +533,37 @@ def _validate_item(
         enabled=enabled,
         on_failure=effective_policy,
         ic_from=ic_from_ref,
+        baseline_corner=baseline_corner,
     )
+
+
+def _validate_baseline_corner(
+    path: Path, raw: Any, *, where: str, schema_version: int, has_ic_from: bool,
+) -> str | None:
+    """Shape-validate the per-item ``baseline_corner`` field (DECISIONS #59).
+
+    Returns ``None`` if absent or null. Requires schema v2. Requires the
+    same item to carry ``ic_from`` — v1.4 only honors the field on
+    chained runs (batch items don't auto-suppress scalar corners, so the
+    `nom`-insertion bug doesn't surface for them).
+    """
+    if raw is None:
+        return None
+    if schema_version < 2:
+        raise ReviewSchemaVersionError(
+            f"{path}: {where} requires review_schema_version >= 2 "
+            f"(got {schema_version}); bump the version to use baseline_corner"
+        )
+    if not isinstance(raw, str) or raw == "":
+        raise ReviewValidationError(
+            f"{path}: {where} must be a non-empty string, got {raw!r}"
+        )
+    if not has_ic_from:
+        raise ReviewValidationError(
+            f"{path}: {where} is only honored on items with ic_from "
+            f"(v1.4 scope; remove the field or add ic_from)"
+        )
+    return raw
 
 
 def _validate_ic_from(

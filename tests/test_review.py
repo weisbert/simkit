@@ -536,6 +536,61 @@ class IcFromShapeTests(TempDirMixin, unittest.TestCase):
         self.assertIsNone(review.items[1].ic_from)
 
 
+class BaselineCornerFieldTests(TempDirMixin, unittest.TestCase):
+    """baseline_corner field validation (DECISIONS #59, Phase 3A v1.4)."""
+
+    def test_absent_field_yields_none(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        review = load_review(self._write(doc))
+        self.assertIsNone(review.items[1].baseline_corner)
+
+    def test_explicit_name_loads(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"][1]["baseline_corner"] = "TT"
+        review = load_review(self._write(doc))
+        self.assertEqual(review.items[1].baseline_corner, "TT")
+
+    def test_null_treated_as_absent(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"][1]["baseline_corner"] = None
+        review = load_review(self._write(doc))
+        self.assertIsNone(review.items[1].baseline_corner)
+
+    def test_empty_string_rejected(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"][1]["baseline_corner"] = ""
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("non-empty string", str(cm.exception))
+
+    def test_non_string_rejected(self):
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"][1]["baseline_corner"] = 42
+        with self.assertRaises(ReviewValidationError):
+            load_review(self._write(doc))
+
+    def test_v1_sidecar_rejects_baseline_corner(self):
+        # v1.4 schema bump enforced — same pattern as ic_from.
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"},
+                      schema_version=1)
+        # First strip ic_from since v1 already rejects it (would error first)
+        doc["items"][1].pop("ic_from")
+        doc["items"][1]["baseline_corner"] = "TT"
+        with self.assertRaises(ReviewSchemaVersionError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("review_schema_version >= 2", str(cm.exception))
+
+    def test_baseline_corner_without_ic_from_rejected(self):
+        # Per DECISIONS #59 scope: v1.4 only honors baseline_corner on
+        # ic_from items. Setting it on a batch item is meaningless +
+        # would silently do nothing; reject with a clear error.
+        doc = _ic_doc({"item": "trans", "file": "fc", "mode": "readns"})
+        doc["items"][0]["baseline_corner"] = "TT"  # trans is batch (no ic_from)
+        with self.assertRaises(ReviewValidationError) as cm:
+            load_review(self._write(doc))
+        self.assertIn("only honored on items with ic_from", str(cm.exception))
+
+
 class IcFromCrossRefTests(TempDirMixin, unittest.TestCase):
     """Post-loop cross-item refs: existence, ordering, same-union, no self-ref."""
 

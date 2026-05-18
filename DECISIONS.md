@@ -1305,3 +1305,41 @@ A separate but co-occurring failure mode is the skillbridge transport leaving a 
 **Live-verified 2026-05-17 on `fnxSession0`:** end-to-end v1.3 retry with cached sdb. Pre-run script installed, fired across 6 sub-points of TT_pvt sweep-row (`cornerName=TT_pvt_0..5` confirmed via diagnostic log), 6 distinct `readic="/tmp/simkit_dogfood_TT_pvt_X.ic"` values landed in 6 separate `simulatorOptions options` blocks of `input.scs`. Spectre completed 0 errors. Cached-sdb pattern survived the post-`axlRunAllTests` focus loss in subsequent cleanup calls — no `"Cannot find an active session"` surfaced on the read-side restore path.
 
 **Companion finding (no decision, just clearing a misattribution):** the `~1s per sub-point` serial dispatch the user observed is **not** caused by pre-run script attachment. A/B test 2026-05-17 — same TT_pvt 6-sub-point batch with and without pre-run installed — both showed identical `~1s` start-time gap between consecutive sub-points. Maestro's local sim dispatcher serializes regardless. If true parallel dispatch is wanted, configure session-level "Number of local jobs" (separate concern from this codebase).
+
+## #59 — Phase 3A v1.4: `_prep` preserves a scalar baseline corner so Maestro doesn't auto-insert `nom`
+_Date: 2026-05-18_
+
+**Decision:** `_execute_ic_chained_item._prep` will guarantee at least one **scalar (non-sweep)** corner remains `axlSetEnabled t` in the corner table when launching a v1.3-style chained run. Selection policy:
+1. **Auto (default):** scan the corner table in declared order, pick the first scalar corner that is currently enabled by the user. A scalar corner is one whose `vars` axis and `models` axis both resolve to single values (no space-separated sweep strings).
+2. **Override (escape hatch):** sidecar `review.json` items may carry an optional `baseline_corner: "<name>"` field on entries that use `ic_from`. When present, it short-circuits auto-pick and selects that exact corner name; an unknown name surfaces as a hard error before any axl call fires.
+3. **No-scalar-available case:** if auto-pick finds no scalar corner AND no override is given, raise `OrchestratorError("ic_from item '{name}' has no scalar baseline corner; declare baseline_corner: \"<name>\" in the sidecar")`. Do not silently let Maestro auto-insert `nom`.
+
+The picked corner is enabled in addition to the sweep-row(s) the ic_from item needs. Its `models` axis section selections are passed through unmodified — section count is per-project and must not be normalised (see [[project_baseline_section_count]]).
+
+**Why:** the v1.3 closeout dogfood produced a `nom` subdir as `/1/` in every history because `_prep` had disabled all scalar corners. `nom` has no active corner, so Maestro's netlister can't pick a model-file section and falls back to including **every** section of every model file (24 rf018.scs includes on this testmachine; would be 24-N at company depending on PDK shape). Manual user runs (`simkit_verify`) never produce `nom` because the user always leaves a scalar corner enabled as baseline — that's the well-known IC-design idiom this fix matches. The misclaim that this was a non-bug (PROJECT_STATE.md, 2026-05-17 PM handoff) was retracted 2026-05-18 after user pushback with on-disk evidence (subdir 1 `runObjFile` shows `#maeCorner=TT` in manual run vs `#maeCorner=nom` in v1.3 run).
+
+**Alternatives considered:**
+- *Synthesise a "nom-with-defaults" corner*: would require simkit to know per-PDK default sections (rf018: `tt`, `tt_rfmos`, `tt_rfmim` for company; just `tt` here). Brittle and project-specific.
+- *Suppress the nom subdir via SKILL after the fact*: no Maestro API to inhibit auto-baseline; `axlRemoveElement` on a synthetic corner won't reach the implicit `nom`.
+- *Always require explicit `baseline_corner:`*: shifts cost to user for the 99% case where they already have a TT in the table. A4 (auto + override) hits both ends.
+- *Use the ic_from upstream item's corner as baseline*: requires orchestrator metadata threading across items; works for same-simkit-session chains but fails when upstream was a separate manual run. Auto-pick from current table is simpler and project-agnostic.
+
+**Scope explicitly NOT in v1.4:**
+- No CSV emitter / restore changes (baseline-corner is a runtime concept, not a corner-table-shape concept).
+- No SKILL helper additions — pure Python orchestrator change.
+- No re-verification of the `readic` injection mechanism itself (v1.3 proved it; v1.4 only changes which corners are enabled around it).
+
+**Live-verify gate (must hold before declaring v1.4 done):**
+1. On `fnxSession0`, run a v1.3-style chain. New history's subdir `/1/` `runObjFile` must show `#maeCorner=TT` (or whichever scalar was auto-picked), NOT `#maeCorner=nom`.
+2. Subdir `/1/` `input.scs` must include rf018.scs exactly as many times as the picked corner's `models` axis declares (1 here; 3 at company). Do NOT hard-code `==1` in any test.
+3. Subdirs `/2/`-`/7/` must still carry the distinct per-sub-corner `readic="..."` in their `simulatorOptions options` block — v1.3 functionality must not regress.
+
+**Live-verified 2026-05-18 on `fnxSession0`** (history `v14dog_pss_v14_1779072455_1`, dogfood script `/tmp/v14_dogfood.py` against fake upstream `fake_trans_v14`). Pre-run input state: `[(TT, False), (TT_pvt, True), (TT_2p5G, False)]` — exactly the pathological "only sweep enabled" state that produced `nom` in earlier dogfoods. Orchestrator logged `baseline corner: 'TT' (auto)`. Resulting history:
+- subdir 1 = TT (1 rf018 include — matches `simkit_verify` baseline)
+- subdir 2 = TT_pvt_0 (1 rf018 include, distinct `readic`)
+- subdir 3 = TT_pvt_1 (1 rf018 include, distinct `readic`)
+- subdir 4 = TT_pvt_2 (1 rf018 include; `readic` is empty-in-map → inherits prior sub-point's value — pre-run-script leak that exists in v1.3 too, surfaces only when the union doesn't fully cover the live corner table; orthogonal to v1.4)
+- NO `nom` subdir
+- Corner-enable state restored byte-identical to entry snapshot in finally
+
+**Known sub-issue surfaced during verify (NOT a v1.4 regression — pre-existing v1.3 behavior, queued for v1.4.1):** orchestrator's `Snapshot/RestoreCornersEnable` wrappers currently take session NAME only (not sdb-polymorphic). Post-`axlRunAllTests` focus loss (the Run Summary sub-window steals focus from Assembler) means the in-finally `restore_corners_enable` call will fail with "Cannot find an active session" unless the user re-clicks Maestro Assembler between the orchestrator's run-and-restore steps. Pattern is documented in [[reference_bridge_session_focus]] and DECISIONS #58 — those decisions made the error message clear, not the recovery automatic. Workaround for v1.4: user clicks Maestro back after each chained run (same as v1.3 daily flow). Real fix in v1.4.1: extend the SKILL helpers `pvtRunnerSnapshot/RestoreCornersEnable` with `(integerp sess)` polymorphism per DECISIONS #58 pattern, so the post-run restore can use the cached sdb handle and bypass name resolution entirely. Live-verify above succeeded only after a user-click on Maestro to restore focus between snapshot and run — confirms the picker logic, doesn't yet confirm hands-off recovery.
