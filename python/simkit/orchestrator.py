@@ -872,6 +872,7 @@ def _run_strategy_chain(
     notes: list[str],
     ingest_cb,
     query_failed_cb,
+    history_by_item: dict[str, str] | None = None,
 ) -> tuple[tuple[StrategyAttempt, ...], tuple[str, ...]]:
     """Drive ``item.on_failure.strategies`` until FAIL set drains or chain
     exhausts. Mutates ``histories`` / ``run_dirs`` in place with each retry's
@@ -936,6 +937,8 @@ def _run_strategy_chain(
                 attempt_number=attempt,
                 bridge=bridge,
                 params=strat.params,
+                history_by_item=history_by_item,
+                pvtproject_path=pvtproject_path,
             )
 
             print(f"           strategy {strat.name!r} attempt {attempt} "
@@ -1195,6 +1198,7 @@ def execute(
                             notes=notes,
                             ingest_cb=ingest_cb,
                             query_failed_cb=query_failed_cb,
+                            history_by_item=history_by_item,
                         )
                     except Exception as exc:
                         notes.append(f"strategy chain error: {exc}")

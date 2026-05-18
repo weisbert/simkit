@@ -33,17 +33,28 @@ class StrategyContext:
     """What a strategy receives. Frozen so strategies cannot mutate it.
 
     Attributes:
-        session:        Maestro session name (string) — pass through to bridge.
-        item_name:      Human label of the suite item being processed.
-        failed_corners: List of (corner_name, test_name, status) tuples that
-                        failed on the previous attempt. ``status`` is a
-                        free-form string from Phase 1 collector
-                        (``sim_err`` / ``eval_err`` / ``unknown``).
-        attempt_number: 1-based; first invocation is attempt 1, retry is 2, …
-        bridge:         The Python skill_bridge module — strategies call
-                        pvt_runner_run, pvt_corners_push, etc. from it.
-        params:         User-supplied knobs from the sidecar strategy entry
-                        (e.g. ``{"trans_duration": "5ns"}``).
+        session:           Maestro session name (string) — pass through to bridge.
+        item_name:         Human label of the suite item being processed.
+        failed_corners:    List of (corner_name, test_name, status) tuples that
+                           failed on the previous attempt. ``status`` is a
+                           free-form string from Phase 1 collector
+                           (``sim_err`` / ``eval_err`` / ``unknown``).
+        attempt_number:    1-based; first invocation is attempt 1, retry is 2, …
+        bridge:            The Python skill_bridge module — strategies call
+                           pvt_runner_run, pvt_corners_push, etc. from it.
+        params:            User-supplied knobs from the sidecar strategy entry
+                           (e.g. ``{"trans_duration": "5ns"}``).
+        history_by_item:   Orchestrator-injected map of completed-item-name →
+                           recorded history name. Strategies that need an
+                           upstream artefact (e.g. trans_pss_ic looking up the
+                           IC source's history dir) resolve via this map.
+                           ``None`` when invoked outside the orchestrator (e.g.
+                           ad-hoc tests of strategies that don't need it).
+        pvtproject_path:   Orchestrator-injected absolute path to the
+                           ``.pvtproject`` file. Strategies that need on-disk
+                           layout (results-root, workdir for the pre-run
+                           script) read it from here. ``None`` outside the
+                           orchestrator.
     """
     session: str
     item_name: str
@@ -51,6 +62,8 @@ class StrategyContext:
     attempt_number: int
     bridge: Any  # the skill_bridge module
     params: Mapping[str, Any] = field(default_factory=dict)
+    history_by_item: Mapping[str, str] | None = None
+    pvtproject_path: Any = None  # Path | str | None — kept loose to avoid pathlib import here
 
 
 @dataclass(frozen=True)

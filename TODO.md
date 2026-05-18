@@ -290,9 +290,12 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 - [x] **A7 re-verify**: only TT_pvt_3 carries 9.99e-10; TT_pvt_4/5 back to 1e-12 on both `Test` and `Test_trans` netlists. Leak closed. Bridge clean throughout.
 - [x] Python 996 → 1028 (+32: 30 gmin_bump + 4 pre_run_script extensions). SKILL Tier-1 unchanged (pure-Python feature + safer renderer).
 
-### Phase 3A v1.8 candidates (no priority assigned yet — pick next session):
+### Phase 3A v1.8 — DONE 2026-05-18 EOD (DECISIONS #66)
 
-- [ ] **`trans_pss_ic` strategy implementation** — same plug-in shape as gmin_bump; needs `asiChangeAnalysis` probe per DECISIONS #52 v1.1 deferred list.
+- [x] **`trans_pss_ic` strategy implementation** — landed as on-failure variant of v1.3 `ic_from` (DECISIONS #57's pre-run-script mechanism reused verbatim). The deferred `asiChangeAnalysis` probe (DECISIONS #52) is now moot: `additionalArgs`-based path covers the IC injection need without any new asi* surface. `StrategyContext` extended with optional `history_by_item` + `pvtproject_path` fields; `_run_strategy_chain` plumbs them through. Safe-write shape (`baseline_value=""`) inherits v1.7 A6 fix. Live-verified on fnxSession0 (TT_pvt_3 → simkit_verify/5/Test/netlist/spectre.ic, script + restoration clean). +28 tests. DECISIONS #66 records D1-D6 design + alternatives rejected + two probe-environment learnings.
+
+### Phase 3A v1.9 candidates (no priority assigned yet — pick next session):
+
 - [ ] **Auto-probe `baseline_value` from asi at strategy startup** (per DECISIONS #63 D4 deferral) — needs `pvt_runner_get_sim_option_val` bridge wrapper.
 - [x] ~~**run.json `history_name: None` fix**~~ — **PHANTOM, closed via display fix 2026-05-18 EOD (DECISIONS #64).** SKILL write side was already correct since v1.5 PM (`d["run"]["history_name"]` populated for every run); the "None" report was a `dict.get()` misread against the top-level envelope (5 keys: schema_version/run/results/artifacts/output_specs — no top-level history_name). DB column was also already correct. Real gap was the `pvt list` table not showing a `history` column at all; added in `cli/list_runs.py`, 2 new tests. Python 1028 → 1030.
 - [x] ~~**v1.8 #4: `pvt star` — sync DB starred runs to Maestro history locks (DECISIONS #65)**~~ — DONE 2026-05-18 EOD. Schema v2→v3 adds `runs.starred BOOLEAN DEFAULT FALSE`. New verbs: `pvt star <run_id>` / `pvt unstar <run_id>` / `pvt sync-stars push|pull [--dry-run]`. `pvt list` gets a `★` column and `--starred-only` filter. Bridge wrappers `pvt_runner_set_history_lock` (mae*) + `pvt_runner_get_history_lock_map` (axl*). Live-verified end-to-end on `fnxSession0`: star → bridge read-back lock=T → unstar → bridge read-back lock=nil; 3 pre-existing user locks (simkit_verify / simkit_simerr / simkit_Rtime_err) untouched throughout. Python 1030 → 1069 (+39). SKILL Tier-1 unchanged. Future hook for the day `pvt forget` lands: default-block deletion of starred runs.

@@ -1614,3 +1614,81 @@ _Date: 2026-05-18 EOD (post-#64)_
 - Use `--dry-run` before `push` whenever a multi-history reconciliation might touch unintended entries.
 
 **Future hook:** when `pvt forget` lands, default-block deletion of starred runs (require `--force` to override). Same hook should refuse to delete a run whose history is still locked in Maestro (per-session check via the lock map).
+
+
+---
+
+## #66 — Phase 3A v1.8 #5: `trans_pss_ic` strategy = on-failure variant of v1.3 `ic_from`
+_Date: 2026-05-18 EOD (post v1.8 #4)_
+
+**Decision:** Implement `trans_pss_ic` as a built-in Strategy that reuses the v1.3 `ic_from` mechanism (DECISIONS #57: pre-run-script writing `readns/readic="<path>"` into per-corner `additionalArgs`) — **not** as a fresh `asiChangeAnalysis`-based path the way DECISIONS #52 originally sketched. The "asi probe deferred" caveat in #52 is now moot: #57 already mapped a working IC-injection path, and `trans_pss_ic` becomes its on-failure variant. No new SKILL surface, no new asi* helper, zero `axl*` API additions.
+
+Sidecar shape (all under the strategy entry's `params:` block):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `source_item` | required | name of the upstream item in the review whose history holds the per-corner IC dirs |
+| `file` | `"ic"` | one of `ic` / `fc` / `dc` — the Spectre IC file kind to feed |
+| `mode` | `"readic"` | `readic` (hard IC) or `readns` (soft nodeset hint) |
+| `subdir` | auto-detect | per-simulator subdir override (`netlist` for Spectre, `psf` for Alps) |
+| `test_for_ic` | first failed test | which test's upstream subdir holds the IC files |
+
+**Why this shape (not the #52 sketch):**
+
+- The original `trans_pss_ic` conception (asiChangeAnalysis to write PSS analysis-form IC field directly) was retired in #57 — it would have re-implemented work `additionalArgs` already does, AND it would have needed a separate IC-knob probe per analysis kind (PSS / HB / Envelope). The additionalArgs path is analysis-agnostic; Spectre reads `readic="..."` regardless of the parent analysis.
+- The chain dispatch framework (v1.6, #62) + the pre-run-script mechanism (v1.3, #57) + the safe-write baseline shape (v1.7, #63) gave us all three building blocks. trans_pss_ic is the composition.
+- User retains the v1.3 `ic_from` field for **always-on** chaining; trans_pss_ic is the **on-failure** escape hatch. Same mechanism, different invocation policy. Cleaner than gluing a "sometimes on" flag onto the workflow primitive.
+
+**Design picks (sub-points):**
+
+- **D1: `StrategyContext` gains `history_by_item` + `pvtproject_path` optional fields.** The strategy needs to resolve `source_item` → an actual on-disk history dir. The orchestrator already maintains `history_by_item` and knows the `pvtproject_path`; it now plumbs both into `_run_strategy_chain` and ctx-injects them. Marked optional so out-of-orchestrator strategy tests don't need to fake them. naive_retry and gmin_bump don't read these fields, so the addition is purely additive.
+
+- **D2: `baseline_value=""` on the PreRunSpec.** Inherits the A6 safe-write shape (#63): on every per-corner firing, the worker hook clears `additionalArgs` first, THEN conditionally overlays the per-corner IC arg. Without this, a partial-row FAIL set (FAIL=1 of 6 sub-corners in a sweep row, common case) would leak the IC arg into the row's PASS sub-corners via the shared worker-VM asi session.
+
+- **D3: Source history lookup happens in the strategy, not the orchestrator.** Alternative was to pre-resolve `source_history` and inject it as `params["source_history"]`. Rejected because (a) `history_by_item` is the natural orchestrator concept (and the chain dispatch already passes it for free), (b) the strategy's error message is more useful when it can list "known items: [...]" on a typo, (c) future strategies can use `history_by_item` for other purposes without needing per-strategy plumbing changes.
+
+- **D4: Strategy pulls live union via `pvt_corners_pull` to enumerate sub-corners.** Alternative was to inject `planned_union` into the strategy. Rejected because the strategy must work for items that don't have an `ic_from` field (otherwise the orchestrator wouldn't have computed `planned_union`); the live pull is the single source of truth that survives sub-union changes during the suite. One bridge round-trip per attempt; acceptable cost vs. complexity savings.
+
+- **D5: `test_for_ic` defaults to the first test in `failed_corners`.** Phase 3A items typically share their test set with their trans precursor (the same Maestro setupDB defines both Test and Test_trans against the same DUT), so the FAIL set's first test name almost always names a directory that exists in the upstream history. The override is the escape hatch for items where the consumer's test differs from the precursor's.
+
+- **D6: Returns `UNCHANGED`, not `RECOVERED`, after the retry runs.** Same convention as gmin_bump (#63 D5): the strategy doesn't re-collect; the chain dispatch in `_run_strategy_chain` does that and decides the outcome based on the post-retry FAIL set. Keeps the strategy contract narrow.
+
+**Alternatives considered (all rejected):**
+
+- **(mechanism) `asiChangeAnalysis` to write the PSS analysis-form IC field directly.** Rejected per #57's reasoning: would need per-analysis-kind probes (PSS / HB / Envelope), would mutate user-visible GUI state during retry, would re-implement what `additionalArgs` already does at the netlist layer.
+
+- **(scope) Per-test pre-run scripts** (different IC map per test). Rejected for v1 — same gap v1.3 has (DECISIONS #57 v1.3.1 candidate). Promote when a real multi-test consumer item hits the IC ambiguity.
+
+- **(coverage) Inject IC for every sub-corner in any FAILED row, not just the failed sub-corners themselves.** Tempting because "if TT_pvt_3 needs IC, TT_pvt_4 probably does too." Rejected for v1 — narrowing matches gmin_bump's discipline, and the `baseline_value=""` safe-write makes partial coverage safe regardless. Wider coverage can be a sidecar param later if a real case shows up.
+
+- **(API) Have the strategy take `source_history` directly as a string param** instead of `source_item`. Rejected because the user shouldn't need to know the orchestrator's generated history name; `source_item` is the user-facing review-file concept.
+
+**Live-verified 2026-05-18 EOD on `fnxSession0`** via `/tmp/probe_transic_v18.py`:
+
+- Stubbed `pvt_runner_run` so the probe verifies strategy mechanics (script gen + corner narrowing + state restoration) without firing a fresh Spectre cycle. The actual `axlRunAllTests` + pre-run-script-fires-per-corner execution path is already proven by v1.3 (#57) + v1.7 (#63) live verifies — reused verbatim here.
+- Source history = `simkit_verify` (standing fixture, has `spectre.ic`+`spectre.fc` under per-corner subdirs 1..7).
+- FAIL = `TT_pvt_3`, which the strategy resolved to 5th-in-explode-order via live `pvt_corners_pull` of fnxSession0's current 3-row corner table (TT, TT_pvt with 6 sub-corners, TT_2p5G) → `corner_idx=5` → `.../simkit_verify/5/Test/netlist/spectre.ic` (real file exists).
+- Rendered script: 1-corner map `{"TT_pvt_3": "readic=\"/.../5/Test/netlist/spectre.ic\""}`, safe-write shape with `asiSetSimOptionVal asi "additionalArgs" ""` as STEP 1.
+- Bridge call order: pull → snap → get_prerun(Test) → install_prerun(Test, our.il) → restore(FAIL-only) → [stubbed run] → restore(orig snap) → install_prerun(Test, prior). Clean.
+- Post-teardown: corner-enable byte-identical to entry; pre-run on Test reattached to the prior (in the probe environment that prior was a stale gmin script from an earlier debug session — the strategy correctly restored whatever was there, no implicit mutation).
+
+**Two probe-environment learnings:**
+
+- The synthetic `.pvtproject` for the probe needed `dbRoot` field — bridge `_prep` calls `pvt_validation` if it's missing. First probe attempt failed with empty-pull because of this; fixed by adding `"dbRoot":"./simkit_data"` to the synthetic file. Not a strategy issue.
+- Strategy's `_pull_live_sub_corner_index` originally passed `pvtproject_path` as `str()` — production bridge `_prep` does `pvtproject_path.parent`, which raises on a string. Fixed to wrap with `Path(...)`. Caught only by live probe because unit-test mock bridge accepts anything for the path arg.
+
+**Implementation notes:**
+
+- `StrategyContext` additive fields: `history_by_item: Mapping[str, str] | None = None`, `pvtproject_path: Any = None` (kept loose typing to avoid pathlib import in `base.py`).
+- `_run_strategy_chain` gains `history_by_item` kwarg, passes through to ctx.
+- `simkit.strategies.trans_pss_ic.TransPssIc` — single class, ~280 LOC including module docstring, mirrors gmin_bump structure section-for-section.
+- `simkit.strategies.__init__._BUILTINS` registers `"trans_pss_ic": TransPssIc`.
+- Tests: `tests/test_strategies_trans_pss_ic.py` (28 cases) covering param validation (3) + orch-injection validation (4) + happy path (7) + teardown (3) + IC-resolution edge cases (5) + live-pull failures (2) + edge cases (2) + sub-corner indexing (1) + registration (1). Production-shape mock bridge per [[feedback_mock_match_production_shape]]: `pvt_corners_pull` mock writes a synthetic valid union JSON to the target so the strategy's `load_union(target)` step runs the real code path, not a substitute.
+- Python suite 1069 → 1097 (+28). SKILL Tier-1 unchanged (pure-Python feature; mechanism is reused v1.3 + v1.7 SKILL).
+
+**Out of scope (queued for v1.9):**
+
+- **Per-test pre-run scripts** — current strategy installs the same script (1-test IC map) on every failed test; if Test and Test_trans need different IC maps the v1.3 known-gap #2 must close first.
+- **Per-row coverage option** — sidecar flag to widen coverage from "failed sub-corners only" to "every sub-corner in any failed row." Wait for a real PSS case where partial coverage causes inconsistencies.
+- **Auto-discover upstream IC kind** — currently user picks `file: "ic"` vs `"fc"` vs `"dc"`; could probe the upstream history's available files and pick the best match.
+- **`pvt run --strategies preview`** — list what strategies are wired per item without dispatching anything. Useful when authoring complex on_failure chains.
