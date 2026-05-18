@@ -267,21 +267,27 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 - [x] **A/B test cleared serial-dispatch misattribution** — `~1s per sub-point` is Maestro's local sim default, not pre-run-script overhead. Same TT_pvt 6-sub-point batch with vs without pre-run script showed identical timing.
 - [x] **All 7 commits (5 stage-2/3 + 1 AM handoff doc + 1 closeout) pushed to `origin/main` as of `f8e5f69`.**
 
-### Phase 3A v1.4 candidates (no priority assigned yet — pick next session):
+### Phase 3A v1.4 — DONE 2026-05-18 AM
 
-- v1.3 known-gap fix #1: capture + restore prior `additionalArgs` simoption alongside pre-run script (currently clobbered then cleared on cleanup)
-- v1.3 known-gap fix #2: per-test pre-run scripts for multi-test consumer items
-- v1.3 known-gap fix #3: 3-item chain dogfood (v1.3 → v1.3 → v1.3) to confirm `_resolve_ic_path` handles the per-corner-history case
-- v1.2 leftovers (see "IN PROGRESS" section below): #1 `pvtRunnerCountRunning` rdb-walker, #2 `pvt corners push --replace`, #3 per-corner verdict + strategy chain dispatch, runTests.il atomic loader fix
+- [x] Baseline-corner preservation (`ReviewItem.baseline_corner` + `_pick_baseline_corner`). Commit `9b5328f` / DECISIONS #59.
+- [x] Worker-VM socket-steal root cause + sibling skill_tools fix. Commit `a69bf12` (doc) + sibling `e8c76e9` / DECISIONS #60.
 
-### Phase 3A v1.2 leftovers — RESLOTTED to v1.4 (no longer "immediate next" — v1.3 took the slot)
+### Phase 3A v1.5 — DONE 2026-05-18 PM
 
-These were planned as v1.2 #1-3 but got pre-empted by the v1.3 IC-piping request. Still valid candidates; pick whichever feels real-workflow-relevant next session.
+- [x] **§5 close — `pvt run` CLI ↔ `execute()` wiring.** Removed the exit-5 "not yet implemented" gate; threaded `--session` (or PVT_SESSION env), `--no-push-union`, `--history-prefix` flags; pvtproject_path auto-walked from review.json's parent dir. Exit codes 0=ok / 6=partial / 7=bridge-import-fail. 6 new live-mode tests with mocked execute() (15/15 in test_cli_run.py).
+- [x] **v1.5 F1: validator allows `pending` status.** SKILL collector legitimately emits `pending` for sub-corners that haven't started yet (PvtSave fired before axlRunAllTests queued them). I12 + I1 sentinel-status whitelists both extended. Caught + fixed during 1st real `pvt run` dogfood when both run.jsons were rejected on ingest.
+- [x] **v1.5 F2: `pvtRunnerCountRunning` rdb-walker discriminator (closes v1.2 #1).** SKILL helper walks current-history rdb counting non-terminal `tst->status` rows; Python state machine AND-s it with `axlGetRunStatus` for the idle-confirm gate. New opt-in `min_running_observed` kwarg. Live-verified twice on fnxSession0: 0 pending/running rows in either dump (vs pre-F2: 6 pending sentinels in item 1). DECISIONS #61.
 
-- [ ] **#1 (priority HIGH): swap the polling discriminator.** Add SKILL `pvtRunnerCountRunning(sess)` that opens current-history rdb via `maeReadResDB`, walks `tst->pointID`, returns count of rows where `tst->status == 'running`. Wire into Python state machine as the PRIMARY signal; keep `axlGetRunStatus` as a secondary check for sessions where it does work. The collector's `_pvtCollWalkRdb` is the right call site — collector already proves walking the rdb is safe during the async tail (DECISIONS #54 #4).
-- [ ] **#2: `pvt corners push --replace`** — current ADD-semantics surface unexpectedly (per DECISIONS #54 #8). Either add `--replace` flag or change default. v1.1 live verify worked around by deleting the added corner directly via `axlRemoveElement` (which interestingly did NOT trip ASSEMBLER-2423 even with the setupdb lock active — interesting data point for the discriminator design).
-- [ ] **#3: per-corner failure detection + strategy chain wired in `execute()`** — §4 `Strategy` + `naive_retry` plumbing is in place; what's missing is post-PvtSave query against just-ingested DB rows to identify FAIL corners + dispatch the strategy chain. Depends on #1 being solid because per-corner verdict reading is meaningless until the run-completion signal is reliable.
-- [ ] **runTests.il atomic loader fix** — separate pre-existing breakage surfaced during v1.1 verify: `(load runTests.il)` fails at line 168 (first inner load) regardless of v1.1 changes; bypass-loop (load each file individually + `(pvtTestRun)`) is the workaround. Not on the v1.1 critical path; pin as a tools-clean-up task.
+### Phase 3A v1.6 candidates (no priority assigned yet — pick next session):
+
+- [ ] **run.json `history_name: None` fix** — surfaced during v1.5 dogfood. `pvtCollect.il::PvtSave` doesn't write the passed `histName` into the envelope. Cosmetic but breaks `pvt list/diff` history correlation. ~1-line SKILL fix.
+- [ ] **v1.2 #2: `pvt corners push --replace`** — current ADD-semantics surface unexpectedly (per DECISIONS #54 #8). Either add `--replace` flag or change default. v1.1 live verify worked around by deleting the added corner directly via `axlRemoveElement`.
+- [ ] **v1.2 #3: per-corner failure detection + strategy chain dispatch in `execute()`** — §4 `Strategy` + `naive_retry` plumbing in place; what's missing is post-PvtSave query against just-ingested DB rows to identify FAIL corners + dispatch the chain. Now unblocked by v1.5 F2's reliable completion signal.
+- [ ] **v1.3 known-gap #1: capture + restore prior `additionalArgs` simoption** alongside pre-run script (currently clobbered then cleared on cleanup). ~20 lines.
+- [ ] **v1.3 known-gap #2: per-test pre-run scripts** for multi-test consumer items.
+- [ ] **v1.3 known-gap #3: 3-item chain dogfood** (v1.3 → v1.3 → v1.3) to confirm `_resolve_ic_path` handles the per-corner-history case.
+- [ ] **runTests.il atomic loader fix** — pre-existing breakage; `(load runTests.il)` fails at line 168. Pin as tools-cleanup.
+- [ ] **Audit other tests for `mock.patch.dict(sys.modules, {...: None})` anti-pattern** per [[feedback-pytest-sysmodules-mock-trap]] memory.
 
 ### Deferred to Phase 3A v1.3 (do NOT block v1.2):
 
