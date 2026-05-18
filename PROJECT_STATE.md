@@ -155,15 +155,18 @@ _2026-05-16 v1.4 push (4 commits): #4 X..Y parser, #5 apply CLI spec_status, #1 
 
 ## What's NEXT (the deferred-work shelf)
 
-**Phase 3A v1.3 is DONE — but with one known cosmetic bug (the `nom` subdir) carried into v1.4.** Today (2026-05-17 PM) closed the morning's pending retry: readic syntax verified end-to-end on 6 sub-points of TT_pvt, sdb-caching infrastructure landed, serial-dispatch suspect proven non-bug via A/B test (Maestro local-sim default). 7 commits pushed to `origin/main`. **The multi-rf018.scs claim from the same A/B test was retracted 2026-05-18** after user pushback — see top blurb + new v1.4 plan below. **v1.4 is the next thread** — baseline-corner preservation in `_prep`.
+**Phase 3A v1.4 is DONE end-to-end, hands-off batch use is unlocked.** As of 2026-05-18 PM: baseline-corner preservation landed (commit `9b5328f`), then a separate finding closed the long-running "post-axlRunAllTests focus loss" pattern (commit `a69bf12` + sibling repo commit `e8c76e9` in `skill_tools`). Orchestrator now runs an N-item review without requiring user clicks between items. Three open commits ahead of origin/main (`9b5328f`, `a69bf12`, plus skill_tools `e8c76e9` not in this repo); not yet pushed.
 
-**Owed back from user (housekeeping, partially carried over from AM handoff):**
-- `fnxSession0` Spectre Options form: clear `additionalArgs` field if it still has `+ic /tmp/ic` leftover (cosmetic; source of harmless SFE-1994 noise in pre-flight `/1/` subdir of any v1.3 run)
-- Maestro GUI: delete the timestamp-named dogfood histories from today: `simkit_E_probe_*`, `simkit_v13_diag_*`, `simkit_v13_retry2_*`, `simkit_v13_baseline_*`, plus AM-handoff leftovers `Interactive.0/1/2`
-- `rm /tmp/simkit_dogfood_*.ic` (8 fake IC files used as probe payload — still on disk)
-- `rm -rf /tmp/simkit_dogfood_workdir/` (generated pre-run scripts cache)
-- `rm /tmp/orch_v13_diag.py /tmp/orch_v13_retry2.py /tmp/orch_v13_baseline.py /tmp/orch_probe_e.py /tmp/probe_v13_log.il /tmp/simkit_probe_ic_wrap.scs /tmp/simkit_v13_diag.log` (today's probe scripts)
-- `rm /tmp/probe_prerun.il` (the early Claude-written probe script — may still be wired as Test_trans's pre-run; harmless)
+**Owed back from user (housekeeping, GUI-only):**
+- Maestro GUI: delete today's dogfood histories — `v14dog_pss_v14_1779068447_1`, `v14dog_pss_v14_1779072455_1`, `v14dog_pss_v14_1779078345_1` (the 3 v1.4 dogfood runs), plus `Interactive.3`, `wedge_diag*`, `wedge_probe`, `patch_v`, `patch_v2` (worker-fix probe runs). All can be wiped now that Spectre completed.
+- Most carry-over `/tmp` items from the 2026-05-17 handoff have been cleaned (Claude rm'd `simkit_v14_dogfood/`, `v14_dogfood*.py/log`, `probe_*.py` for today's diagnostics). Earlier handoff's `/tmp/simkit_dogfood_*.ic` + `/tmp/simkit_dogfood_workdir/` + `orch_v13_*.py` were already cleaned during the 2026-05-17 closeout.
+
+**Today's deliverables (2026-05-18) — quick lookup:**
+| Commit | Repo | What |
+|---|---|---|
+| `9b5328f` | simkit | Phase 3A v1.4: `ReviewItem.baseline_corner` + `_pick_baseline_corner` + snapshot/restore around `_execute_ic_chained_item`. Python 931→949 (+18). DECISIONS #59. |
+| `a69bf12` | simkit | DECISIONS #60: skillbridge worker-VM socket-steal root cause + cancels #59's v1.4.1 followup. Doc-only. |
+| `e8c76e9` | skill_tools (sibling) | `sbStart.il` detects axl workers via `grep -aq axlChildIdFlag /proc/$PPID/cmdline`, skips `pyStartServer` in worker VMs. The fix that unlocks zero-click batch operation. |
 
 **v1.3 known gaps (truly bite-when-they-bite, not blocking):**
 1. **`additionalArgs` prior-value snapshot/restore** — orchestrator captures & restores the user's prior PRE-RUN SCRIPT but NOT the prior `additionalArgs` simoption value. v1.3 pre-run overwrites it per-corner; cleanup clears to `""`. If user has a non-empty manual additionalArgs (e.g. `+log debug`), it gets clobbered. Fix is ~20 lines (mirror `prior_scripts` capture with `prior_addl_args` from `asiGetSimOptionVal`).
@@ -173,9 +176,10 @@ _2026-05-16 v1.4 push (4 commits): #4 X..Y parser, #5 apply CLI spec_status, #1 
 **Original Phase 3A v1.2 candidates (reslot to v1.4):** flag-stickiness mitigation, `pvt corners push --replace`, per-corner verdict reading + strategy chain dispatch. None blocking.
 
 **Operational notes for next session:**
-- **Bridge bootstrap is now ONE focus per session, not per-call.** Cache sdb at start of any probe via `skill_bridge.get_sdb(name)`; pass the returned int as `session=` to all read-side wrappers (snapshot/install/get/restore). Run-side wrappers (`pvt_runner_run` / `_submit` / `_get_status` / `_rename`) still need the session-name string — but those only fire during/around the actual `axlRunAllTests`, so focus is naturally present.
-- **`get_sdb` now translates the 3 known bridge failure modes** into clear `SkillBridgeError` messages: `bridge_wedge` (unpack-mode → CIW `(pyKillServer)(pyStartServer)`), `bridge_dead` (socket lost → shell kill stale processes then CIW `(pyStartServer)`), `session_focus_lost` (Maestro Assembler not focused → click it). No more cryptic Python tracebacks for these.
-- **Multi-pair stacking trap** (observed today): repeated `(pyKillServer)(pyStartServer)` cycles over a long session can leave **N orphaned `python_server.py` + `cdsServIpc` pairs** all bound to the same `/tmp/skill-server-default.sock`. After 7 hours we found 7 pairs. Symptoms: random `RuntimeError: The server unexpectedly died`. Fix: `pkill -f "python_server.py default INFO" && pkill -f "cdsServIpc.*skillbridge_skill.log"` from shell, then **one** `(pyStartServer)` in CIW (no preceding pyKillServer — there's nothing left to kill). Pinned in memory `reference_skillbridge_recovery.md`.
+- **Auto-reload SKILL files via bridge — do not ask user to click into CIW.** The bridge can fire `ws['load']("/abs/path/to/file.il")` directly. Iteration on `.il` files no longer needs user `(load ...)` typing; only fall back to asking the user when the bridge itself is dead. Memory updated in `reference_skillbridge_recovery.md`.
+- **Bridge bootstrap is now ONE focus per session.** Cache sdb at start of any probe via `skill_bridge.get_sdb(name)`; pass the returned int as `session=` to all read-side wrappers. Run-side wrappers (`pvt_runner_run` / `_submit` / `_get_status` / `_rename`) still need the session-name string — and with DECISIONS #60 fix in place, name resolution survives axl dispatch (no more focus dance).
+- **`get_sdb` translates 3 bridge failure modes** into clear `SkillBridgeError` messages: `bridge_wedge` (unpack-mode → `(pyKillServer)(pyStartServer)` in CIW), `bridge_dead` (socket lost → shell kill stale processes + fresh `(pyStartServer)`), `session_focus_lost` (Maestro not focused → click it). With DECISIONS #60 fix the `session_focus_lost` flavor should be rare to absent.
+- **Multi-pair stacking trap — root cause identified 2026-05-18.** Was NOT pyKill/pyStart misuse; was axl worker virtuoso processes auto-loading `sbStart.il` and clobbering the socket binding. **Fix is now in `sbStart.il` itself** (see commit `e8c76e9` in sibling `skill_tools` repo). If you ever see >1 pair in `ps -ef | grep python_server.py`, the new normal interpretation is "user fired `(pyStartServer)` manually more than once OR `sbStart.il` was reloaded by the bridge"; orphan workers no longer accumulate. Cleanup as before: `pkill -f "python_server.py default INFO" && pkill -f "cdsServIpc.*skillbridge_skill.log"` then one `(pyStartServer ?python "/usr/bin/python3")` in CIW.
 
 **Phase 3A v1.3 mechanism cheatsheet (for next session):**
 - Generator: `simkit/pre_run_script.py::write_pre_run_script(PreRunSpec, workdir)` → writes `.simkit/pre_run/pre_run_<item>_<hash>.il`
