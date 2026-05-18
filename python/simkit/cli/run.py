@@ -5,21 +5,23 @@ Two modes:
   1. Sidecar mode:    ``pvt run <review.json> [--dry-run] [--items name1,name2]``
   2. Ad-hoc mode:     ``pvt run --tests T1,T2 --union U.union.json [--bundle B.measure.json] [--dry-run]``
 
-v1 ships ``--dry-run`` end-to-end. Live execution is gated on Phase 3A §3
-(SKILL bridge) + §4 (strategy framework); ``pvt run`` without ``--dry-run``
-exits with a clear "not yet implemented" message pointing at the tasks.
+Live execution drives Maestro via ``simkit.skill_bridge`` and calls
+``orchestrator.execute()``. Use ``--dry-run`` to print the plan without
+driving Maestro.
 
 Exit codes:
-    0  plan resolved + (dry-run) printed cleanly
-    2  schema / load error
+    0  dry-run printed OR all items completed
+    2  schema / load error / missing --session in live mode
     3  missing union / bundle file (only when --strict-paths is set)
     4  --items: unknown item name
-    5  live execution requested but not yet implemented
+    6  one or more items did not complete cleanly
+    7  bridge import / session setup failure
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -32,7 +34,12 @@ from simkit.orchestrator import (
     plan_review,
     synthesize_adhoc_review,
 )
-from simkit.project import PvtProjectError, load_pvtproject
+from simkit.project import (
+    PvtProjectError,
+    PvtProjectNotFoundError,
+    find_pvtproject,
+    load_pvtproject,
+)
 from simkit.review import (
     ReviewError,
     check_project_match,
@@ -114,6 +121,23 @@ def add_subparser(sub) -> None:
             "NOT in --dry-run mode. Can also be set via PVT_SESSION env var."
         ),
     )
+    p.add_argument(
+        "--no-push-union",
+        action="store_true",
+        help=(
+            "Do NOT push each item's union sidecar before running. Use the "
+            "session's current corner table as-is. Useful when the user has "
+            "already set up corners by hand."
+        ),
+    )
+    p.add_argument(
+        "--history-prefix",
+        default="orch",
+        help=(
+            "Prefix for auto-generated Maestro history names "
+            "(<prefix>_<item>_<timestamp>). Default: 'orch'."
+        ),
+    )
     p.set_defaults(func=_cli_run)
 
 
@@ -185,11 +209,58 @@ def _cli_run(args: argparse.Namespace) -> int:
             return 3
         return 0
 
-    # Live mode — gated on §3 + §4.
-    print("ERROR: live execute() not yet implemented (Phase 3A §3 SKILL bridge "
-          "+ §4 strategy framework pending). Use --dry-run for now.",
-          file=sys.stderr)
-    return 5
+    # --- live mode ------------------------------------------------------
+    session = args.session or os.environ.get("PVT_SESSION")
+    if not session:
+        print("ERROR: live mode requires --session NAME (or PVT_SESSION env "
+              "var). Use --dry-run to skip Maestro.", file=sys.stderr)
+        return 2
+
+    pvtproject_path = _resolve_pvtproject_path(
+        args.project, review_path=args.review_path,
+    )
+    if pvtproject_path is None:
+        print("ERROR: live mode requires a .pvtproject — pass --project PATH "
+              "or run from inside a project directory.", file=sys.stderr)
+        return 2
+
+    try:
+        from simkit import skill_bridge as bridge
+    except Exception as exc:
+        print(f"ERROR: cannot import simkit.skill_bridge: {exc}",
+              file=sys.stderr)
+        return 7
+
+    try:
+        report = execute(
+            plan,
+            bridge,
+            session=session,
+            pvtproject_path=pvtproject_path,
+            history_prefix=args.history_prefix,
+            push_union=not args.no_push_union,
+        )
+    except OrchestratorError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 6
+    except Exception as exc:
+        print(f"ERROR: execute() raised {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return 7
+
+    print("---")
+    print(f"DONE  {len(report.items)} item(s), "
+          f"snapshot_restored={report.snapshot_restored}")
+    incomplete = [ir for ir in report.items if not ir.completed]
+    for ir in report.items:
+        status = "ok" if ir.completed else "INCOMPLETE"
+        hist = ", ".join(ir.history_names) or "(no history)"
+        print(f"  [{status}] {ir.item_name}  histories={hist}")
+        if ir.notes:
+            for line in ir.notes.splitlines():
+                print(f"           ! {line}")
+
+    return 0 if not incomplete else 6
 
 
 def _resolve_project_name(project_path: Optional[str]) -> str:
@@ -202,3 +273,33 @@ def _resolve_project_name(project_path: Optional[str]) -> str:
 def _try_load_pvtproject(project_path: Optional[str]):
     start = Path(project_path) if project_path else None
     return load_pvtproject(start=start)
+
+
+def _resolve_pvtproject_path(
+    project_arg: Optional[str],
+    *,
+    review_path: Optional[str],
+) -> Optional[Path]:
+    """Resolve the .pvtproject path execute() needs.
+
+    Order: --project arg → walk up from review.json's dir → walk up from cwd.
+    Returns None if nothing found (caller decides whether that's fatal).
+    """
+    if project_arg:
+        p = Path(project_arg).expanduser()
+        if p.is_dir():
+            found = find_pvtproject(p)
+            return found
+        return p if p.is_file() else None
+
+    env_val = os.environ.get("PVT_PROJECT")
+    if env_val:
+        p = Path(env_val).expanduser()
+        return p if p.is_file() else None
+
+    if review_path:
+        found = find_pvtproject(Path(review_path).resolve().parent)
+        if found is not None:
+            return found
+
+    return find_pvtproject()
