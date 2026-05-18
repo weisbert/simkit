@@ -79,7 +79,7 @@ _TIMESTAMP_RE = re.compile(
 # Closed sets
 # ----------------------------------------------------------------------
 
-VALID_STATUSES = frozenset({"ok", "failed", "running", "no_convergence", "eval_err"})
+VALID_STATUSES = frozenset({"ok", "failed", "running", "no_convergence", "eval_err", "pending"})
 
 # Statuses that record per-output measurement outcomes (vs. whole-test or
 # whole-triple sentinels). `eval_err` is a per-output sentinel: a single
@@ -598,7 +598,7 @@ def _check_triple_coverage(results: list, violations: List[Violation]) -> None:
         if sentinels:
             (i, r) = sentinels[0]
             status = r.get("status")
-            if status not in {"failed", "running", "no_convergence"}:
+            if status not in {"failed", "running", "no_convergence", "pending"}:
                 point, corner, test = key
                 violations.append(Violation(
                     "I1", "error",
@@ -606,7 +606,7 @@ def _check_triple_coverage(results: list, violations: List[Violation]) -> None:
                     f"sentinel row for triple (point={point}, "
                     f"corner={corner!r}, test={test!r}) has status "
                     f"{status!r}; expected one of "
-                    "{failed, running, no_convergence}",
+                    "{failed, running, no_convergence, pending}",
                 ))
 
 

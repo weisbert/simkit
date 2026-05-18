@@ -685,6 +685,35 @@ def pvt_runner_get_status(
     return (int(raw[0]), int(raw[1]))
 
 
+def pvt_runner_count_running(
+    *, session: str, workspace: Any = None,
+) -> int:
+    """Count in-flight test/corner rows in the session's CURRENT history.
+
+    Walks the current history's results-db (``maeReadResDB``) and counts
+    every test row whose ``tst->status`` is non-terminal (i.e. not
+    ``'done``/``'failed``/``'no_convergence``/``'aborted``/``'killed``).
+    Returns 0 when there's no current history yet, when the rdb can't be
+    opened, or when every row has reached a final status.
+
+    Why this exists (Phase 3A v1.5 F2, 2026-05-18): ``axlGetRunStatus``
+    sometimes returns ``[0, 0]`` from the very first poll even though
+    Maestro has not yet queued the first sub-point — the state machine
+    in :func:`pvt_runner_run` would then exit via ``dispatch_grace`` and
+    PvtSave would see only ``'pending`` rows. This counter, AND-ed with
+    ``axlGetRunStatus``, gives a content-based "this run actually
+    finished" signal that survives the slow-queue race.
+
+    Pure read; safe during the async tail of ``axlRunAllTests``.
+
+    Raises :class:`SkillBridgeError` for SKILL-side ``pvt_err``
+    (e.g. bad session arg shape).
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    return int(_unwrap(ws["pvtRunnerCountRunning"](session)))
+
+
 def pvt_runner_run(
     history_name: str, *,
     session: str,
@@ -694,6 +723,7 @@ def pvt_runner_run(
     dispatch_grace_reads: int = 2,
     initial_wait_sec: float = 0.0,
     post_idle_quiesce_sec: float = 0.0,
+    min_running_observed: int = 0,
     workspace: Any = None,
     _sleep=None,
 ) -> tuple[int, int, str]:
@@ -705,6 +735,16 @@ def pvt_runner_run(
     ASSEMBLER-2423 (DECISIONS #54). v1.1 uses pvtRunnerSubmit +
     poll-loop on pvtRunnerGetStatus + pvtRunnerRename, ensuring the
     rename only fires when Maestro is truly idle.
+
+    v1.5 F2 (2026-05-18) addition: the idle test now AND-s the
+    ``axlGetRunStatus == (0, 0)`` signal with
+    :func:`pvt_runner_count_running` ``== 0``. The status signal can lie
+    in either direction during slow-queue dispatch (it returns ``[0, 0]``
+    before Maestro has queued the first sub-point); the count signal is
+    content-based — it walks the history's rdb and only returns 0 when
+    every row has reached a terminal status. Either signal seeing
+    in-flight work resets ``saw_non_idle`` so the state machine waits for
+    the work to finish.
 
     Returns ``(final_code, final_sub, actual_history_name)``.
 
@@ -727,6 +767,10 @@ def pvt_runner_run(
             no-op completion" before declaring done. This handles the
             S1-style re-run-the-already-cached-corner case where the
             full submit→complete happens between two poll intervals.
+            NOTE (v1.5 F2): the grace path now ALSO requires
+            ``pvt_runner_count_running == 0`` — if the rdb shows any
+            in-flight rows, the loop ignores grace and waits for them
+            to clear.
         initial_wait_sec: extra sleep AFTER submit and BEFORE the first
             poll. Use when the session's ``axlGetRunStatus`` is unable
             to report in-flight state and the loop would otherwise
@@ -737,6 +781,14 @@ def pvt_runner_run(
         post_idle_quiesce_sec: extra sleep AFTER the loop reports
             idle, BEFORE pvtRunnerRename fires. Lets Maestro release
             the setupdb lock; mirrors the ASSEMBLER-2423 mitigation.
+        min_running_observed: require having seen
+            ``count_running >= min_running_observed`` AT LEAST ONCE
+            before believing the run can be declared done. Default 0
+            preserves prior behavior. Set to 1 to force the state
+            machine to actually observe a sub-point in flight (useful
+            for slow-queue cases where neither status nor count have
+            ramped up by the first poll). Orchestrator can pass 1 to
+            guarantee it waits past the dispatch race.
         workspace: optional pre-opened skillbridge Workspace.
         _sleep: hook for tests; defaults to ``time.sleep``.
 
@@ -765,6 +817,8 @@ def pvt_runner_run(
 
     last_code, last_sub = 0, 0
     saw_non_idle = False
+    saw_running = False                       # v1.5 F2: count-side observation
+    max_running_seen = 0                      # for diagnostics on timeout
     idle_streak = 0
     elapsed = elapsed_initial
     while elapsed < timeout_sec:
@@ -772,21 +826,37 @@ def pvt_runner_run(
         elapsed += poll_interval
         code, sub = pvt_runner_get_status(session=session, workspace=ws)
         last_code, last_sub = code, sub
-        is_idle = (code == 0 and sub == 0)
-        if is_idle:
+        # v1.5 F2: second, content-based signal. Counts test/corner rows
+        # in the CURRENT history whose status is still pending/running.
+        # 0 == nothing observably in flight from the rdb's perspective.
+        count_running = pvt_runner_count_running(session=session, workspace=ws)
+        if count_running > max_running_seen:
+            max_running_seen = count_running
+        if count_running > 0:
+            saw_running = True
+        status_idle = (code == 0 and sub == 0)
+        count_idle = (count_running == 0)
+        is_idle = status_idle and count_idle
+        # min_running_observed gate (v1.5 F2): when set, never declare
+        # done until we've actually observed count_running >= threshold.
+        gate_satisfied = saw_running or (min_running_observed <= 0)
+        if is_idle and gate_satisfied:
             idle_streak += 1
             if saw_non_idle and idle_streak >= idle_confirm_reads:
                 break  # transitioned non-idle → idle for N reads: done for real
             if (not saw_non_idle) and idle_streak >= dispatch_grace_reads:
                 break  # never observed non-idle: cached / no-op completion
         else:
-            saw_non_idle = True
+            # Either status or count says something is in flight; reset.
+            if not is_idle:
+                saw_non_idle = True
             idle_streak = 0
     else:
         raise SkillBridgeError(
             "pvt_runner_timeout",
             f"axlRunAllTests did not return to idle in {timeout_sec}s "
-            f"(last status [{last_code}, {last_sub}])",
+            f"(last status [{last_code}, {last_sub}], "
+            f"max running seen {max_running_seen})",
             session,
         )
 

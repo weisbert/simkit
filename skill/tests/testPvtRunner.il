@@ -260,3 +260,73 @@
   (lambda ()
     (let ((rv (pvtRunnerGetPreRunScript "fakeSession" "")))
       (pvtAssertErrCategory rv 'pvt_validation "empty testName in get"))))
+
+
+;; --- v1.5 F2: pvtRunnerCountRunning -----------------------------------------
+
+(pvtTestRegister "runner/countRunning/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerCountRunning)) t
+               "pvtRunnerCountRunning defined")))
+
+(pvtTestRegister "runner/countRunning/nil-session-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerCountRunning nil)))
+      (pvtAssertErrCategory rv 'pvt_validation "nil session"))))
+
+(pvtTestRegister "runner/countRunning/integer-session-rejected"
+  (lambda ()
+    ;; Underlying axlGetCurrentHistory needs the session NAME (string),
+    ;; not a cached sdb handle — match the Submit/Rename/GetStatus guard.
+    (let ((rv (pvtRunnerCountRunning 42)))
+      (pvtAssertErrCategory rv 'pvt_validation "integer session"))))
+
+(pvtTestRegister "runner/countRunning/empty-string-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerCountRunning "")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty-string session"))))
+
+;; --- _pvtRunnerIsPendingStatus: pure helper for status classification ------
+
+(pvtTestRegister "runner/isPendingStatus/done-is-terminal"
+  (lambda ()
+    (pvtAssert (_pvtRunnerIsPendingStatus 'done) nil "'done = terminal")))
+
+(pvtTestRegister "runner/isPendingStatus/failed-is-terminal"
+  (lambda ()
+    (pvtAssert (_pvtRunnerIsPendingStatus 'failed) nil "'failed = terminal")))
+
+(pvtTestRegister "runner/isPendingStatus/no_convergence-is-terminal"
+  (lambda ()
+    (pvtAssert (_pvtRunnerIsPendingStatus 'no_convergence) nil
+               "'no_convergence = terminal")))
+
+(pvtTestRegister "runner/isPendingStatus/aborted-is-terminal"
+  (lambda ()
+    (pvtAssert (_pvtRunnerIsPendingStatus 'aborted) nil "'aborted = terminal")))
+
+(pvtTestRegister "runner/isPendingStatus/running-is-pending"
+  (lambda ()
+    (pvtAssert (_pvtRunnerIsPendingStatus 'running) t "'running = pending")))
+
+(pvtTestRegister "runner/isPendingStatus/pending-is-pending"
+  (lambda ()
+    (pvtAssert (_pvtRunnerIsPendingStatus 'pending) t "'pending = pending")))
+
+(pvtTestRegister "runner/isPendingStatus/nil-is-not-pending"
+  (lambda ()
+    ;; nil status = no row to count, must not inflate the running count.
+    (pvtAssert (_pvtRunnerIsPendingStatus nil) nil "nil = skip")))
+
+(pvtTestRegister "runner/isPendingStatus/non-symbol-is-not-pending"
+  (lambda ()
+    ;; Defensive: corrupt slot read shouldn't be counted as running.
+    (pvtAssert (_pvtRunnerIsPendingStatus "running") nil
+               "string status = skip (not a symbol)")))
+
+(pvtTestRegister "runner/isPendingStatus/unknown-symbol-is-pending"
+  (lambda ()
+    ;; Anything we don't recognise as terminal is treated as in-flight —
+    ;; err on the side of waiting longer rather than declaring done early.
+    (pvtAssert (_pvtRunnerIsPendingStatus 'mystery_state) t
+               "unknown symbol = treat as pending")))

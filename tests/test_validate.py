@@ -341,6 +341,15 @@ class ResultsRowTests(unittest.TestCase):
         v = validate_dump(self.dump)
         self.assertIn("I12", _codes(v))
 
+    def test_i12_pending_is_accepted(self):
+        # Collector emits 'pending' for sub-corners that haven't started yet
+        # (PvtSave fired before axlRunAllTests queued them). v1.5 F1 fix.
+        self.dump["results"][0]["status"] = "pending"
+        self.dump["results"][0]["value"] = None
+        self.dump["results"][0]["output"] = "__sim_status__"
+        v = validate_dump(self.dump)
+        self.assertNotIn("I12", _codes(v))
+
     def test_i13_output_empty(self):
         self.dump["results"][0]["output"] = ""
         v = validate_dump(self.dump)

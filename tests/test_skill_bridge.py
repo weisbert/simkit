@@ -22,6 +22,7 @@ from simkit.skill_bridge import (  # noqa: E402
     SkillBridgeError,
     pvt_corners_pull,
     pvt_corners_push,
+    pvt_runner_count_running,
     pvt_runner_get_status,
     pvt_runner_run,
     pvt_save,
@@ -333,17 +334,26 @@ class TestResolvePvtprojectPath(unittest.TestCase):
 
 def _runner_ws(status_sequence, *, submit_return=_ok(SimpleNamespace(name="t")),
                rename_return=_ok("hist_renamed"),
-               status_raises=()):
+               status_raises=(),
+               count_running_sequence=None):
     """Build a stub workspace for the pvt_runner_run state machine.
 
     ``status_sequence`` is a list of (code, sub) tuples returned by
     successive pvtRunnerGetStatus calls. If a slot in
     ``status_raises`` is set to an exception, that call raises instead
     of returning.
+
+    v1.5 F2: ``count_running_sequence`` is an optional list of int
+    returns for successive ``pvtRunnerCountRunning`` calls. Default is
+    all-zeros (matches the pre-F2 behaviour where the count was not
+    consulted), so legacy tests that don't pass this kwarg keep working
+    unchanged.
     """
     seq = list(status_sequence)
     raises = dict(status_raises)
     call_idx = {"n": 0}
+    count_seq = list(count_running_sequence or [])
+    count_idx = {"n": 0}
 
     def status_side(_sess):
         i = call_idx["n"]
@@ -355,20 +365,30 @@ def _runner_ws(status_sequence, *, submit_return=_ok(SimpleNamespace(name="t")),
         c, s = seq[i]
         return _ok([c, s])
 
+    def count_side(_sess):
+        i = count_idx["n"]
+        count_idx["n"] += 1
+        if i >= len(count_seq):
+            return _ok(0)  # default to "no in-flight rows" once sequence ends
+        return _ok(int(count_seq[i]))
+
     submit_fn = MagicMock(return_value=submit_return)
     rename_fn = MagicMock(return_value=rename_return)
     status_fn = MagicMock(side_effect=status_side)
+    count_fn = MagicMock(side_effect=count_side)
 
     table = {
         "load": MagicMock(),
         "pvtRunnerSubmit": submit_fn,
         "pvtRunnerRename": rename_fn,
         "pvtRunnerGetStatus": status_fn,
+        "pvtRunnerCountRunning": count_fn,
     }
     ws = MagicMock()
     ws.__getitem__.side_effect = table.__getitem__
     ws._table = table
     ws._calls = call_idx
+    ws._count_calls = count_idx
     return ws
 
 
@@ -469,6 +489,145 @@ class TestPvtRunnerRunStateMachine(unittest.TestCase):
         self.assertEqual((code, sub), (0, 0))
         # 5 status reads consumed
         self.assertEqual(ws._calls["n"], 5)
+
+    # --- v1.5 F2: count_running second signal ----------------------------
+
+    def test_count_running_keeps_loop_waiting_until_zero(self):
+        """Even when axlGetRunStatus is [0,0] from the start, a non-zero
+        count_running must keep the state machine waiting. Sequence
+        6 -> 4 -> 0 across 3 polls + idle_confirm streak must complete
+        only after the count drops to zero AND stays."""
+        # 5 polls so saw_non_idle path + idle_confirm_reads=2 are exercised.
+        # status all-idle, count 6/4/0/0/0.
+        ws = _runner_ws(
+            [(0, 0)] * 6,
+            count_running_sequence=[6, 4, 0, 0, 0],
+        )
+        code, sub, name = pvt_runner_run(
+            "h", session="s", workspace=ws,
+            poll_interval=0,
+            dispatch_grace_reads=99,
+            idle_confirm_reads=2,
+            _sleep=lambda _t: None,
+        )
+        self.assertEqual((code, sub, name), (0, 0, "hist_renamed"))
+        # Must have polled 5 times: 2 with count>0 (sets saw_non_idle via
+        # the count-side reset), 1 with count=0 (streak=1), 1 with count=0
+        # (streak=2 → idle_confirm satisfied → break). So 4 status calls.
+        # Account for any small variation in how the streak rolls.
+        self.assertGreaterEqual(ws._calls["n"], 4)
+        # Count was queried at least once per status poll
+        self.assertEqual(ws._count_calls["n"], ws._calls["n"])
+
+    def test_dispatch_grace_unchanged_when_count_zero_from_start(self):
+        """No regression: when status AND count both stay 0 from the
+        first poll, dispatch_grace_reads still exits as before."""
+        ws = _runner_ws(
+            [(0, 0), (0, 0)],
+            count_running_sequence=[0, 0],
+        )
+        code, sub, name = pvt_runner_run(
+            "h", session="s", workspace=ws,
+            poll_interval=0, dispatch_grace_reads=2,
+            _sleep=lambda _t: None,
+        )
+        self.assertEqual((code, sub, name), (0, 0, "hist_renamed"))
+        # Exactly 2 polls — grace exit on 2nd consecutive both-idle read.
+        self.assertEqual(ws._calls["n"], 2)
+        ws._table["pvtRunnerRename"].assert_called_once_with("s", "h")
+
+    def test_count_takes_precedence_over_dispatch_grace(self):
+        """NEW v1.5 F2 rule: if count_running starts non-zero while
+        axlGetRunStatus is [0,0], dispatch_grace must NOT fire — the
+        state machine must wait for the count to drop to zero."""
+        # Status is [0,0] throughout. Count starts at 6, then 0/0/0.
+        # With dispatch_grace_reads=2 the pre-F2 code would have exited
+        # after the first 2 idle reads (i.e. polls 2 and 3). Under F2,
+        # the count==6 on poll 1 sets saw_non_idle, so the only way out
+        # is the idle_confirm_reads path.
+        ws = _runner_ws(
+            [(0, 0)] * 5,
+            count_running_sequence=[6, 0, 0, 0, 0],
+        )
+        code, sub, name = pvt_runner_run(
+            "h", session="s", workspace=ws,
+            poll_interval=0,
+            dispatch_grace_reads=2,
+            idle_confirm_reads=2,
+            _sleep=lambda _t: None,
+        )
+        self.assertEqual((code, sub, name), (0, 0, "hist_renamed"))
+        # Poll 1: count=6, not idle. Poll 2: count=0, idle_streak=1.
+        # Poll 3: count=0, idle_streak=2 → break (saw_non_idle path).
+        self.assertEqual(ws._calls["n"], 3)
+
+    def test_min_running_observed_forces_dispatch_wait(self):
+        """When min_running_observed=1, the state machine MUST observe
+        at least one count_running>=1 poll before allowing any kind of
+        idle exit. Used by orchestrator to defeat the slow-queue race."""
+        # status [0,0] throughout; count 0 for 3 polls, then 2, then 0/0/0.
+        # Without the gate, dispatch_grace_reads=2 would exit on poll 2.
+        # With min_running_observed=1, the loop must keep polling until
+        # it sees the 2 in poll 4, then wait for it to drop.
+        ws = _runner_ws(
+            [(0, 0)] * 8,
+            count_running_sequence=[0, 0, 0, 2, 0, 0, 0, 0],
+        )
+        code, sub, name = pvt_runner_run(
+            "h", session="s", workspace=ws,
+            poll_interval=0,
+            dispatch_grace_reads=2,
+            idle_confirm_reads=2,
+            min_running_observed=1,
+            _sleep=lambda _t: None,
+        )
+        self.assertEqual((code, sub, name), (0, 0, "hist_renamed"))
+        # Must NOT have exited on poll 2 via grace. Must reach >= poll 4
+        # (the one with count=2) plus enough idle reads after.
+        self.assertGreaterEqual(ws._calls["n"], 6)
+
+
+class TestPvtRunnerCountRunning(unittest.TestCase):
+    """Wrapper-level tests for pvt_runner_count_running (v1.5 F2)."""
+
+    def test_happy_path_returns_int(self):
+        count_fn = MagicMock(return_value=_ok(5))
+        table = {
+            "load": MagicMock(),
+            "pvtRunnerCountRunning": count_fn,
+        }
+        ws = MagicMock()
+        ws.__getitem__.side_effect = table.__getitem__
+        got = pvt_runner_count_running(session="sess0", workspace=ws)
+        self.assertEqual(got, 5)
+        self.assertIsInstance(got, int)
+        count_fn.assert_called_once_with("sess0")
+
+    def test_zero_returned_as_int(self):
+        count_fn = MagicMock(return_value=_ok(0))
+        table = {
+            "load": MagicMock(),
+            "pvtRunnerCountRunning": count_fn,
+        }
+        ws = MagicMock()
+        ws.__getitem__.side_effect = table.__getitem__
+        self.assertEqual(
+            pvt_runner_count_running(session="s", workspace=ws), 0,
+        )
+
+    def test_skill_error_surfaces_as_skillbridgeerror(self):
+        err_fn = MagicMock(return_value=_err(
+            "pvt_validation", "session must be a non-empty string",
+        ))
+        table = {
+            "load": MagicMock(),
+            "pvtRunnerCountRunning": err_fn,
+        }
+        ws = MagicMock()
+        ws.__getitem__.side_effect = table.__getitem__
+        with self.assertRaises(SkillBridgeError) as cm:
+            pvt_runner_count_running(session="", workspace=ws)
+        self.assertEqual(cm.exception.category, "pvt_validation")
 
 
 class TestPvtRunnerGetStatusTranslation(unittest.TestCase):

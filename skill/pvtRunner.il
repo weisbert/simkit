@@ -714,4 +714,95 @@
     (return (pvtOk (cond ((null r) "") (t r))))))
 
 
-(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.3: + pre-run script install/disable/get)\n")
+;; --- v1.5 F2: count in-flight sub-points (DECISIONS #54 / #55 follow-up) ---
+;;
+;; Background: axlGetRunStatus returns [code sub] that mostly correlates with
+;; "Spectre is talking to Maestro," BUT during the v1.4 dogfood (2026-05-18)
+;; the orchestrator's state-machine saw [0,0] from the very first poll on
+;; item-1 even though Maestro had not yet queued the first sub-point. The
+;; dispatch_grace_reads exit fired before Spectre actually started; PvtSave
+;; dumped 6 sub-points all stuck at status='pending'. axlGetRunStatus alone
+;; is not a reliable "done" signal — we need a second, content-based check
+;; that walks the current history's rdb and counts how many sub-points are
+;; still in a non-final status. When BOTH `axlGetRunStatus == [0 0]` and the
+;; running-count is 0, the run is genuinely complete.
+;;
+;; pvtRunnerCountRunning(sess)
+;;   -> (pvtOk integer)               number of test/corner rows whose status
+;;                                    is 'running, 'pending, or any other
+;;                                    "not yet final" symbol (see
+;;                                    _pvtRunnerIsPendingStatus). 0 when:
+;;                                      * no current history (just after
+;;                                        snapshot, before submit)
+;;                                      * maeReadResDB cannot open the rdb
+;;                                        (path missing on disk / mid-write)
+;;                                      * every test row has reached a final
+;;                                        status
+;;   -> (pvtErr 'pvt_validation msg)  bad session arg shape
+;;
+;; Pure read; safe to call during the async tail of axlRunAllTests.
+
+(procedure (_pvtRunnerIsPendingStatus sym)
+  ;; Returns t if `sym` represents a non-final test status — i.e. the
+  ;; test/corner row is still in-flight and not yet usable as a result.
+  ;; 'done / 'failed / 'no_convergence / 'aborted are terminal; 'pending /
+  ;; 'running / 'queued / 'submitted are not. Defensive whitelist of
+  ;; terminals: anything we DON'T recognise as terminal is treated as
+  ;; "still in flight" so we err on the side of waiting longer rather
+  ;; than declaring a half-complete run done.
+  (cond
+    ((null sym) nil)                       ; nil status = no row, skip
+    ((not (symbolp sym)) nil)              ; non-symbol = corrupt / skip
+    ((equal sym 'done) nil)
+    ((equal sym 'failed) nil)
+    ((equal sym 'no_convergence) nil)
+    ((equal sym 'aborted) nil)
+    ((equal sym 'killed) nil)
+    (t t)))                                ; everything else = pending/running
+
+
+(procedure (pvtRunnerCountRunning sess)
+  (prog (sessR sessName histID histName rdbR rdb tsts count tstStatus)
+    ;; Validate session NAME (axlGetCurrentHistory needs a name string).
+    (setq sessR (_pvtRunnerRequireSessName sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
+
+    ;; Resolve current history. axlGetCurrentHistory returns integer
+    ;; handle | nil; nil = no run yet (just-after-snapshot / pre-submit).
+    (setq histID (errset (axlGetCurrentHistory sessName) nil))
+    (setq histID (cond ((listp histID) (car histID)) (t nil)))
+    (cond
+      ((null histID) (return (pvtOk 0))))
+
+    ;; Resolve the name string (maeReadResDB takes a name).
+    (setq histName (errset (axlGetHistoryName histID) nil))
+    (setq histName (cond ((listp histName) (car histName)) (t nil)))
+    (cond
+      ((or (null histName) (not (stringp histName)))
+        (return (pvtOk 0))))
+
+    ;; Open the rdb. Mid-write the rdb dir may not exist yet (Maestro is
+    ;; still scaffolding it), or the rdb may exist but be unreadable —
+    ;; either way "no live work observable" is the correct conservative
+    ;; answer (the OUTER caller still AND-s this with axlGetRunStatus so
+    ;; a real run-in-flight is detected via the status signal even if we
+    ;; momentarily return 0 here).
+    (setq rdbR (errset (maeReadResDB ?historyName histName ?session sessName) nil))
+    (setq rdb (cond ((and rdbR (listp rdbR)) (car rdbR)) (t nil)))
+    (cond
+      ((null rdb) (return (pvtOk 0))))
+
+    ;; Walk (rdb->tests) — same pattern as _pvtCollWalkRdb section 6 —
+    ;; and count rows whose `tst->status` is non-terminal.
+    (setq tsts (_pvtCollEvalThunk (lambda () (funcall (rdb->tests)))))
+    (setq count 0)
+    (foreach tst (or tsts nil)
+      (setq tstStatus (_pvtCollEvalThunk (lambda () tst->status)))
+      (cond
+        ((_pvtRunnerIsPendingStatus tstStatus)
+          (setq count (plus count 1)))))
+    (return (pvtOk count))))
+
+
+(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.5 F2: + pvtRunnerCountRunning)\n")
