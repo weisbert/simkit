@@ -15,11 +15,13 @@ from __future__ import annotations
 from typing import Dict, Type
 
 from simkit.strategies.base import Strategy, StrategyContext, StrategyResult
+from simkit.strategies.gmin_bump import GminBump
 from simkit.strategies.naive_retry import NaiveRetry
 
 
 _BUILTINS: Dict[str, Type[Strategy]] = {
     "naive_retry": NaiveRetry,
+    "gmin_bump": GminBump,
 }
 
 
@@ -37,6 +39,7 @@ __all__ = [
     "StrategyContext",
     "StrategyResult",
     "NaiveRetry",
+    "GminBump",
     "get_builtin",
     "builtin_names",
 ]

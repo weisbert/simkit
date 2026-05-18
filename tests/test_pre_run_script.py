@@ -137,6 +137,69 @@ class RenderScriptTests(unittest.TestCase):
         # Should have ZERO `(list "` lines
         self.assertEqual(src.count('(list "'), 0)
 
+    def test_default_option_key_is_additionalArgs(self):
+        # Backward compat for ic_from callers (DECISIONS #57): the v1.3
+        # readns/readic flow doesn't pass option_key — must still emit
+        # additionalArgs.
+        spec = PreRunSpec(item_name="x", mode="readns",
+                          corner_to_arg={"TT": 'readns="/a"'})
+        src = render_pre_run_script(spec)
+        self.assertIn('asiSetSimOptionVal asi "additionalArgs"', src)
+
+    def test_option_key_override_threads_into_script(self):
+        spec = PreRunSpec(item_name="x", mode="gmin_bump",
+                          corner_to_arg={"TT": "1e-10"},
+                          option_key="gmin")
+        src = render_pre_run_script(spec)
+        self.assertIn('asiSetSimOptionVal asi "gmin"', src)
+        self.assertNotIn('"additionalArgs"', src)
+
+    def test_baseline_value_none_keeps_ic_from_shape(self):
+        # Backward-compat: ic_from never set baseline_value, expects
+        # asi only resolved INSIDE (when entry ...).
+        spec = PreRunSpec(item_name="x", mode="readns",
+                          corner_to_arg={"TT": 'readns="/a"'})
+        src = render_pre_run_script(spec)
+        # The (setq asi ...) line must be NESTED under (when entry ...)
+        # — i.e. it appears AFTER the (when entry line.
+        when_entry_pos = src.find("(when entry")
+        setq_asi_pos = src.find("(setq asi")
+        self.assertGreater(when_entry_pos, 0)
+        self.assertGreater(setq_asi_pos, when_entry_pos,
+                           "asi must be resolved inside (when entry ...) "
+                           "for ic_from back-compat — A5 2026-05-18 verified")
+        # No STEP 1 baseline comment.
+        self.assertNotIn("STEP 1", src)
+
+    def test_baseline_value_set_emits_baseline_write_first(self):
+        # Phase 1 A5 bug fix: when baseline_value is set, the script must
+        # restore baseline FIRST on every firing (so previous sub-corner's
+        # override doesn't leak through the shared worker-VM asi), THEN
+        # conditionally apply the per-corner bump.
+        spec = PreRunSpec(item_name="x", mode="gmin_bump",
+                          corner_to_arg={"TT_pvt_3": "1e-10"},
+                          option_key="gmin",
+                          baseline_value="1e-12")
+        src = render_pre_run_script(spec)
+        # asi resolved UNCONDITIONALLY (outside (when entry ...))
+        when_and_pos = src.find("(when (and cornerName")
+        setq_asi_pos = src.find("(setq asi")
+        when_entry_pos = src.find("(when entry")
+        self.assertGreater(setq_asi_pos, when_and_pos)
+        self.assertLess(setq_asi_pos, when_entry_pos,
+                        "asi must resolve BEFORE (when entry ...) so "
+                        "baseline restore can fire even when entry misses")
+        # Baseline write present and occurs BEFORE the override write.
+        baseline_write = 'asiSetSimOptionVal asi "gmin" "1e-12"'
+        override_write_marker = "(cadr entry)"
+        self.assertIn(baseline_write, src)
+        self.assertLess(src.find(baseline_write),
+                        src.find(override_write_marker),
+                        "baseline restore must come first")
+        # STEP 1 / STEP 2 comments present (documents intent in generated SKILL).
+        self.assertIn("STEP 1", src)
+        self.assertIn("STEP 2", src)
+
 
 class WriteScriptTests(unittest.TestCase):
     def setUp(self):

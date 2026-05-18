@@ -282,18 +282,26 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 
 - [x] **v1.2 #3 closed: per-corner FAIL detection + strategy chain dispatch in `execute()`** — `simkit.failures.find_failed_corners` (DB read) + `naive_retry` rewritten with per-corner enable narrowing + `_run_strategy_chain` in orchestrator + `ItemResult` extended with `strategy_attempts` / `final_failed_corners` + CLI exit code 6 honours `final_failed_corners`. Sub→row mapping via longest-prefix match handles sweep rows (`TT_pvt_3` → enable row `TT_pvt`). Live-verified twice on fnxSession0: phase 1 = clean (eval_err surfaced, naive_retry correctly skipped); phase 2 = forced retry (eval_err relabelled to spec_fail) drove the full snapshot/restore/run/ingest/re-query path end-to-end. Python 963 → 996 (+33). DECISIONS #62 records D1-D4 design + the two production bugs caught (path shape + envelope shape) + alternatives rejected.
 
-### Phase 3A v1.7 candidates (no priority assigned yet — pick next session):
+### Phase 3A v1.7 — DONE 2026-05-18 EOD (DECISIONS #63)
 
-- [ ] **run.json `history_name: None` fix** — surfaced during v1.5 dogfood. `pvtCollect.il::PvtSave` doesn't write the passed `histName` into the envelope. Cosmetic but breaks `pvt list/diff` history correlation. ~1-line SKILL fix.
+- [x] **`gmin_bump` strategy implementation** — `simkit.strategies.gmin_bump.GminBump` uses the v1.3 pre-run-script mechanism to inject per-corner `asiSetSimOptionVal asi "gmin" <bump>` inside the worker VM. Default ramp `[1e-11, 1e-10, 1e-9]`, max_attempts=3. Sidecar params: `ramp`, `option_name`, `baseline_value`, `max_attempts`. Registered in `_BUILTINS`.
+- [x] **A5 live-verify caught state-leak bug** — worker-VM asi session is shared across sub-corners in the same sweep row, NOT per-sub-corner-fresh. Initial probe targeting only TT_pvt_3 with 9.99e-10 left TT_pvt_4 + TT_pvt_5 carrying the bumped value.
+- [x] **A6 fix**: `PreRunSpec.baseline_value` field — when set, renderer emits a baseline-write-first body that resolves asi unconditionally then conditionally overlays the per-corner override. ic_from's existing shape (`baseline_value=None`) unchanged.
+- [x] **A7 re-verify**: only TT_pvt_3 carries 9.99e-10; TT_pvt_4/5 back to 1e-12 on both `Test` and `Test_trans` netlists. Leak closed. Bridge clean throughout.
+- [x] Python 996 → 1028 (+32: 30 gmin_bump + 4 pre_run_script extensions). SKILL Tier-1 unchanged (pure-Python feature + safer renderer).
+
+### Phase 3A v1.8 candidates (no priority assigned yet — pick next session):
+
+- [ ] **`trans_pss_ic` strategy implementation** — same plug-in shape as gmin_bump; needs `asiChangeAnalysis` probe per DECISIONS #52 v1.1 deferred list.
+- [ ] **Auto-probe `baseline_value` from asi at strategy startup** (per DECISIONS #63 D4 deferral) — needs `pvt_runner_get_sim_option_val` bridge wrapper.
+- [ ] **run.json `history_name: None` fix** — surfaced during v1.5 dogfood. `pvtCollect.il::PvtSave` doesn't write the passed `histName` into the envelope. Cosmetic but breaks `pvt list/diff` history correlation. A5 Phase 2 evidence suggests this may already be fixed (`run.history_name` populated in the v1.6/v1.7 retry run.jsons) — verify before scheduling.
 - [ ] **v1.2 #2: `pvt corners push --replace`** — current ADD-semantics surface unexpectedly (per DECISIONS #54 #8). Either add `--replace` flag or change default. v1.1 live verify worked around by deleting the added corner directly via `axlRemoveElement`.
-- [ ] **`gmin_bump` strategy implementation** — chain dispatch is now wired (v1.6); plugging in a real intervention strategy is an isolated change. Needs `asi*` probe (`asiAddSimOption` signature + per-corner scoping + revert path) per DECISIONS #52 v1.1 deferred list.
-- [ ] **`trans_pss_ic` strategy implementation** — same shape as gmin_bump; needs `asiChangeAnalysis` probe.
 - [ ] **v1.3 known-gap #1: capture + restore prior `additionalArgs` simoption** alongside pre-run script (currently clobbered then cleared on cleanup). ~20 lines.
 - [ ] **v1.3 known-gap #2: per-test pre-run scripts** for multi-test consumer items.
 - [ ] **v1.3 known-gap #3: 3-item chain dogfood** (v1.3 → v1.3 → v1.3) to confirm `_resolve_ic_path` handles the per-corner-history case.
 - [ ] **runTests.il atomic loader fix** — pre-existing breakage; `(load runTests.il)` fails at line 168. Pin as tools-cleanup.
 - [ ] **Audit other tests for `mock.patch.dict(sys.modules, {...: None})` anti-pattern** per [[feedback-pytest-sysmodules-mock-trap]] memory.
-- [ ] **Per-attempt corner-enable tracer log** in naive_retry — would help debug "why did it retry these 3 and not the 4th?" when sub→row mapping surprises. Wait for a real user request.
+- [ ] **Per-attempt corner-enable tracer log** in naive_retry / gmin_bump — would help debug "why did it retry these 3 and not the 4th?" when sub→row mapping surprises. Wait for a real user request.
 
 ### Deferred to Phase 3A v1.3 (do NOT block v1.2):
 

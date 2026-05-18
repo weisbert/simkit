@@ -1470,3 +1470,66 @@ Both bugs were INVISIBLE to unit tests with my initial naive mock — the mock r
 - `gmin_bump` strategy implementation — needs `asi*` probe (`asiAddSimOption`) per DECISIONS #52 v1.1 deferred list. With the chain in place, dropping in a new strategy class is now a fully isolated change.
 - Per-attempt corner-enable LOGGING — naive_retry currently just runs; a tracer would help debug "why did it retry these 3 and not the 4th?" — wait until a user actually asks.
 - Test fixture audit for `mock.patch.dict(sys.modules, {...: None})` per [[feedback-pytest-sysmodules-mock-trap]] — not v1.6-blocking; still on v1.6 candidate list.
+
+---
+
+## #63 — Phase 3A v1.7: `gmin_bump` strategy + worker-VM asi state-leak fix
+_Date: 2026-05-18_
+
+**Decision:** Implement `gmin_bump` as the first real intervention strategy on top of the v1.6 chain framework. Two pieces:
+
+1. **`simkit.strategies.gmin_bump.GminBump`** — uses the v1.3 pre-run-script mechanism (DECISIONS #57) to inject a per-corner `asiSetSimOptionVal asi "gmin" <bump>` write inside the worker VM, so the loosened floor lands in that corner's netlist only and the user's main-session GUI Spectre Options stays untouched. Each `apply()` call walks one step of a configurable `ramp` (default `[1e-11, 1e-10, 1e-9]` — 10× / 100× / 1000× looser than the Spectre `1e-12` baseline measured on fnxSession0). `max_attempts=3` default. Sidecar params: `ramp`, `option_name` (default `"gmin"`, override for UltraSim / AFS), `baseline_value` (default `"1e-12"`).
+
+2. **`PreRunSpec.baseline_value` field + safe-write script shape** — A5 Phase 1 live-verify caught a state leak: when only some sub-corners are mapped (`gmin_bump` targets just the FAIL set, unlike `ic_from` which maps every sub-corner), the worker VM's asi session is **shared across all sub-corners in a sweep row**, so once `asiSetSimOptionVal asi "gmin" "1e-10"` fires for TT_pvt_3, every subsequent sub-corner in the same row inherits that value because the script's `(when entry ...)` guard skips the write. Fix: when `baseline_value` is set, the renderer emits a different body that resolves `asi` UNCONDITIONALLY and writes `baseline_value` FIRST on every firing, THEN conditionally overlays the per-corner override. ic_from's existing shape (`baseline_value=None`, the default) is unchanged — its map covers every sub-corner so the leak path is unreachable.
+
+**Why:** The v1.6 chain dispatch is only as useful as the strategies plugged into it; naive_retry alone never recovers a real convergence failure. `gmin_bump` is the smallest concrete win and validates that the chain architecture absorbs new strategies cleanly. The state-leak fix is correctness-load-bearing: without it, a partial-row FAIL set (the common case — usually 1-2 of 6 sub-corners fail) would silently overwrite the PASS corners' results with reruns under bumped gmin. Caught by the verification gate, NOT by unit tests (mock bridge can't reproduce the worker-VM asi reuse pattern).
+
+**Design decisions (sub-points):**
+
+- **D1: Mechanism = pre-run script, not global session mutation.** The alternative — `asiSetSimOptionVal` on the main session asi, run, restore on the main asi — would briefly mutate the user's GUI-visible Spectre Options form during the run. The pre-run path leaves all GUI state untouched; only the per-(test, corner) netlist gets the bumped value.
+
+- **D2: Ramp values stringified via `g` format.** `f"{1e-10:g}"` → `"1e-10"`, not `"1.0e-10"`. Matches the literal form Maestro and Spectre accept; round-trips byte-identical against `asiGetSimOptionVal`. String values pass through verbatim so user can write `"100p"` if preferred.
+
+- **D3: `max_attempts > len(ramp)` reuses the last ramp value.** No wrap-around, no error. If user writes `max_attempts=5` with a 3-element ramp, attempts 4 and 5 each fire with `ramp[-1]`. Trades simplicity for predictability — easier to reason about than a `ValueError` mid-chain.
+
+- **D4: `baseline_value` is a string field on `PreRunSpec`, not auto-probed from asi.** Two reasons. First, the v1.7 strategy doesn't have a bridge wrapper to read asi options yet, and adding one just for this would be scope creep. Second, the project Spectre baseline is uniformly `"1e-12"` in practice; the sidecar override handles the rare exception. Auto-probe can be a v1.8 follow-up if a real user hits a non-default baseline.
+
+- **D5: Strategy reads from `ctx.params`, NOT `self.params`.** In production the orchestrator copies `strat.params` → `ctx.params` (DECISIONS #62 strategy contract), so both work. But tests that construct `GminBump()` with empty params and pass values via the context exposed that the strategy was reading from the wrong place. Fixed during A4 → A5. Test discipline win: tests caught a real production correctness issue (would have hit any sidecar that wasn't pre-wired through `Strategy.__init__`).
+
+**Alternatives considered (all rejected):**
+
+- *(mechanism) Global `asiSetSimOptionVal` on main session + finally-restore*: simpler Python (no SKILL emission needed) but mutates user-visible GUI state during the run. Rejected per D1.
+
+- *(scoping) Force per-sub-corner enable so only failing sub-corners actually run, leaving PASS corners with their original results*: not an axlSKILL primitive at this layer (corner enable operates on rows, not sub-points). The baseline-restore fix solves the equivalent problem cheaper.
+
+- *(baseline) Auto-probe the asi gmin value pre-run + embed in script per-test*: needs a new SKILL helper (`pvtRunnerGetSimOptionVal`) + per-test script generation. Drops in cleanly later if heterogeneous baselines become a real ask; YAGNI for v1.7.
+
+- *(safe write) Always emit baseline-restore unconditionally (even for `ic_from`)*: would force ic_from to know its own baseline value (which is meaningless — `additionalArgs` doesn't have a "default"). The two-shape renderer (`baseline_value=None` → v1.3 entry-only; `baseline_value` set → unconditional restore + conditional bump) keeps ic_from byte-identical and adds the safe path only where needed.
+
+**Live-verified 2026-05-18 PM late on `fnxSession0`** (two A5 phases):
+
+*A5 Phase 1 (PRE-FIX) — caught the state leak:* installed a single-target probe (`{"TT_pvt_3": "9.99e-10"}`). Grep of per-corner `input.scs`: TT_pvt_0..2 = `1e-12` ✓ (baseline), TT_pvt_3 = `9.99e-10` ✓ (target), **TT_pvt_4/5 = `9.99e-10` ✗ LEAK** (carried the bump from TT_pvt_3 across the shared asi).
+
+*A5 Phase 2 (PRE-FIX) — chain dispatch PASSED:* forced-retry dogfood (custom `query_failed_cb` relabels eval_err → spec_fail). Drove primary run + 2 retries (`ramp=[1e-11, 1e-10]`) end-to-end. ItemResult shape clean (`history_names` of 3, `final_failed_corners=('TT_pvt_0..5',)`, `strategy_attempts` of 2 with correct notes); retry netlists show `gmin=1e-11` and `gmin=1e-10` respectively across all sub-corners (leak invisible because all 6 were targeted).
+
+*A7 Phase 1 v2 (POST-FIX) — leak closed:* re-ran the same single-target probe. Grep: TT_pvt_0..2 = `1e-12` ✓, TT_pvt_3 = `9.99e-10` ✓, **TT_pvt_4/5 = `1e-12` ✓ (restored)**. Both `Test` and `Test_trans` netlists agree. Corner enable byte-identical to baseline at entry; bridge clean throughout.
+
+**Two findings worth pinning (no memory needed; documented here for next session):**
+
+- Worker-VM asi session is **shared across sub-corners in the same sweep row**, NOT per-sub-corner-fresh as A1's first-pass interpretation assumed. Discovered by A5; the asymmetry is that scalar corners (TT, TT_2p5G) each get their own asi but sweep-row sub-corners (TT_pvt_0..5) all share one. Any future strategy doing partial-map option overrides must include the baseline-restore-first shape or document why it's safe.
+- `asiGetSession` on this Virtuoso build takes 1 arg (`sdb`), not 2 (`(sdb, test_name)`). A1 probed the per-test asi via `axlGetToolSession(session, test_name)` → `asiGetSession(sev)`; A7's probe agent tried the 2-arg form and got an arity error. Both findings affirm: `axlGetToolSession` is the per-test gate, `asiGetSession` is the (sev → asi) conversion.
+
+**Implementation notes:**
+
+- Renderer factored: `render_pre_run_script` calls `_render_body(spec)`; body is one of two SKILL fragments depending on `baseline_value is None`. Paren balance verified visually + by full pytest run (1022 → 1028 green, +6 for the new field tests).
+- The strategy installs the script on every test that appears in `ctx.failed_corners` (grouped by test name). Multi-test items get multiple per-test installs of the same script file.
+- `finally` block: corners restored FIRST (cheap, can't raise meaningfully), then per-test pre-run cleanup (prior script reinstated if present, otherwise disabled). Both inside try-except so a teardown failure on test A doesn't skip teardown on test B.
+- `pvt_runner_get_pre_run_script` returns the attached path even when disabled — Maestro has no enabled-flag getter. Snapshot uses the path; restore reinstates by re-installing (which is idempotent). Cosmetic implication: "disabled" pre-run scripts stay attached after teardown; user can detach via ADE-XL GUI if needed, but they're harmless because Maestro re-checks the enabled flag before each firing.
+- Test additions: `tests/test_strategies_gmin_bump.py` (30 cases — happy path + ramp + option_name + multi-test + sub→row mapping + baseline + edge cases + format helper + registration), `tests/test_pre_run_script.py` +4 cases (option_key + baseline_value, both backward-compat and new-path). Net: Python 996 → 1028 (+32).
+
+**Out of scope (queued for v1.8):**
+
+- `trans_pss_ic` strategy — same plug-in shape, needs `asiChangeAnalysis` probe per DECISIONS #52.
+- Auto-probe `baseline_value` from asi at strategy startup (D4 deferral) — needs `pvt_runner_get_sim_option_val` bridge wrapper.
+- Per-attempt corner-enable tracer log (queued in v1.6 too).
+- v1.3 known-gap #1: `additionalArgs` prior-value snapshot/restore.
