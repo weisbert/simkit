@@ -805,4 +805,69 @@
     (return (pvtOk count))))
 
 
-(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.5 F2: + pvtRunnerCountRunning)\n")
+;; ============================================================================
+;; pvtRunnerGetSimOptionVal — Phase 3A v1.9 #2 (DECISIONS #68)
+;;
+;; Read one Spectre simulator option from a specific test's asi session.
+;; Strategies use this to auto-probe baseline values (e.g. gmin) at apply()
+;; startup instead of hardcoding "1e-12" in the sidecar.
+;;
+;; Per-test asi resolution path:
+;;   axlGetToolSession(sessName, testName) -> sev (per-test sevSession handle)
+;;   asiGetSession(sev) -> asi
+;;   asiGetSimOptionVal(asi, optionKey) -> string | nil
+;;
+;; Returns:
+;;   (pvtOk <string>)               — option present, value as string
+;;   (pvtErr 'pvt_runner_no_option) — option not set on this test's asi
+;;   (pvtErr 'pvt_validation ...)   — bad arg / session not resolvable
+;;   (pvtErr 'pvt_runner_no_session)— per-test asi could not be reached
+;;
+;; Live-probed on fnxSession0 2026-05-18: asiGetSimOptionVal returns a
+;; string (e.g. "1e-12" for gmin, "+nodeset /tmp/fc" for additionalArgs,
+;; "1e-3" for reltol) when the option is set, nil when missing. Never raises.
+;; ============================================================================
+
+(procedure (pvtRunnerGetSimOptionVal sess testName optionKey)
+  (prog (sessR sessName sev asi val)
+    (setq sessR (_pvtRunnerRequireSessName sess))
+    (cond ((pvtIsErr sessR) (return sessR)))
+    (setq sessName (pvtUnwrap sessR))
+
+    (cond
+      ((or (null testName) (not (stringp testName)) (equal testName ""))
+        (return (pvtErr 'pvt_validation
+                  "pvtRunnerGetSimOptionVal: testName must be a non-empty string"))))
+    (cond
+      ((or (null optionKey) (not (stringp optionKey)) (equal optionKey ""))
+        (return (pvtErr 'pvt_validation
+                  "pvtRunnerGetSimOptionVal: optionKey must be a non-empty string"))))
+
+    (setq sev (errset (axlGetToolSession sessName testName) nil))
+    (setq sev (cond ((listp sev) (car sev)) (t nil)))
+    (cond
+      ((null sev)
+        (return (pvtErr 'pvt_runner_no_session
+                  (strcat "axlGetToolSession returned nil for test " testName)))))
+
+    (setq asi (errset (asiGetSession sev) nil))
+    (setq asi (cond ((listp asi) (car asi)) (t nil)))
+    (cond
+      ((null asi)
+        (return (pvtErr 'pvt_runner_no_session
+                  (strcat "asiGetSession returned nil for test " testName)))))
+
+    (setq val (errset (asiGetSimOptionVal asi optionKey) nil))
+    (setq val (cond ((listp val) (car val)) (t nil)))
+    (cond
+      ((null val)
+        (return (pvtErr 'pvt_runner_no_option
+                  (strcat "option " optionKey " not set on test " testName))))
+      ((not (stringp val))
+        ;; asiGetSimOptionVal may return numeric tokens for some options; coerce.
+        (setq val (sprintf nil "%L" val))))
+
+    (return (pvtOk val))))
+
+
+(printf "[simkit] pvtRunner.il loaded (Phase 3A v1.9 #2: + pvtRunnerGetSimOptionVal)\n")

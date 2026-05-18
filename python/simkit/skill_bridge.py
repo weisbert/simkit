@@ -1049,6 +1049,56 @@ def pvt_runner_restore_corners_enable(
     _unwrap(ws["pvtRunnerRestoreCornersEnable"](session, payload))
 
 
+def pvt_runner_get_sim_option_val(
+    test_name: str, option_key: str,
+    *, session: str, workspace: Any = None,
+) -> Optional[str]:
+    """Read one Spectre sim-option from a specific test's asi session.
+
+    Wraps ``pvtRunnerGetSimOptionVal`` (Phase 3A v1.9 #2, DECISIONS #68).
+    Strategies use this to auto-probe baseline values (e.g. ``gmin``)
+    at apply-start instead of hardcoding them in the sidecar.
+
+    Args:
+        test_name:  test whose asi we should resolve (per-test via
+                    ``axlGetToolSession`` + ``asiGetSession``).
+        option_key: simulator option name (e.g. ``"gmin"``,
+                    ``"additionalArgs"``, ``"reltol"``).
+        session:    Maestro session name.
+
+    Returns:
+        The option value as a string when the option is set on that
+        test's asi. Returns ``None`` when the option exists in the
+        Spectre options catalog but isn't set on this test's asi.
+
+    Raises:
+        SkillBridgeError on category ``pvt_validation`` (bad arg) or
+        ``pvt_runner_no_session`` (the per-test asi could not be
+        reached — e.g. test name doesn't exist).
+    """
+    if not isinstance(test_name, str) or not test_name:
+        raise SkillBridgeError(
+            "pvt_validation", "test_name must be a non-empty string",
+        )
+    if not isinstance(option_key, str) or not option_key:
+        raise SkillBridgeError(
+            "pvt_validation", "option_key must be a non-empty string",
+        )
+    ws = workspace if workspace is not None else _open_workspace()
+    _load_runner_skill_files(ws)
+    try:
+        raw = _unwrap(
+            ws["pvtRunnerGetSimOptionVal"](session, test_name, option_key),
+        )
+    except SkillBridgeError as exc:
+        # Option-not-set on this test's asi is a normal "no value" answer
+        # for callers like gmin_bump's auto-probe; surface as None.
+        if exc.category == "pvt_runner_no_option":
+            return None
+        raise
+    return str(raw) if raw is not None else None
+
+
 def pvt_runner_delete_history(
     history_name: str, *, session: str, workspace: Any = None,
 ) -> None:

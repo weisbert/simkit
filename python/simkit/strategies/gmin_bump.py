@@ -47,9 +47,11 @@ from simkit.strategies.naive_retry import _map_sub_to_rows, _sanitize
 
 DEFAULT_RAMP: tuple[float, ...] = (1e-11, 1e-10, 1e-9)
 DEFAULT_OPTION_NAME = "gmin"
-# Spectre's documented gmin floor default; matches the value probed live
-# on fnxSession0 2026-05-18. Override via sidecar param ``baseline_value``
-# if a project has manually loosened gmin.
+# Spectre's documented gmin floor default. Used as the ultimate fallback
+# when (a) sidecar doesn't pass ``baseline_value`` AND (b) the live
+# auto-probe via ``pvt_runner_get_sim_option_val`` can't reach the test's
+# asi (e.g. bridge not loaded, test name not in setupDB). Matches the
+# value live-probed on fnxSession0 2026-05-18.
 DEFAULT_BASELINE = "1e-12"
 
 
@@ -74,8 +76,8 @@ class GminBump(Strategy):
         ramp_idx = min(ctx.attempt_number - 1, len(ramp) - 1)
         gmin_value = _format_value(ramp[ramp_idx])
         option_name = str(ctx.params.get("option_name", DEFAULT_OPTION_NAME))
-        baseline_value = _format_value(
-            ctx.params.get("baseline_value", DEFAULT_BASELINE)
+        baseline_value, baseline_source = _resolve_baseline_value(
+            ctx, option_name,
         )
 
         snap = ctx.bridge.pvt_runner_snapshot_corners_enable(
@@ -173,7 +175,8 @@ class GminBump(Strategy):
 
         notes = (
             f"gmin_bump attempt #{ctx.attempt_number} on {sorted(kept)} "
-            f"with {option_name}={gmin_value}"
+            f"with {option_name}={gmin_value} (baseline={baseline_value} "
+            f"from {baseline_source})"
         )
         if missing:
             notes += f" (skipped — not in live table: {sorted(missing)})"
@@ -190,3 +193,42 @@ def _format_value(v) -> str:
     if isinstance(v, str):
         return v
     return f"{v:g}"
+
+
+def _resolve_baseline_value(ctx, option_name: str) -> tuple[str, str]:
+    """Resolve the baseline option value with explicit > probe > default.
+
+    Returns ``(value, source)`` where ``source`` is a short tag for the
+    apply-summary log line: ``"sidecar"`` / ``"probe"`` / ``"default"``.
+
+    Phase 3A v1.9 #2 (DECISIONS #68): when the sidecar doesn't pass
+    ``baseline_value``, this function reaches into the failing test's
+    asi via ``bridge.pvt_runner_get_sim_option_val`` to read whatever
+    value Spectre would have used (project may have manually loosened
+    gmin to 1e-11 in the Options form; we should restore THAT value
+    between per-corner overrides, not the hardcoded "1e-12"). Falls back
+    to the DEFAULT_BASELINE constant when probe is unreachable
+    (bridge wrapper missing, test name not in setupDB, etc.).
+    """
+    if "baseline_value" in ctx.params:
+        return _format_value(ctx.params["baseline_value"]), "sidecar"
+
+    probe_test = None
+    for (_c, t, _s) in ctx.failed_corners:
+        if t:
+            probe_test = t
+            break
+    if probe_test is None:
+        return DEFAULT_BASELINE, "default"
+
+    bridge = ctx.bridge
+    getter = getattr(bridge, "pvt_runner_get_sim_option_val", None)
+    if getter is None:
+        return DEFAULT_BASELINE, "default"
+    try:
+        live = getter(probe_test, option_name, session=ctx.session)
+    except Exception:
+        return DEFAULT_BASELINE, "default"
+    if live is None or live == "":
+        return DEFAULT_BASELINE, "default"
+    return _format_value(live), "probe"

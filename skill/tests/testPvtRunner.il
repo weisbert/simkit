@@ -286,6 +286,51 @@
     (let ((rv (pvtRunnerCountRunning "")))
       (pvtAssertErrCategory rv 'pvt_validation "empty-string session"))))
 
+
+;; --- v1.9 #2: pvtRunnerGetSimOptionVal (DECISIONS #68) ---------------------
+
+(pvtTestRegister "runner/getSimOption/exists"
+  (lambda ()
+    (pvtAssert (procedurep (getd 'pvtRunnerGetSimOptionVal)) t
+               "pvtRunnerGetSimOptionVal defined")))
+
+(pvtTestRegister "runner/getSimOption/nil-session-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerGetSimOptionVal nil "Test" "gmin")))
+      (pvtAssertErrCategory rv 'pvt_validation "nil session"))))
+
+(pvtTestRegister "runner/getSimOption/integer-session-rejected"
+  (lambda ()
+    ;; axlGetToolSession needs the session NAME (string) not a cached
+    ;; sdb handle — _pvtRunnerRequireSessName guard.
+    (let ((rv (pvtRunnerGetSimOptionVal 42 "Test" "gmin")))
+      (pvtAssertErrCategory rv 'pvt_validation "integer session"))))
+
+(pvtTestRegister "runner/getSimOption/empty-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerGetSimOptionVal "fakeSession" "" "gmin")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty testName"))))
+
+(pvtTestRegister "runner/getSimOption/nil-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerGetSimOptionVal "fakeSession" nil "gmin")))
+      (pvtAssertErrCategory rv 'pvt_validation "nil testName"))))
+
+(pvtTestRegister "runner/getSimOption/empty-option-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerGetSimOptionVal "fakeSession" "Test" "")))
+      (pvtAssertErrCategory rv 'pvt_validation "empty optionKey"))))
+
+(pvtTestRegister "runner/getSimOption/nil-option-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerGetSimOptionVal "fakeSession" "Test" nil)))
+      (pvtAssertErrCategory rv 'pvt_validation "nil optionKey"))))
+
+(pvtTestRegister "runner/getSimOption/non-string-test-rejected"
+  (lambda ()
+    (let ((rv (pvtRunnerGetSimOptionVal "fakeSession" 42 "gmin")))
+      (pvtAssertErrCategory rv 'pvt_validation "non-string testName"))))
+
 ;; --- _pvtRunnerIsPendingStatus: pure helper for status classification ------
 
 (pvtTestRegister "runner/isPendingStatus/done-is-terminal"

@@ -1762,3 +1762,67 @@ _Date: 2026-05-18 EOD (post v1.8 #5)_
 - Flip default from `add` to `replace` after one user-visible release.
 - `--keep <name>` partial-replace flag (wait for a real ask).
 - `axlClearCorners` if/when probe confirms it works cleanly (could simplify the SKILL but the current path is fine).
+
+
+---
+
+## #68 — Phase 3A v1.9 #2: auto-probe baseline_value via `pvtRunnerGetSimOptionVal`
+_Date: 2026-05-18 EOD (post v1.9 #1)_
+
+**Decision:** Close DECISIONS #63 D4 deferral: gmin_bump's `baseline_value` is now auto-probed from the live asi at apply-start instead of being hardcoded to `"1e-12"`. New SKILL helper `pvtRunnerGetSimOptionVal(sess, testName, optionKey)` reads any Spectre simulator option from a specific test's asi via `axlGetToolSession(sess, testName) → asiGetSession(sev) → asiGetSimOptionVal(asi, optionKey)`. Python wrapper `pvt_runner_get_sim_option_val(test_name, option_key, *, session)` returns the string value when set or `None` when absent (translated from the SKILL `pvt_runner_no_option` error category). gmin_bump's `_resolve_baseline_value(ctx, option_name)` resolution order is **explicit sidecar > live probe > `DEFAULT_BASELINE` constant**, with the source tag (`"sidecar"` / `"probe"` / `"default"`) appended to the apply-summary notes for debugability.
+
+**Why:** The `"1e-12"` default was correct for stock Spectre but silently wrong for any project that manually loosened gmin in the Options form (some analog projects run `gmin=1e-11` baseline to avoid spurious convergence wins on schematics with floating nets). Without auto-probe, gmin_bump's "STEP 1: restore baseline" safe-write would have overridden the project's intentional setting back to the stock default between per-corner overrides. Probe + fall-back makes the strategy correct-by-default without removing the explicit-override escape hatch.
+
+**Design picks (sub-points):**
+
+- **D1: Probe via the per-test asi path, NOT `asiGetCurrentSession`.** The latter depends on which test the user last clicked in Maestro — fragile under skillbridge. `axlGetToolSession(sess, testName) → asiGetSession(sev) → asiGetSimOptionVal(asi, key)` is the deterministic per-test path; matches DECISIONS #63's confirmed shape.
+
+- **D2: Pick the first failed test as the probe target.** Test-to-test variation in `gmin` baseline is theoretical (would require the user to set it per-test, which the Options form discourages); probing one is enough in practice. Could be widened to "probe every failed test and refuse if they disagree" later if a real case emerges.
+
+- **D3: `pvt_runner_no_option` SKILL error translates to Python `None`, not a raise.** The "option exists in the catalog but not set on this asi" case is **expected** for things like `additionalArgs` on freshly-created sessions — callers want a "no value" answer, not an exception. Other SKILL error categories (`pvt_validation` from bad args, `pvt_runner_no_session` from a missing test) still raise, because those genuinely indicate misuse.
+
+- **D4: Probe failure (any reason) silently falls back to `DEFAULT_BASELINE = "1e-12"`.** The strategy's job is "loosen gmin to recover convergence," not "abort if the asi probe is flaky." A bridge wedge, a probe that returns `None`, a probe that raises — all are treated equivalently: log "from default" in the notes and proceed. The "1e-12" default still works for the 99% case.
+
+- **D5: Sidecar `baseline_value` still wins over probe** when present. Project that wants to pin to a specific value can; default users get auto-probe; nobody pays correctness for ergonomics.
+
+- **D6: Source tag (`"sidecar"` / `"probe"` / `"default"`) in the apply-summary notes.** Debug-traceability: when a strategy retry happens, the log line tells you whether the baseline came from the user's config, the live session, or the hardcoded fallback. Cheap line, high diagnostic value.
+
+**Alternatives considered (all rejected):**
+
+- *(probe target) Probe every failed test, refuse if values disagree.* Hypothetical scenario (would require the user to fight against the Options form's UX). Wait for a real divergence to surface. YAGNI for v1.9.
+
+- *(scope) Auto-probe `additionalArgs` too, fold into trans_pss_ic / ic_from teardown.* Better-leveraged via the v1.3 known-gap #1 (snapshot/restore prior additionalArgs) when it lands. Bridge wrapper is already in place; the orchestrator-side use is the remaining work.
+
+- *(failure handling) Surface probe failure as a strategy error.* Rejected per D4: the strategy still has a working fall-back path; bubbling probe errors would mean a flaky bridge takes down the strategy chain unnecessarily.
+
+- *(name) `pvt_runner_read_sim_option`.* Rejected for symmetry with the existing `asiGetSimOptionVal` SKILL name — `get_sim_option_val` matches one-to-one.
+
+**Live-verified 2026-05-18 EOD on `fnxSession0`** via `/tmp/probe_baseline_autoprobe_v19_2.py`:
+
+| Step | Result |
+|---|---|
+| Direct bridge probe `(Test, gmin)` → `'1e-12'` | ✓ |
+| Direct bridge probe `(Test, reltol)` → `'1e-3'` | ✓ |
+| Probe `(Test, no_such_option_xyz)` → translated to Python `None` | ✓ |
+| Probe `(NonExistentTest, gmin)` → raises `pvt_runner_no_session` | ✓ |
+| gmin_bump.apply() with no sidecar `baseline_value` → invokes probe | ✓ |
+| Rendered script carries `asiSetSimOptionVal asi "gmin" "1e-12"` from probe | ✓ |
+| Notes show `baseline=1e-12 from probe` source tag | ✓ |
+| Corner-enable byte-identical entry → exit | ✓ |
+
+**Implementation notes:**
+
+- `skill/pvtRunner.il`: `pvtRunnerGetSimOptionVal(sess, testName, optionKey)` — ~50 LOC including doc block. Reuses `_pvtRunnerRequireSessName` guard (per-test asi resolution needs the session NAME string, not an sdb int handle). Coerces non-string sim-option values to strings via `sprintf "%L"` for defensive safety (asiGetSimOptionVal returns strings in practice for every option probed, but the SKILL contract isn't strictly typed).
+- `python/simkit/skill_bridge.py`: `pvt_runner_get_sim_option_val` wrapper, signature `(test_name, option_key, *, session, workspace=None) -> Optional[str]`. Translates `SkillBridgeError(category='pvt_runner_no_option')` → `None`. Other SKILL errors propagate.
+- `python/simkit/strategies/gmin_bump.py`: `_resolve_baseline_value(ctx, option_name) -> (value, source)` helper. Three branches per D5+D6: explicit sidecar / live probe / default fallback. `getattr(bridge, 'pvt_runner_get_sim_option_val', None)` keeps back-compat with existing mock bridges that don't expose the new method (they get the default-fallback path naturally, no test updates needed).
+- Tests: `tests/test_strategies_gmin_bump.py` +7 cases (`GminBumpAutoProbeBaselineTests`) — probe-returns-value, sidecar-wins, probe-returns-None falls back, probe-raises falls back, probe-uses-first-failed-test, probe-passes-custom-option-name, no-probe-method-on-bridge. `tests/test_skill_bridge.py` +5 cases (`TestPvtRunnerGetSimOptionVal`) — string-return, no-option-as-None, no-session-as-raise, empty-arg validation. SKILL Tier-1 +8 cases (`testPvtRunner.il::runner/getSimOption/*`) — existence, nil/integer session rejection, empty/nil/non-string testName/optionKey rejection. Python suite 1103 → 1115 (+12); SKILL Tier-1 +8 registered.
+
+**Side finding (out of scope, queued):**
+
+During the asi probe on fnxSession0, observed both `Test` and `Test_trans` carry stale `additionalArgs` values from old probes — `Test` has `"+nodeset /tmp/fc"`, `Test_trans` has `"+ic /tmp/ic"` (both old CLI syntax, pre-v1.3 era). Confirms the v1.3 known-gap #1 (additionalArgs snapshot/restore) is a real concern: any ic_from / trans_pss_ic run today would silently clobber these stale values. With `pvtRunnerGetSimOptionVal` now in place, the v1.3 gap #1 fix is a small follow-up: snapshot prior `additionalArgs` per-test in the orchestrator's pre-run install, restore in finally.
+
+**Out of scope (queued for v1.9 followups):**
+
+- v1.3 gap #1: snapshot+restore prior `additionalArgs` (now cheap — the primitive is in place).
+- Probe-target widening (probe every failed test, refuse on divergence) — wait for real case.
+- Make trans_pss_ic also auto-probe via the same primitive (sidecar `baseline_value` for ic_from would default to `""`, but if user has a non-empty stale value, restore it instead — same shape).

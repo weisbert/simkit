@@ -442,6 +442,94 @@ class GminBumpBaselineTests(unittest.TestCase):
         self.assertIn('"100f"', script)
 
 
+class GminBumpAutoProbeBaselineTests(unittest.TestCase):
+    """Phase 3A v1.9 #2 (DECISIONS #68): _resolve_baseline_value picks
+    explicit > probe > default. Verifies all three paths land in the
+    rendered script + the notes' source tag."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_gmin_probe_test_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _bridge_with_probe(self, returns=None, raises=None):
+        """Wrap _MockBridge with a pvt_runner_get_sim_option_val attr."""
+        b = _MockBridge([("TT", True)])
+        def fake(test_name, option_key, *, session):
+            b.calls.append(("get_sim_opt", session, test_name, option_key))
+            if raises is not None:
+                raise raises
+            return returns
+        b.pvt_runner_get_sim_option_val = fake
+        return b
+
+    def test_probe_value_used_when_no_sidecar_baseline(self):
+        bridge = self._bridge_with_probe(returns="5e-11")
+        res = GminBump().apply(_ctx(failed=["TT"], bridge=bridge,
+                                    params={"workdir": str(self.tmp)}))
+        self.assertEqual(res.outcome, StrategyOutcome.UNCHANGED)
+        script = _read_installed_script(bridge)
+        self.assertIn('asiSetSimOptionVal asi "gmin" "5e-11"', script)
+        self.assertIn("baseline=5e-11 from probe", res.notes)
+
+    def test_sidecar_value_wins_over_probe(self):
+        bridge = self._bridge_with_probe(returns="5e-11")
+        GminBump().apply(_ctx(
+            failed=["TT"], bridge=bridge,
+            params={"workdir": str(self.tmp), "baseline_value": "8e-12"},
+        ))
+        script = _read_installed_script(bridge)
+        self.assertIn('asiSetSimOptionVal asi "gmin" "8e-12"', script)
+        # Probe should NOT have been called when sidecar provides the value.
+        self.assertFalse(any(c[0] == "get_sim_opt" for c in bridge.calls))
+
+    def test_probe_returns_none_falls_back_to_default(self):
+        bridge = self._bridge_with_probe(returns=None)
+        res = GminBump().apply(_ctx(failed=["TT"], bridge=bridge,
+                                    params={"workdir": str(self.tmp)}))
+        script = _read_installed_script(bridge)
+        self.assertIn('asiSetSimOptionVal asi "gmin" "1e-12"', script)
+        self.assertIn("baseline=1e-12 from default", res.notes)
+
+    def test_probe_raises_falls_back_to_default(self):
+        bridge = self._bridge_with_probe(raises=RuntimeError("bridge wedge"))
+        res = GminBump().apply(_ctx(failed=["TT"], bridge=bridge,
+                                    params={"workdir": str(self.tmp)}))
+        script = _read_installed_script(bridge)
+        self.assertIn('"1e-12"', script)
+        self.assertIn("baseline=1e-12 from default", res.notes)
+
+    def test_probe_uses_first_failed_test_name(self):
+        bridge = self._bridge_with_probe(returns="1e-11")
+        GminBump().apply(_ctx(
+            failed=[("TT", "test_a"), ("SS", "test_b")], bridge=bridge,
+            params={"workdir": str(self.tmp)},
+        ))
+        probe_call = next(c for c in bridge.calls if c[0] == "get_sim_opt")
+        # (tag, session, test_name, option_key) — first-failed-test wins.
+        self.assertEqual(probe_call[2], "test_a")
+        self.assertEqual(probe_call[3], "gmin")
+
+    def test_probe_passes_custom_option_name(self):
+        bridge = self._bridge_with_probe(returns="3e-12")
+        GminBump().apply(_ctx(
+            failed=["TT"], bridge=bridge,
+            params={"workdir": str(self.tmp), "option_name": "gmindc"},
+        ))
+        probe_call = next(c for c in bridge.calls if c[0] == "get_sim_opt")
+        self.assertEqual(probe_call[3], "gmindc")
+
+    def test_no_probe_method_on_bridge_uses_default(self):
+        # _MockBridge w/o the new attr (back-compat path).
+        bridge = _MockBridge([("TT", True)])
+        res = GminBump().apply(_ctx(failed=["TT"], bridge=bridge,
+                                    params={"workdir": str(self.tmp)}))
+        script = _read_installed_script(bridge)
+        self.assertIn('"1e-12"', script)
+        self.assertIn("baseline=1e-12 from default", res.notes)
+
+
 class RegistrationTests(unittest.TestCase):
 
     def test_gmin_bump_registered_as_builtin(self):

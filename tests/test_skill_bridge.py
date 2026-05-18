@@ -24,6 +24,7 @@ from simkit.skill_bridge import (  # noqa: E402
     pvt_corners_push,
     pvt_runner_count_running,
     pvt_runner_get_history_lock_map,
+    pvt_runner_get_sim_option_val,
     pvt_runner_get_status,
     pvt_runner_run,
     pvt_runner_set_history_lock,
@@ -679,6 +680,62 @@ class TestPvtRunnerCountRunning(unittest.TestCase):
         ws.__getitem__.side_effect = table.__getitem__
         with self.assertRaises(SkillBridgeError) as cm:
             pvt_runner_count_running(session="", workspace=ws)
+        self.assertEqual(cm.exception.category, "pvt_validation")
+
+
+class TestPvtRunnerGetSimOptionVal(unittest.TestCase):
+    """Wrapper-level tests for pvt_runner_get_sim_option_val (v1.9 #2)."""
+
+    def _make_ws(self, return_value):
+        fn = MagicMock(return_value=return_value)
+        table = {
+            "load": MagicMock(),
+            "pvtRunnerGetSimOptionVal": fn,
+        }
+        ws = MagicMock()
+        ws.__getitem__.side_effect = table.__getitem__
+        return ws, fn
+
+    def test_string_value_returned_as_str(self):
+        ws, fn = self._make_ws(_ok("1e-12"))
+        got = pvt_runner_get_sim_option_val(
+            "Test", "gmin", session="s", workspace=ws,
+        )
+        self.assertEqual(got, "1e-12")
+        fn.assert_called_once_with("s", "Test", "gmin")
+
+    def test_no_option_returns_none(self):
+        # SKILL pvt_runner_no_option → wrapper translates to None.
+        ws, _ = self._make_ws(
+            _err("pvt_runner_no_option", "option no_such not set on Test"),
+        )
+        got = pvt_runner_get_sim_option_val(
+            "Test", "no_such", session="s", workspace=ws,
+        )
+        self.assertIsNone(got)
+
+    def test_no_session_raises_skillbridgeerror(self):
+        ws, _ = self._make_ws(
+            _err("pvt_runner_no_session", "axlGetToolSession nil for missing"),
+        )
+        with self.assertRaises(SkillBridgeError) as cm:
+            pvt_runner_get_sim_option_val(
+                "missing", "gmin", session="s", workspace=ws,
+            )
+        self.assertEqual(cm.exception.category, "pvt_runner_no_session")
+
+    def test_empty_test_name_raises_pvt_validation(self):
+        with self.assertRaises(SkillBridgeError) as cm:
+            pvt_runner_get_sim_option_val(
+                "", "gmin", session="s", workspace=MagicMock(),
+            )
+        self.assertEqual(cm.exception.category, "pvt_validation")
+
+    def test_empty_option_key_raises_pvt_validation(self):
+        with self.assertRaises(SkillBridgeError) as cm:
+            pvt_runner_get_sim_option_val(
+                "Test", "", session="s", workspace=MagicMock(),
+            )
         self.assertEqual(cm.exception.category, "pvt_validation")
 
 
