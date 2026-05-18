@@ -1397,3 +1397,76 @@ _Date: 2026-05-18_
 **Out of scope (queued):**
 - run.json `history_name` field is still null in the orchestrator's PvtSave dumps — pvtCollect.il's PvtSave should write the passed `histName` into the envelope. Cosmetic but breaks `pvt list/diff` history-name correlation. 1-line SKILL fix, parked for next session.
 - `min_running_observed > 0` is plumbed but not yet driven by the orchestrator. Future use: when a real slow-queue Spectre case slips through, orchestrator passes `min_running_observed=1` in run_kwargs to demand "saw at least 1 in-flight row before believing dispatch_grace".
+
+## #62 — Phase 3A v1.6: per-corner FAIL detection + strategy chain dispatch (closes v1.2 #3)
+_Date: 2026-05-18_
+
+**Decision:** wire the existing `Strategy` / `naive_retry` plugin framework (DECISIONS #52) into `execute()`'s per-item loop so the orchestrator actually USES the strategies field that's been parsed since the §1 spec. Four pieces:
+
+1. **`simkit.failures`** — new pure-Python module. `find_failed_corners(con, run_id, *, include_eval_err=False)` aggregates `results` rows into one `FailedCorner` entry per corner with a `reasons` frozenset (`spec_fail | sim_status_fail | eval_err`). `auto_retry_corners(failed)` narrows to corners with at least one AUTO-RETRYABLE reason (excludes eval_err — see D2 below).
+2. **`naive_retry` rewritten** to snapshot live corner-enable state → narrow to FAIL set → restore (target) → `pvt_runner_run` → restore (original) in a `finally` block. Wraps the sub→row name mapping via longest-prefix match (D4 below).
+3. **`_run_strategy_chain`** in `orchestrator.py` — after primary ingest, query FAIL set; if empty (or eval_err-only), record `final_failed_corners` and skip the chain; else iterate `item.on_failure.strategies` × `strategy.max_attempts`; per-attempt: invoke `strat.apply(ctx)`, then PvtSave + ingest + re-query, narrow `remaining`, classify outcome (`recovered`/`unchanged`/`gave_up`). Chain stops when `remaining` drains or all strategies exhaust.
+4. **`ItemResult` extended** with `strategy_attempts: tuple[StrategyAttempt, ...]` (audit log) and `final_failed_corners: tuple[str, ...]` (post-chain residue). CLI `pvt run` exit code now returns 6 when `final_failed_corners` is non-empty even if `completed=True`.
+
+**Why:** v1.5 F2 (DECISIONS #61) just gave the orchestrator a reliable per-sub-point completion signal — meaning `pvt_save` no longer dumps half-finished state. That was the prerequisite for trusting any post-run FAIL query. Without v1.6, the `strategies: [naive_retry]` field declared on every dogfood review.json since v1.4 was *parsed but never read* — dead code at the consumer end. The framework + the placeholder strategy + the schema were all in place since v1; only the integration was missing.
+
+**Design decisions (sub-points):**
+
+- **D1: FAIL aggregation is per-corner, not per (corner, test, output).** A corner is the unit `snapshot/restore_corners_enable` can act on. If any test × output in a corner FAILs, the whole corner gets re-enabled for retry. Finer granularity isn't a Maestro primitive at this layer.
+
+- **D2: `eval_err` is SURFACED in `final_failed_corners` but NOT auto-retried.** eval_err means a calc-expression in the Outputs table couldn't compute against the waveform (typo in the expression, missing signal, etc.). Retrying never fixes it. `_default_query_failed` passes `include_eval_err=True` so the report shows them; `auto_retry_corners` filters them out for retry. The strategy chain only fires on `spec_fail | sim_status_fail`.
+
+- **D3: Strategy owns "what changes for the retry attempt," orchestrator owns "did it recover?"** `naive_retry` mutates the session (corner narrowing + run) but doesn't re-classify; it returns `StrategyResult(UNCHANGED, new_history_name=...)` unconditionally. The orchestrator does the PvtSave + ingest + re-query against the retry's `run_id` and decides `recovered` vs `unchanged`. Keeps the strategy interface narrow + uniform across future strategies (`gmin_bump`, `trans_pss_ic` will do the same — apply intervention, run, return).
+
+- **D4: Sub-corner → row mapping via longest-prefix match.** DB stores sub-corner names like `TT_pvt_3`; `pvt_runner_snapshot/restore_corners_enable` operates on row names like `TT_pvt`. When `TT_pvt_3` FAILs and naive_retry is invoked, we want to re-enable the row `TT_pvt`, not the literal `TT_pvt_3` (which doesn't exist in the snap). Algorithm: exact match wins; else pick the snap_name where `fail_name.startswith(snap_name + "_")` with the longest snap_name (so `TT_pvt_3` maps to `TT_pvt`, not `TT`, even when both are present). Known limitation: retry overshoots (re-runs the whole sweep row for one bad sub-point) — finer per-sub-corner enable isn't an axlSKILL primitive at the bridge level. Document; revisit when a real user complains.
+
+**Alternatives considered (all rejected):**
+
+- *(query) Two separate queries — one for retry targets, one for eval-only reporting*: cleaner separation in theory, but doubles DB round-trips and complicates the chain code with two parallel datastructures. The `auto_retry_corners` filter on a single query is one line and stays close to the data.
+- *(strategy interface) Strategy returns `RECOVERED` itself, orchestrator trusts the verdict*: violates separation of concerns. Strategy can't actually know without re-querying the DB, and a buggy strategy could lie. Orchestrator-side re-query is the only honest gate.
+- *(sub→row mapping) Pass the union into `StrategyContext` so the strategy can use the explicit row→sub-corner explode order*: needs threading the union through the chain helper. Prefix match works for the v1.6 dogfood and every project-standard naming convention (Maestro emits `<row>_<idx>` by construction).
+- *(eval_err) Treat eval_err as auto-retryable*: tempting (gmin_bump might "rescue" a flaky measurement by giving Spectre a better starting point). But for naive_retry — which doesn't change anything — retrying eval_err is pure waste. The opt-in path is open via `query_failed_cb` injection if a future strategy wants it.
+- *(corner restore safety) Skip the in-finally restore of the pre-naive_retry snap, let the orchestrator's outer snapshot/restore handle it*: would couple the strategy to the orchestrator's internal snapshot lifecycle. Strategy-local restore keeps `apply()` self-contained — `restore_test_state` in execute() still covers the outer test-enable snap.
+
+**Live-verified 2026-05-18 PM on `fnxSession0`** (2-phase verification):
+
+*Phase 1 — chain query path with no FAIL:* normal `pvt run` of the v16_dogfood review (1 item, naive_retry strategy). Result: 36 result rows = 30 ok + 6 eval_err; `final_failed_corners=('TT_pvt_0', ..., 'TT_pvt_5')` (6 eval_err names surfaced); `strategy_attempts=()` (naive_retry correctly NOT invoked because all FAILs are eval_err); CLI exit code 6 with `[FAIL (6)]` line; post-run snapshot_restored=True, corner + test enable state byte-identical to entry.
+
+*Phase 2 — full chain with a forced retry:* same review, run via Python with a custom `query_failed_cb` that relabels eval_err → spec_fail so naive_retry actually fires. End-to-end log:
+
+```
+primary history v16chain_..._1   → 6 ingest rows (eval_err on Rtime_clkout)
+chain query → 6 FAIL sub-corners ['TT_pvt_0..5']
+naive_retry attempt 1 targets sub-corners; maps to row ['TT_pvt'] via longest-prefix
+snapshot_corners_enable → [(TT, False), (TT_pvt, True), (TT_2p5G, False)]
+restore_corners_enable target → [(TT, False), (TT_pvt, True), (TT_2p5G, False)] (same — only TT_pvt was enabled to start)
+pvt_runner_run('v16_chain_demo__retry1') → Spectre re-ran 6 sub-corners
+restore_corners_enable original → identical (no net change)
+pvt_save of retry → run_id b9df339e-...; ingested
+re-query → 6 still eval_err
+outcome=unchanged; final_failed_corners=('TT_pvt_0..5')
+snapshot_restored=True
+```
+
+Every code path along the chain — sub→row map, snapshot/restore narrowing, Spectre retry dispatch, retry ingest, re-query, outcome classification, state restoration — confirmed against live bridge.
+
+**Two bugs caught + fixed during live dogfood (pin for future runtime-verify discipline):**
+
+1. **Path shape mismatch:** `bridge.pvt_save` returns the run.json **file** path (`.../run.json`), not the run **dir**. My initial `_load_run_id(run_dir)` did `run_dir / "run.json"` → `.../run.json/run.json` ENOTDIR. Fixed: helper now accepts either; mock `pvt_save` in `test_orchestrator_strategy_chain.py` updated to return file path so future tests catch this.
+2. **Envelope shape:** run.json's `run_id` lives at `data["run"]["run_id"]`, not `data["run_id"]`. The collector emits a nested `{schema_version, run: {...}, results, ...}` shape that the ingester already navigates correctly. Mock fixture updated to mirror real shape.
+
+Both bugs were INVISIBLE to unit tests with my initial naive mock — the mock returned an idealised shape. Lesson: mock fixtures should match production shapes, not the schema the test author assumed.
+
+**Implementation notes:**
+
+- `_run_strategy_chain` mutates the caller's `histories` / `run_dirs` lists in place so retry artefacts show up in `ItemResult.history_names` / `.run_dirs` alongside the primary — `pvt list` and `pvt diff` then work across the whole chain without special-casing.
+- Unknown strategy names (e.g. `gmin_bump` before it's implemented) are skipped with a note in `ItemResult.notes`; chain continues to the next strategy. Avoids hard-fail on a review.json that references a future strategy.
+- CLI `pvt run` summary now prints `[FAIL (N)]` instead of `[ok]` when `final_failed_corners` is non-empty, plus a per-attempt line: `naive_retry #1 → unchanged  targeted=TT_pvt_0,...,TT_pvt_5  remaining=TT_pvt_0,...,TT_pvt_5`.
+- Test additions: `tests/test_failures.py` (13 cases), `tests/test_strategies_naive_retry.py` (11 cases — 7 base + 4 sub-corner mapping), `tests/test_orchestrator_strategy_chain.py` (8 chain-integration cases), `tests/test_cli_run.py` +1 exit-6-with-fail-corners case. Net: Python 963 → 996 (+33).
+
+**Out of scope (queued for v1.6.1 / v1.7):**
+
+- v1.3 known-gap #1: capture + restore prior `additionalArgs` simoption around pre-run script — independent of chain dispatch, still applies.
+- `gmin_bump` strategy implementation — needs `asi*` probe (`asiAddSimOption`) per DECISIONS #52 v1.1 deferred list. With the chain in place, dropping in a new strategy class is now a fully isolated change.
+- Per-attempt corner-enable LOGGING — naive_retry currently just runs; a tracer would help debug "why did it retry these 3 and not the 4th?" — wait until a user actually asks.
+- Test fixture audit for `mock.patch.dict(sys.modules, {...: None})` per [[feedback-pytest-sysmodules-mock-trap]] — not v1.6-blocking; still on v1.6 candidate list.

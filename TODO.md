@@ -278,16 +278,22 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 - [x] **v1.5 F1: validator allows `pending` status.** SKILL collector legitimately emits `pending` for sub-corners that haven't started yet (PvtSave fired before axlRunAllTests queued them). I12 + I1 sentinel-status whitelists both extended. Caught + fixed during 1st real `pvt run` dogfood when both run.jsons were rejected on ingest.
 - [x] **v1.5 F2: `pvtRunnerCountRunning` rdb-walker discriminator (closes v1.2 #1).** SKILL helper walks current-history rdb counting non-terminal `tst->status` rows; Python state machine AND-s it with `axlGetRunStatus` for the idle-confirm gate. New opt-in `min_running_observed` kwarg. Live-verified twice on fnxSession0: 0 pending/running rows in either dump (vs pre-F2: 6 pending sentinels in item 1). DECISIONS #61.
 
-### Phase 3A v1.6 candidates (no priority assigned yet — pick next session):
+### Phase 3A v1.6 — DONE 2026-05-18 PM (DECISIONS #62)
+
+- [x] **v1.2 #3 closed: per-corner FAIL detection + strategy chain dispatch in `execute()`** — `simkit.failures.find_failed_corners` (DB read) + `naive_retry` rewritten with per-corner enable narrowing + `_run_strategy_chain` in orchestrator + `ItemResult` extended with `strategy_attempts` / `final_failed_corners` + CLI exit code 6 honours `final_failed_corners`. Sub→row mapping via longest-prefix match handles sweep rows (`TT_pvt_3` → enable row `TT_pvt`). Live-verified twice on fnxSession0: phase 1 = clean (eval_err surfaced, naive_retry correctly skipped); phase 2 = forced retry (eval_err relabelled to spec_fail) drove the full snapshot/restore/run/ingest/re-query path end-to-end. Python 963 → 996 (+33). DECISIONS #62 records D1-D4 design + the two production bugs caught (path shape + envelope shape) + alternatives rejected.
+
+### Phase 3A v1.7 candidates (no priority assigned yet — pick next session):
 
 - [ ] **run.json `history_name: None` fix** — surfaced during v1.5 dogfood. `pvtCollect.il::PvtSave` doesn't write the passed `histName` into the envelope. Cosmetic but breaks `pvt list/diff` history correlation. ~1-line SKILL fix.
 - [ ] **v1.2 #2: `pvt corners push --replace`** — current ADD-semantics surface unexpectedly (per DECISIONS #54 #8). Either add `--replace` flag or change default. v1.1 live verify worked around by deleting the added corner directly via `axlRemoveElement`.
-- [ ] **v1.2 #3: per-corner failure detection + strategy chain dispatch in `execute()`** — §4 `Strategy` + `naive_retry` plumbing in place; what's missing is post-PvtSave query against just-ingested DB rows to identify FAIL corners + dispatch the chain. Now unblocked by v1.5 F2's reliable completion signal.
+- [ ] **`gmin_bump` strategy implementation** — chain dispatch is now wired (v1.6); plugging in a real intervention strategy is an isolated change. Needs `asi*` probe (`asiAddSimOption` signature + per-corner scoping + revert path) per DECISIONS #52 v1.1 deferred list.
+- [ ] **`trans_pss_ic` strategy implementation** — same shape as gmin_bump; needs `asiChangeAnalysis` probe.
 - [ ] **v1.3 known-gap #1: capture + restore prior `additionalArgs` simoption** alongside pre-run script (currently clobbered then cleared on cleanup). ~20 lines.
 - [ ] **v1.3 known-gap #2: per-test pre-run scripts** for multi-test consumer items.
 - [ ] **v1.3 known-gap #3: 3-item chain dogfood** (v1.3 → v1.3 → v1.3) to confirm `_resolve_ic_path` handles the per-corner-history case.
 - [ ] **runTests.il atomic loader fix** — pre-existing breakage; `(load runTests.il)` fails at line 168. Pin as tools-cleanup.
 - [ ] **Audit other tests for `mock.patch.dict(sys.modules, {...: None})` anti-pattern** per [[feedback-pytest-sysmodules-mock-trap]] memory.
+- [ ] **Per-attempt corner-enable tracer log** in naive_retry — would help debug "why did it retry these 3 and not the 4th?" when sub→row mapping surprises. Wait for a real user request.
 
 ### Deferred to Phase 3A v1.3 (do NOT block v1.2):
 

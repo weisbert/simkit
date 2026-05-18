@@ -10,11 +10,12 @@ Live execution drives Maestro via ``simkit.skill_bridge`` and calls
 driving Maestro.
 
 Exit codes:
-    0  dry-run printed OR all items completed
+    0  dry-run printed OR all items completed AND zero FAIL corners remain
     2  schema / load error / missing --session in live mode
     3  missing union / bundle file (only when --strict-paths is set)
     4  --items: unknown item name
-    6  one or more items did not complete cleanly
+    6  one or more items did not complete cleanly OR completed with FAIL
+       corners remaining after the strategy chain exhausted
     7  bridge import / session setup failure
 """
 
@@ -252,15 +253,30 @@ def _cli_run(args: argparse.Namespace) -> int:
     print(f"DONE  {len(report.items)} item(s), "
           f"snapshot_restored={report.snapshot_restored}")
     incomplete = [ir for ir in report.items if not ir.completed]
+    failed_any = [ir for ir in report.items if ir.final_failed_corners]
     for ir in report.items:
-        status = "ok" if ir.completed else "INCOMPLETE"
+        if not ir.completed:
+            status = "INCOMPLETE"
+        elif ir.final_failed_corners:
+            status = f"FAIL ({len(ir.final_failed_corners)})"
+        else:
+            status = "ok"
         hist = ", ".join(ir.history_names) or "(no history)"
         print(f"  [{status}] {ir.item_name}  histories={hist}")
+        if ir.final_failed_corners:
+            print(f"           FAIL corners: "
+                  f"{', '.join(ir.final_failed_corners)}")
+        for att in ir.strategy_attempts:
+            print(f"           {att.strategy_name} #{att.attempt_number} "
+                  f"→ {att.outcome}  targeted="
+                  f"{','.join(att.corners_targeted) or '∅'}  "
+                  f"remaining="
+                  f"{','.join(att.corners_remaining) or '∅'}")
         if ir.notes:
             for line in ir.notes.splitlines():
                 print(f"           ! {line}")
 
-    return 0 if not incomplete else 6
+    return 0 if not (incomplete or failed_any) else 6
 
 
 def _resolve_project_name(project_path: Optional[str]) -> str:

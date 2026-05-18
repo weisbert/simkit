@@ -33,6 +33,11 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from simkit.errors import SimkitError
+from simkit.failures import (
+    FailedCorner,
+    auto_retry_corners,
+    find_failed_corners,
+)
 from simkit.ic_source import IcSourceError, resolve_ic_path
 from simkit.review import (
     IcFromRef,
@@ -44,6 +49,8 @@ from simkit.review import (
     load_review,
     validate_paths_exist,
 )
+from simkit.strategies import get_builtin
+from simkit.strategies.base import StrategyContext, StrategyOutcome
 from simkit.union import Union, load_union
 
 
@@ -287,12 +294,31 @@ def synthesize_adhoc_review(
 
 
 @dataclass(frozen=True)
+class StrategyAttempt:
+    """One pass through a strategy's apply() — for the audit log.
+
+    ``corners_remaining`` is what's still FAIL after this attempt's ingest
+    + re-query; the orchestrator stops the chain when it reaches empty.
+    """
+    strategy_name: str
+    attempt_number: int
+    outcome: str                          # "recovered" | "unchanged" | "gave_up"
+    history_name: str | None
+    run_dir: Path | None
+    corners_targeted: tuple[str, ...]
+    corners_remaining: tuple[str, ...]
+    notes: str = ""
+
+
+@dataclass(frozen=True)
 class ItemResult:
     item_name: str
     history_names: tuple[str, ...]  # primary + any strategy retries
     run_dirs: tuple[Path, ...]      # PvtSave output dirs
     completed: bool                 # axlRunAllTests returned cleanly
     notes: str = ""
+    strategy_attempts: tuple[StrategyAttempt, ...] = ()
+    final_failed_corners: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -320,6 +346,46 @@ def _default_ingest(run_json_path: Path, pvtproject_path: Path) -> None:
         ingest_run_json(con, run_json_path)
     finally:
         con.close()
+
+
+def _default_query_failed(
+    pvtproject_path: Path, run_id: str,
+) -> tuple[FailedCorner, ...]:
+    """Default query_failed_cb: open the project DB read-only, query FAIL
+    corners for one run_id.
+
+    Passes ``include_eval_err=True`` so eval-only failures surface in the
+    ItemResult report; ``auto_retry_corners`` filters them out of the
+    retry chain (DECISIONS #62 D2).
+    """
+    from simkit.db import connect
+    from simkit.project import _parse_pvtproject
+
+    proj = _parse_pvtproject(Path(pvtproject_path).expanduser().resolve())
+    db_path = proj.db_root / "simkit.duckdb"
+    con = connect(db_path)
+    try:
+        return find_failed_corners(con, run_id, include_eval_err=True)
+    finally:
+        con.close()
+
+
+def _load_run_id(run_path: Path) -> str:
+    """Extract the run_id key from run.json.
+
+    Accepts either the run.json file path (what ``bridge.pvt_save`` actually
+    returns) or the enclosing run dir. Raises if the file is missing or
+    malformed (caller treats as a chain abort).
+
+    Envelope shape is ``{schema_version, run: {run_id, ...}, results, ...}``
+    — same as what :func:`simkit.ingest.ingest_run_json` reads.
+    """
+    import json
+
+    p = Path(run_path)
+    if p.is_dir():
+        p = p / "run.json"
+    return json.loads(p.read_text())["run"]["run_id"]
 
 
 def _sanitize_history(label: str) -> str:
@@ -790,6 +856,205 @@ def _execute_ic_chained_item(
     return (histories, run_dirs, completed)
 
 
+# ---------------------------------------------------------------------------
+# v1.6: per-corner FAIL detection + strategy chain dispatch (DECISIONS #62)
+
+
+def _run_strategy_chain(
+    item: ReviewItem,
+    *,
+    bridge,
+    session: str,
+    pvtproject_path: Path,
+    primary_run_dir: Path,
+    histories: list[str],
+    run_dirs: list[Path],
+    notes: list[str],
+    ingest_cb,
+    query_failed_cb,
+) -> tuple[tuple[StrategyAttempt, ...], tuple[str, ...]]:
+    """Drive ``item.on_failure.strategies`` until FAIL set drains or chain
+    exhausts. Mutates ``histories`` / ``run_dirs`` in place with each retry's
+    artefacts so the caller's ItemResult sees the full audit trail.
+
+    Returns ``(attempts, final_failed_corners)``. ``final_failed_corners``
+    is the corner names still FAIL after the last attempt — empty iff fully
+    recovered. If the initial query surfaced only eval_err corners (which
+    auto_retry_corners filters out), the chain is skipped and the eval_err
+    corner names show up in final_failed_corners untouched.
+    """
+    attempts: list[StrategyAttempt] = []
+
+    try:
+        first_run_id = _load_run_id(primary_run_dir)
+    except Exception as exc:
+        notes.append(f"strategy chain: cannot read run_id from "
+                     f"{primary_run_dir}: {exc}")
+        return tuple(attempts), ()
+
+    initial_failed = query_failed_cb(pvtproject_path, first_run_id)
+    auto_targets = set(auto_retry_corners(initial_failed))
+
+    # All FAIL corner names (including eval_err) — what we report at end.
+    all_failed_names = {f.corner for f in initial_failed}
+
+    if not auto_targets:
+        # Nothing the chain can act on (clean run, or eval_err-only). Report
+        # any eval_err corners; otherwise empty.
+        return tuple(attempts), tuple(sorted(all_failed_names))
+
+    remaining = set(auto_targets)
+
+    for strat_entry in item.on_failure.strategies:
+        if not remaining:
+            break
+        try:
+            StratCls = get_builtin(strat_entry.name)
+        except KeyError:
+            notes.append(
+                f"unknown strategy {strat_entry.name!r}; skipping"
+            )
+            continue
+        strat = StratCls(
+            max_attempts=strat_entry.max_attempts,
+            params=dict(strat_entry.params),
+        )
+
+        for attempt in range(1, strat.max_attempts + 1):
+            if not remaining:
+                break
+
+            ctx_failed = tuple(
+                (f.corner, f.sample_test, "fail")
+                for f in initial_failed
+                if f.corner in remaining
+            )
+            ctx = StrategyContext(
+                session=session,
+                item_name=item.name,
+                failed_corners=ctx_failed,
+                attempt_number=attempt,
+                bridge=bridge,
+                params=strat.params,
+            )
+
+            print(f"           strategy {strat.name!r} attempt {attempt} "
+                  f"targets {sorted(remaining)}")
+
+            try:
+                res = strat.apply(ctx)
+            except Exception as exc:
+                notes.append(
+                    f"strategy {strat.name!r} attempt {attempt} raised: {exc}"
+                )
+                attempts.append(StrategyAttempt(
+                    strategy_name=strat.name, attempt_number=attempt,
+                    outcome="gave_up", history_name=None, run_dir=None,
+                    corners_targeted=tuple(sorted(remaining)),
+                    corners_remaining=tuple(sorted(remaining)),
+                    notes=f"exception: {exc}",
+                ))
+                break  # abandon this strategy; move to next in chain
+
+            if (res.outcome == StrategyOutcome.GAVE_UP
+                    or res.new_history_name is None):
+                attempts.append(StrategyAttempt(
+                    strategy_name=strat.name, attempt_number=attempt,
+                    outcome="gave_up",
+                    history_name=res.new_history_name,
+                    run_dir=None,
+                    corners_targeted=tuple(sorted(remaining)),
+                    corners_remaining=tuple(sorted(remaining)),
+                    notes=res.notes,
+                ))
+                break  # next strategy in chain
+
+            # Strategy did run a sim — PvtSave + ingest + re-query.
+            try:
+                retry_dir = bridge.pvt_save(
+                    res.new_history_name,
+                    pvtproject_path=pvtproject_path,
+                    session=session,
+                )
+            except Exception as exc:
+                notes.append(
+                    f"PvtSave({res.new_history_name}) error: {exc}"
+                )
+                attempts.append(StrategyAttempt(
+                    strategy_name=strat.name, attempt_number=attempt,
+                    outcome="gave_up",
+                    history_name=res.new_history_name, run_dir=None,
+                    corners_targeted=tuple(sorted(remaining)),
+                    corners_remaining=tuple(sorted(remaining)),
+                    notes=f"PvtSave failed: {exc}",
+                ))
+                break
+            retry_dir_p = Path(retry_dir)
+            histories.append(res.new_history_name)
+            run_dirs.append(retry_dir_p)
+
+            try:
+                if ingest_cb is None:
+                    _default_ingest(retry_dir_p, pvtproject_path)
+                else:
+                    ingest_cb(str(retry_dir_p))
+            except Exception as exc:
+                notes.append(
+                    f"ingest({res.new_history_name}) error: {exc}"
+                )
+                attempts.append(StrategyAttempt(
+                    strategy_name=strat.name, attempt_number=attempt,
+                    outcome="gave_up",
+                    history_name=res.new_history_name,
+                    run_dir=retry_dir_p,
+                    corners_targeted=tuple(sorted(remaining)),
+                    corners_remaining=tuple(sorted(remaining)),
+                    notes=f"ingest failed: {exc}",
+                ))
+                break
+
+            try:
+                retry_run_id = _load_run_id(retry_dir_p)
+                retry_failed = query_failed_cb(pvtproject_path, retry_run_id)
+            except Exception as exc:
+                notes.append(
+                    f"re-query FAIL after {res.new_history_name}: {exc}"
+                )
+                # We can't tell what shrunk; mark as gave_up and surface
+                # the current remaining set as-is.
+                attempts.append(StrategyAttempt(
+                    strategy_name=strat.name, attempt_number=attempt,
+                    outcome="gave_up",
+                    history_name=res.new_history_name,
+                    run_dir=retry_dir_p,
+                    corners_targeted=tuple(sorted(remaining)),
+                    corners_remaining=tuple(sorted(remaining)),
+                    notes=f"re-query failed: {exc}",
+                ))
+                break
+
+            still_failing = set(auto_retry_corners(retry_failed)) & remaining
+            recovered = remaining - still_failing
+            outcome = "recovered" if recovered else "unchanged"
+            attempts.append(StrategyAttempt(
+                strategy_name=strat.name, attempt_number=attempt,
+                outcome=outcome,
+                history_name=res.new_history_name,
+                run_dir=retry_dir_p,
+                corners_targeted=tuple(sorted(remaining)),
+                corners_remaining=tuple(sorted(still_failing)),
+                notes=res.notes,
+            ))
+            print(f"           → {outcome}; remaining {sorted(still_failing)}")
+            remaining = still_failing
+
+    # Final report: corners still failing (auto-retry set) + any eval_err
+    # that was excluded from retry from the very start.
+    eval_only = all_failed_names - auto_targets
+    final = sorted(remaining | eval_only)
+    return tuple(attempts), tuple(final)
+
+
 def execute(
     plan: RunPlan,
     bridge,
@@ -801,6 +1066,7 @@ def execute(
     ingest_cb=None,
     item_done_cb=None,
     run_kwargs: Optional[dict] = None,
+    query_failed_cb=None,
 ) -> ExecuteReport:
     """Drive Maestro through the plan via ``bridge``. v1 sync-blocking path.
 
@@ -830,6 +1096,11 @@ def execute(
                 ``timeout_sec`` / ``idle_confirm_reads`` /
                 ``dispatch_grace_reads`` for unusually short or long
                 sims. None = bridge defaults.
+        query_failed_cb: Optional callable(pvtproject_path, run_id) ->
+                tuple[FailedCorner, ...] used by the v1.6 strategy chain
+                to look up FAIL corners after each ingest. Default opens
+                the project DB read-only. Tests inject a stub when
+                ingest_cb is mocked too (no real DB available).
     """
     import time
 
@@ -838,6 +1109,9 @@ def execute(
             "execute() requires pvtproject_path (needed by PvtSave even when "
             "push_union=False)"
         )
+
+    if query_failed_cb is None:
+        query_failed_cb = _default_query_failed
 
     timestamp = int(time.time())
     snap = bridge.pvt_runner_snapshot_test_state(session=session)
@@ -904,12 +1178,44 @@ def execute(
             if completed and histories:
                 history_by_item[item.name] = histories[0]
 
+            # v1.6: per-corner FAIL detection + strategy chain.
+            strategy_attempts: tuple[StrategyAttempt, ...] = ()
+            final_failed: tuple[str, ...] = ()
+            if completed and run_dirs:
+                if item.on_failure.strategies:
+                    try:
+                        strategy_attempts, final_failed = _run_strategy_chain(
+                            item,
+                            bridge=bridge,
+                            session=session,
+                            pvtproject_path=pvtproject_path,
+                            primary_run_dir=run_dirs[0],
+                            histories=histories,
+                            run_dirs=run_dirs,
+                            notes=notes,
+                            ingest_cb=ingest_cb,
+                            query_failed_cb=query_failed_cb,
+                        )
+                    except Exception as exc:
+                        notes.append(f"strategy chain error: {exc}")
+                else:
+                    # No strategies declared — still surface FAIL corners
+                    # so the report tells the user X corners went unhandled.
+                    try:
+                        rid = _load_run_id(run_dirs[0])
+                        fails = query_failed_cb(pvtproject_path, rid)
+                        final_failed = tuple(sorted({f.corner for f in fails}))
+                    except Exception as exc:
+                        notes.append(f"FAIL query error: {exc}")
+
             result = ItemResult(
                 item_name=item.name,
                 history_names=tuple(histories),
                 run_dirs=tuple(run_dirs),
                 completed=completed,
                 notes=" | ".join(notes),
+                strategy_attempts=strategy_attempts,
+                final_failed_corners=final_failed,
             )
             item_results.append(result)
             if item_done_cb:

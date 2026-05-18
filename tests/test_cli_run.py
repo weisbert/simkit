@@ -224,6 +224,44 @@ class CliRunLiveModeTests(unittest.TestCase):
         self.assertEqual(rc, 6, msg=f"err: {err.getvalue()}")
         self.assertIn("[INCOMPLETE]", buf.getvalue())
 
+    def test_live_completed_but_fail_corners_returns_6(self):
+        """v1.6: completed=True but final_failed_corners non-empty → exit 6."""
+        from simkit.orchestrator import (
+            ExecuteReport, ItemResult, StrategyAttempt,
+        )
+        report = ExecuteReport(
+            items=(ItemResult(
+                item_name="only",
+                history_names=("orch_only_1", "only__retry1"),
+                run_dirs=(Path("/tmp/a"), Path("/tmp/b")),
+                completed=True,
+                notes="",
+                strategy_attempts=(StrategyAttempt(
+                    strategy_name="naive_retry", attempt_number=1,
+                    outcome="unchanged",
+                    history_name="only__retry1",
+                    run_dir=Path("/tmp/b"),
+                    corners_targeted=("TT",),
+                    corners_remaining=("TT",),
+                ),),
+                final_failed_corners=("TT",),
+            ),),
+            snapshot_restored=True,
+        )
+        with mock.patch("simkit.cli.run.execute", return_value=report):
+            buf = io.StringIO(); err = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(err):
+                rc = main([
+                    "run", str(self.tmp / "r.review.json"),
+                    "--session", "sessX",
+                    "--project", str(self.tmp),
+                ])
+        self.assertEqual(rc, 6, msg=f"err: {err.getvalue()}")
+        out = buf.getvalue()
+        self.assertIn("[FAIL (1)] only", out)
+        self.assertIn("FAIL corners: TT", out)
+        self.assertIn("naive_retry #1", out)
+
     def test_live_no_push_union_flag(self):
         with mock.patch("simkit.cli.run.execute",
                         return_value=self._fake_report(all_ok=True)) as mexec:
