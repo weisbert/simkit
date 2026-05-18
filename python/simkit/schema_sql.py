@@ -16,14 +16,18 @@ the spec:
   captured from ``axlOutputsExportToFile``) + ``results.spec_status`` (enum
   computed at ingest time by :mod:`simkit.spec_eval`). Both nullable; old
   v1 envelopes ingest as ``spec=NULL, spec_status='no_spec'``.
+- v1.8 #4 (DECISIONS #65): added ``runs.starred`` (BOOLEAN DEFAULT FALSE) so
+  the user can mark a run as a permanent reference. The DB flag is also
+  synced to Maestro's ``axlSetHistoryLock`` via ``pvt sync-stars`` so the
+  GUI history entry is protected from deletion.
 """
 
 from __future__ import annotations
 
 
-# v1.4 bump: schema_version 1 → 2. Migration in ``simkit.db.bootstrap``
-# adds the two new columns when an existing v1 DB is opened.
-DB_SCHEMA_VERSION = 2
+# v1.8 #4 bump: schema_version 2 → 3. Migration in ``simkit.db.bootstrap``
+# adds the ``runs.starred`` column when an existing v2 DB is opened.
+DB_SCHEMA_VERSION = 3
 
 
 RUNS_DDL = """
@@ -39,7 +43,8 @@ CREATE TABLE IF NOT EXISTS runs (
   netlist_path    VARCHAR,
   history_name    VARCHAR NOT NULL,
   schema_version  INTEGER NOT NULL,
-  ingested_at     TIMESTAMPTZ NOT NULL
+  ingested_at     TIMESTAMPTZ NOT NULL,
+  starred         BOOLEAN DEFAULT FALSE
 )
 """.strip()
 
@@ -71,6 +76,15 @@ CREATE TABLE IF NOT EXISTS results (
 V2_MIGRATION_DDL = (
     "ALTER TABLE results ADD COLUMN IF NOT EXISTS spec VARCHAR",
     "ALTER TABLE results ADD COLUMN IF NOT EXISTS spec_status VARCHAR",
+)
+# v1.8 #4 — migration steps for v2 → v3. The column is nullable in the DDL
+# (DuckDB's `ALTER TABLE ADD COLUMN` does not support NOT NULL constraints
+# alongside DEFAULT — "Adding columns with constraints not yet supported"),
+# so we rely on the DEFAULT FALSE to backfill existing rows and on Python's
+# bool() to coerce any future NULL read to False. New inserts that omit the
+# column also pick up the DEFAULT.
+V3_MIGRATION_DDL = (
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS starred BOOLEAN DEFAULT FALSE",
 )
 # NOTE: spec writes ``run_id ... REFERENCES runs(run_id)`` but DuckDB
 # enforces FKs per-statement (no within-transaction relaxation), so a

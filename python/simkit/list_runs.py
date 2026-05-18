@@ -34,6 +34,9 @@ class RunRow:
     n_pass: int = 0
     n_fail: int = 0
     n_has_spec: int = 0  # pass + fail + unsupported + parse_err + no_value
+    # v1.8 #4 — user-flagged "keep this one forever" bit. Synced to
+    # Maestro's axlSetHistoryLock via `pvt sync-stars`.
+    starred: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -46,17 +49,19 @@ def list_runs(
     slice_only: bool = False,
     limit: Optional[int] = None,
     failed_only: bool = False,
+    starred_only: bool = False,
 ) -> List[RunRow]:
     """Return runs from the DB, ordered by ``timestamp DESC``.
 
     Filters:
 
-    * ``project``     — exact match on ``runs.project_id``.
-    * ``slice_only``  — only ``label IS NOT NULL`` rows.
-    * ``limit``       — top-N cutoff.
-    * ``failed_only`` — only runs whose results contain at least one
+    * ``project``      — exact match on ``runs.project_id``.
+    * ``slice_only``   — only ``label IS NOT NULL`` rows.
+    * ``limit``        — top-N cutoff.
+    * ``failed_only``  — only runs whose results contain at least one
       ``spec_status='fail'`` row. Useful for the v1.4 "which corners
       failed spec?" question. Implicit no-op against v1 data.
+    * ``starred_only`` — only ``runs.starred = TRUE`` rows. v1.8 #4.
     """
     where: list[str] = []
     params: list[Any] = []
@@ -70,6 +75,8 @@ def list_runs(
             "EXISTS (SELECT 1 FROM results r "
             "WHERE r.run_id = runs.run_id AND r.spec_status = 'fail')"
         )
+    if starred_only:
+        where.append("starred = TRUE")
 
     # CAST the TIMESTAMPTZ columns to VARCHAR at the DuckDB layer so we
     # never trigger the pytz code path in the Python binding. DuckDB
@@ -86,7 +93,8 @@ def list_runs(
           CAST(runs.ingested_at AS VARCHAR),
           COALESCE(spec_agg.n_pass, 0),
           COALESCE(spec_agg.n_fail, 0),
-          COALESCE(spec_agg.n_has_spec, 0)
+          COALESCE(spec_agg.n_has_spec, 0),
+          runs.starred
         FROM runs
         LEFT JOIN (
           SELECT
@@ -127,6 +135,7 @@ def _row_to_runrow(r: tuple) -> RunRow:
         n_pass=int(r[12]),
         n_fail=int(r[13]),
         n_has_spec=int(r[14]),
+        starred=bool(r[15]),
     )
 
 

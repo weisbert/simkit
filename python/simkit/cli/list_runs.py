@@ -28,6 +28,8 @@ from simkit.project import PvtProjectError, load_pvtproject
 # Column widths for the default table view. Chosen to fit a typical
 # 100-character terminal; longer strings are truncated with an ellipsis.
 _COL_WIDTHS = {
+    # v1.8 #4 — single-glyph marker: "★" when starred, " " otherwise.
+    "★": 1,
     "run_id": 8,
     # Maestro history this run was dumped from. Truncated at 22 because real
     # orchestrator names (e.g. "v17gmin_v17_gmin_demo_1779086137_1") run 30+
@@ -78,6 +80,10 @@ def add_subparser(sub) -> None:
         ),
     )
     p.add_argument(
+        "--starred-only", dest="starred_only", action="store_true",
+        help="Show only runs marked starred via `pvt star` (v1.8 #4).",
+    )
+    p.add_argument(
         "--db", type=Path, default=None,
         help=(
             "Override DB path. Default: <dbRoot>/simkit.duckdb from the "
@@ -123,6 +129,7 @@ def run(args) -> int:
             slice_only=args.slice_only,
             limit=args.limit,
             failed_only=args.failed_only,
+            starred_only=args.starred_only,
         )
     finally:
         con.close()
@@ -138,7 +145,7 @@ def _print_table(rows: List[RunRow]) -> None:
     # v1.4 — only render the "specs" column if any run has specs. Keeps
     # the table compact for pre-v2 / spec-less data.
     show_specs = any(r.n_has_spec > 0 for r in rows)
-    headers = ["run_id", "history", "timestamp", "project", "testbench",
+    headers = ["★", "run_id", "history", "timestamp", "project", "testbench",
                "label", "note"]
     if show_specs:
         headers.append("specs")
@@ -155,13 +162,14 @@ def _print_table(rows: List[RunRow]) -> None:
 
     for r in rows:
         cells = [
+            "★" if r.starred else " ",
             r.run_id[:8],
-            _trunc(r.history_name or "", widths[1]),
-            _trunc(r.timestamp, widths[2]),
-            _trunc(r.project_id, widths[3]),
-            _trunc(r.testbench_alias or r.testbench_id, widths[4]),
-            _trunc(r.label or "", widths[5]),
-            _trunc(r.note or "", widths[6]),
+            _trunc(r.history_name or "", widths[2]),
+            _trunc(r.timestamp, widths[3]),
+            _trunc(r.project_id, widths[4]),
+            _trunc(r.testbench_alias or r.testbench_id, widths[5]),
+            _trunc(r.label or "", widths[6]),
+            _trunc(r.note or "", widths[7]),
         ]
         if show_specs:
             cells.append(_format_specs(r))

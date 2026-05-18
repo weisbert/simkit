@@ -23,8 +23,10 @@ from simkit.skill_bridge import (  # noqa: E402
     pvt_corners_pull,
     pvt_corners_push,
     pvt_runner_count_running,
+    pvt_runner_get_history_lock_map,
     pvt_runner_get_status,
     pvt_runner_run,
+    pvt_runner_set_history_lock,
     pvt_save,
     resolve_pvtproject_path,
 )
@@ -741,6 +743,92 @@ class TestRestoreCwdOnException(unittest.TestCase):
         # Even on error: enter + restore = 2 calls, last one is sentinel.
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[-1].args[0], _SENTINEL_ORIG_CWD)
+
+
+# --- v1.8 #4: history lock wrappers --------------------------------------
+
+
+def _make_lock_ws(eval_returns):
+    """Mock ws['evalstring'] with a sequence of return values."""
+    eval_fn = MagicMock(side_effect=list(eval_returns))
+    table = {"evalstring": eval_fn}
+    ws = MagicMock()
+    ws.__getitem__.side_effect = table.__getitem__
+    ws._table = table
+    return ws
+
+
+class TestPvtRunnerSetHistoryLock(unittest.TestCase):
+    def test_lock_emits_t(self):
+        ws = _make_lock_ws(["T"])
+        pvt_runner_set_history_lock(
+            "v17_demo", True, session="fnxSession0", workspace=ws,
+        )
+        call = ws._table["evalstring"].call_args
+        self.assertIn('maeSetHistoryLock "v17_demo" t', call.args[0])
+        self.assertIn('?session "fnxSession0"', call.args[0])
+
+    def test_unlock_emits_nil(self):
+        ws = _make_lock_ws(["T"])
+        pvt_runner_set_history_lock(
+            "v17_demo", False, session="fnxSession0", workspace=ws,
+        )
+        call = ws._table["evalstring"].call_args
+        self.assertIn('maeSetHistoryLock "v17_demo" nil', call.args[0])
+
+    def test_nil_response_raises(self):
+        ws = _make_lock_ws(["nil"])
+        with self.assertRaises(SkillBridgeError) as cm:
+            pvt_runner_set_history_lock(
+                "ghost", True, session="fnxSession0", workspace=ws,
+            )
+        self.assertEqual(cm.exception.category, "lock_failed")
+
+    def test_double_quote_in_name_is_escaped(self):
+        # SKILL string literal needs \" — our helper must produce it.
+        ws = _make_lock_ws(["T"])
+        pvt_runner_set_history_lock(
+            'bad"name', True, session="S", workspace=ws,
+        )
+        call = ws._table["evalstring"].call_args
+        self.assertIn(r'"bad\"name"', call.args[0])
+
+    def test_newline_in_name_rejected(self):
+        ws = _make_lock_ws(["T"])
+        with self.assertRaises(SkillBridgeError) as cm:
+            pvt_runner_set_history_lock(
+                "bad\nname", True, session="S", workspace=ws,
+            )
+        self.assertEqual(cm.exception.category, "bad_history_name")
+
+
+class TestPvtRunnerGetHistoryLockMap(unittest.TestCase):
+    def test_parses_tab_separated_lines(self):
+        # First evalstring resolves hsdb, second walks histories.
+        ws = _make_lock_ws([
+            "1001",
+            "simkit_verify\tT\nv17_gmin_demo__gmin2\tnil\n",
+        ])
+        out = pvt_runner_get_history_lock_map(
+            session="fnxSession0", workspace=ws,
+        )
+        self.assertEqual(
+            out, {"simkit_verify": True, "v17_gmin_demo__gmin2": False},
+        )
+
+    def test_empty_session_returns_empty_dict(self):
+        ws = _make_lock_ws(["1001", ""])
+        out = pvt_runner_get_history_lock_map(
+            session="fnxSession0", workspace=ws,
+        )
+        self.assertEqual(out, {})
+
+    def test_trailing_blank_lines_skipped(self):
+        ws = _make_lock_ws(["1001", "only_one\tT\n\n\n"])
+        out = pvt_runner_get_history_lock_map(
+            session="s", workspace=ws,
+        )
+        self.assertEqual(out, {"only_one": True})
 
 
 if __name__ == "__main__":

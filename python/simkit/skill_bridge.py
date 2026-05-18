@@ -1052,6 +1052,97 @@ def pvt_runner_delete_history(
     _unwrap(ws["pvtRunnerDeleteHistory"](session, history_name))
 
 
+# v1.8 #4 — history-lock surface (DECISIONS #65).
+#
+# Two bound APIs are available (verified live 2026-05-18):
+# - `axlSetHistoryLock(historyHandle, t|nil)` — handle-based; needs
+#   `axlGetHistoryEntry(hsdb, name)` to resolve a string to a handle.
+# - `maeSetHistoryLock(name, t|nil, ?session sess)` — name-based, much
+#   simpler from Python. NO `maeGetHistoryLock` exists; reads must go
+#   through the axl* path.
+#
+# We use mae* for the setter (less ceremony) and axl* for the reader.
+
+
+def pvt_runner_set_history_lock(
+    history_name: str, lock: bool, *,
+    session: str, workspace: Any = None,
+) -> None:
+    """Lock or unlock a Maestro history entry.
+
+    A locked entry cannot be deleted by Maestro (GUI or API) and survives
+    routine cleanup. simkit uses this to sync the user's ``runs.starred``
+    flag to the GUI so a starred run can't be accidentally wiped from
+    the session.
+
+    Raises :class:`SkillBridgeError` if the history isn't found or
+    Maestro refuses the change.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    expr = (
+        f'(if (maeSetHistoryLock "{_escape_skill_string(history_name)}" '
+        f'{"t" if lock else "nil"} '
+        f'?session "{_escape_skill_string(session)}") "T" "nil")'
+    )
+    result = ws["evalstring"](expr)
+    if result != "T":
+        raise SkillBridgeError(
+            "lock_failed",
+            f"maeSetHistoryLock({history_name!r}, "
+            f"{'t' if lock else 'nil'}) returned nil",
+        )
+
+
+def pvt_runner_get_history_lock_map(
+    *, session: str, workspace: Any = None,
+) -> dict[str, bool]:
+    """Return ``{history_name: locked_bool}`` for every entry in the session.
+
+    Walks ``axlGetHistory(hsdb)`` to enumerate names, then probes each via
+    ``axlGetHistoryEntry`` + ``axlGetHistoryLock``. Read-only; safe to call
+    at any time without side effects.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    sess_esc = _escape_skill_string(session)
+    # hsdb is the int-keyed setup-db handle for the session; cache it once.
+    hsdb = ws["evalstring"](f'(sprintf nil "%d" (axlGetMainSetupDB "{sess_esc}"))')
+    hsdb_int = int(hsdb)
+    # Pull the name list + lock state inline as a "name|T|name|nil|..."
+    # string so skillbridge's translator only has to decode a flat string.
+    expr = (
+        f'(let ((info (axlGetHistory {hsdb_int})) (out ""))'
+        f'  (foreach name (cadr info)'
+        f'    (let ((ent (axlGetHistoryEntry {hsdb_int} name)))'
+        f'      (setq out (strcat out (sprintf nil "%s\\t%s\\n"'
+        f'                                     name'
+        f'                                     (if (axlGetHistoryLock ent) "T" "nil"))))))'
+        f'  out)'
+    )
+    raw = ws["evalstring"](expr)
+    out: dict[str, bool] = {}
+    for line in (raw or "").splitlines():
+        if not line:
+            continue
+        name, _, flag = line.partition("\t")
+        out[name] = (flag == "T")
+    return out
+
+
+def _escape_skill_string(s: str) -> str:
+    """Escape a Python string for embedding inside a SKILL string literal.
+
+    Backslash + double-quote only; SKILL string literals don't need full
+    JSON escaping. Newlines / tabs are rejected outright because we don't
+    want them in history names anyway.
+    """
+    if "\n" in s or "\r" in s or "\t" in s:
+        raise SkillBridgeError(
+            "bad_history_name",
+            f"history name must not contain newline/tab: {s!r}",
+        )
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
 def pvt_save(
     history_name: str, *,
     pvtproject_path: Path,

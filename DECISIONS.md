@@ -1563,3 +1563,54 @@ Python suite 1028 → 1030 (+2). SKILL Tier-1 unchanged.
 - (D) No-op + just close the ticket. Rejected — the display gap is real even if the originally-reported bug isn't.
 
 **How to apply (for future similar investigations):** Before scheduling a "fix" for something reported as broken, dump the actual artifact (run.json text, not `dict.get()`) and check the schema expectations vs the load path. v1.5 PROJECT_STATE recorded a wrong cause; v1.7 follow-up notes already hedged "may already be fixed — verify before scheduling." Heeding that hedge saved a no-op SKILL touch.
+
+---
+
+## #65 — Phase 3A v1.8 #4: `pvt star` — sync DB starred runs to Maestro history locks
+_Date: 2026-05-18 EOD (post-#64)_
+
+**Decision:** Add a user-facing "starred run" concept that propagates to Maestro's `axlSetHistoryLock`, so a starred run's history entry cannot be deleted from the GUI. Implementation spans 4 layers (schema / bridge / CLI / list display); zero SKILL code.
+
+**Why:** Per user 2026-05-18 EOD ask: "有些重要的仿真结果用户是希望可以保留的 … 用户 star 某个仿真结果的时候，同步到maestro把对应的结果lock住". Investigation of `fnxSession0` found the user is already manually using `Tools → Lock History` on three reference fixtures (`simkit_verify`, `simkit_simerr`, `simkit_Rtime_err`); the workflow was just missing tool-side automation + a way to mark "important" in the DB.
+
+**Discovery (live skillbridge probe 2026-05-18):**
+- `axlSetHistoryLock(historyHandle, t|nil)` and `axlGetHistoryLock(historyHandle)` BOUND (adexlSKILLref.pdf p.425/433). Handle-based; needs `axlGetHistoryEntry(hsdb, name)` to resolve.
+- `maeSetHistoryLock(name, t|nil, ?session sess)` BOUND, takes name string — simpler for downstream. **No `maeGetHistoryLock` exists.**
+- `axlGetHistory(hsdb)` enumerates names: returns `(handle (n1 n2 …))`.
+- Verified round-trip: lock/unlock on expendable `v17_gmin_demo__gmin2` → bridge read-back T/nil; three pre-existing user locks unaffected.
+
+**Design picks (4-D table presented to user, all approved):**
+
+* **D1 — DB representation:** new column `runs.starred BOOLEAN DEFAULT FALSE`. Rejected: `label="★X"` (overloads scenario-tag column); separate `stars` table (over-design, no M:N relationship).
+* **D2 — Sync direction:** bidirectional via two CLI entries. `pvt star <run_id>` and `pvt unstar <run_id>` push individual changes; `pvt sync-stars push|pull` reconciles bulk. Pull is essential for first-onboarding of an existing session — the user's 3 manual locks must be pullable into DB without re-clicking.
+* **D3 — Edge behaviour:** (a) history missing in Maestro on star → warn + DB-only update (no fail); (b) starred run blocked from `pvt forget` — moot for now because `pvt forget` doesn't exist yet, hook it when it lands; (c) cross-session push — same warning path as missing-history covers it (run's history_name simply won't appear in the foreign session's `pvt_runner_get_history_lock_map`).
+* **D4 — CLI shape:** dedicated verbs `pvt star` / `pvt unstar` / `pvt sync-stars`; `pvt list` prepends a 1-char `★` column; `pvt list --starred-only` filter; `--no-push` for DB-only; `--dry-run` for sync planning.
+
+**Implementation:**
+
+1. **Schema** — `schema_sql.py`: `DB_SCHEMA_VERSION` 2 → 3; `runs.starred BOOLEAN DEFAULT FALSE` (nullable in DDL because DuckDB rejects `ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT`; `bool(r[...])` coerces NULL → False on read). `V3_MIGRATION_DDL = (ALTER TABLE runs ADD COLUMN IF NOT EXISTS starred BOOLEAN DEFAULT FALSE,)`. `db.bootstrap` chains `current < 3` block after the existing `current < 2`. Verified live: applied to p3b_dogfood DB, 18 existing rows backfilled to FALSE.
+2. **Bridge** — `skill_bridge.py`: `pvt_runner_set_history_lock(name, lock, *, session)` wraps `maeSetHistoryLock` via `evalstring` (returns "T"/"nil" as string for clean decode); raises `SkillBridgeError("lock_failed", …)` on nil. `pvt_runner_get_history_lock_map(*, session)` two-step: cache `hsdb` once via `axlGetMainSetupDB`, then `axlGetHistory + axlGetHistoryEntry + axlGetHistoryLock` inside a `(let)` that returns tab-separated `name\tT|nil\n` lines. `_escape_skill_string` guards SKILL literal injection (backslash + double-quote escaping; newlines/tabs rejected outright).
+3. **Core** — new `simkit.star`: `set_run_starred(con, run_id, starred)` returns `StarResult(action='set'|'cleared'|'noop')` idempotent; `compute_sync_plan(direction, db_rows, maestro_lock_map)` returns `SyncPlan(actions, warnings)` as pure function so dry-run is free; `apply_sync_plan` executes via injected `set_history_lock` callable so the CLI tests don't need a live bridge. `load_db_rows` groups by history_name with OR-fold of starred (multiple DB runs sharing a history → any starred forces lock).
+4. **CLI** — new `simkit.cli.star`: registers 3 subparsers via single `add_subparser(sub)`. Single-run path: DB update first, then optional push (so a Maestro failure leaves the DB intent recorded — user re-runs `sync-stars push` once Maestro reachable, exit 1). Sync path: read Maestro state → compute plan → print plan → apply unless `--dry-run`. Lazy bridge import keeps `--no-push` DB-only paths free of skillbridge dep.
+5. **List CLI** — `cli/list_runs.py`: prepend `★` column (width 1); cell renders `"★"` or `" "`; `--starred-only` flag threads to `list_runs(starred_only=True)`. JSON output already carried `starred` via `RunRow.to_dict()`.
+
+**Tests:** 17 in `test_star.py` (set_run_starred / load_db_rows / compute_sync_plan push+pull / apply_sync_plan), 8 in `test_skill_bridge.py` (lock setter + getter map, escape, newline reject), 14 in `test_cli_star.py` (star/unstar single-run + sync-stars push/pull/dry-run/warning/no-op + list column + --starred-only + JSON). Python 1030 → 1069 (+39). SKILL Tier-1 unchanged (zero SKILL code added).
+
+**Live verify on fnxSession0 (2026-05-18 EOD):**
+- `pvt star 6704c1ac` (= history `v17_gmin_demo__gmin2`) — DB starred=True; bridge read-back True; the 3 pre-existing user locks intact.
+- `pvt list --starred-only` — single row with ★ glyph.
+- `pvt unstar 6704c1ac` — DB cleared; bridge read-back False; 3 pre-existing locks STILL intact.
+- `pvt sync-stars pull --session=fnxSession0 --dry-run` correctly reports "nothing to do" because the 3 reference histories aren't in the p3b_dogfood DB (they were ingested into a Phase-1 fixture DB years earlier). When they ARE in a matching DB, pull would emit 3 db_star actions.
+
+**Alternatives rejected:**
+- Use axl* setter via handle resolution every time. Rejected because `maeSetHistoryLock` takes the name string directly, eliminating a round-trip.
+- Drop `runs.starred` and infer "starred" from Maestro's lock state at query time. Rejected because (a) the DB should be the durable source — Maestro state evaporates when the session closes; (b) you can star a run whose history was already deleted (e.g. retain the metadata even after sims are GC'd); (c) requires Maestro to be running for every `pvt list` call.
+- Per-session star scoping (`runs.starred_in.<session>`). Rejected — overcomplicates the model; testbench_id already disambiguates the workspace context.
+- Auto-star on `pvt label` (any labelled run is starred). Rejected — label = "I'm comparing this slice"; star = "preserve this forever". Orthogonal semantics; cleaner to keep them independent.
+
+**How to apply (operator notes):**
+- First onboarding of a session that already has manual locks: `pvt sync-stars pull --session=<sess>` to absorb them.
+- DB-only star (Maestro offline / one-shot QC mark): `pvt star <run_id> --no-push`. Later run `pvt sync-stars push` to reconcile.
+- Use `--dry-run` before `push` whenever a multi-history reconciliation might touch unintended entries.
+
+**Future hook:** when `pvt forget` lands, default-block deletion of starred runs (require `--force` to override). Same hook should refuse to delete a run whose history is still locked in Maestro (per-session check via the lock map).

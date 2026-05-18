@@ -22,6 +22,7 @@ from simkit.schema_sql import (
     ALL_INDEXES,
     DB_SCHEMA_VERSION,
     V2_MIGRATION_DDL,
+    V3_MIGRATION_DDL,
 )
 
 
@@ -63,6 +64,10 @@ def bootstrap(con: duckdb.DuckDBPyConnection) -> None:
       ``results.spec_status`` columns (both nullable VARCHAR). Existing
       rows get NULL spec / NULL spec_status; queries treat NULL spec as
       ``'no_spec'``. The DB_SCHEMA_VERSION row is updated to ``'2'``.
+    * v2 → v3 (DECISIONS #65): adds ``runs.starred`` (BOOLEAN NOT NULL
+      DEFAULT FALSE). Existing rows are backfilled to FALSE; the user
+      promotes a run to "starred" via ``pvt star`` and that flag is then
+      pushed to Maestro's ``axlSetHistoryLock``.
     """
     for stmt in ALL_DDL:
         con.execute(stmt)
@@ -90,9 +95,14 @@ def bootstrap(con: duckdb.DuckDBPyConnection) -> None:
             f"build supports (max {DB_SCHEMA_VERSION}). Upgrade simkit, "
             f"or open with a newer build."
         )
-    # Apply v1 → v2 migration.
+    # Apply migrations in order; each step is idempotent (uses
+    # ADD COLUMN IF NOT EXISTS) so re-running on a partially-migrated DB
+    # is safe.
     if current < 2:
         for stmt in V2_MIGRATION_DDL:
+            con.execute(stmt)
+    if current < 3:
+        for stmt in V3_MIGRATION_DDL:
             con.execute(stmt)
     con.execute(
         "UPDATE simkit_meta SET value = ? WHERE key = 'db_schema_version'",
