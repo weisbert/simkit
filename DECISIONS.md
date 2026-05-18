@@ -1692,3 +1692,73 @@ Sidecar shape (all under the strategy entry's `params:` block):
 - **Per-row coverage option** — sidecar flag to widen coverage from "failed sub-corners only" to "every sub-corner in any failed row." Wait for a real PSS case where partial coverage causes inconsistencies.
 - **Auto-discover upstream IC kind** — currently user picks `file: "ic"` vs `"fc"` vs `"dc"`; could probe the upstream history's available files and pick the best match.
 - **`pvt run --strategies preview`** — list what strategies are wired per item without dispatching anything. Useful when authoring complex on_failure chains.
+
+
+---
+
+## #67 — Phase 3A v1.9 #1: `pvt corners push --replace` mode (closes v1.2 #2)
+_Date: 2026-05-18 EOD (post v1.8 #5)_
+
+**Decision:** `pvtCornersPush` gains an opt-in `?replace nil` keyword. When `replace=t`, the SKILL enumerates live corners via `axlGetCorners(sdb)`, computes the set of names NOT in the sidecar's `rows[*].row_name`, deletes each via `axlGetCorner` → `axlRemoveElement`, then pushes the sidecar's rows. Default behavior (no `?replace`) is unchanged — v1's ADD-semantics survives any user relying on it. The Python `skill_bridge.pvt_corners_push` wrapper gets a `replace: bool = False` kwarg; the CLI gets `--replace` flag. Closes v1.2 #2 (DECISIONS #54 #8: v1.1 dogfood pushed 3 rows into a 3-row session and got 6 corners — surprising).
+
+**Why opt-in instead of flipping the default:**
+
+- Any user who currently relies on the ADD shape (e.g. scripts that incrementally push extra corners on top of a baseline) would silently break on upgrade. Opt-in is the safe transition.
+- The `--help` text explicitly recommends `--replace` for new authors and cites DECISIONS #54 #8 so the surprise has a paper trail.
+- A future v2 could flip the default once dogfood confirms `--replace` is the dominant use case; v1.9 doesn't force that hand.
+
+**Wipe-protection accident guard:** if `replace=t` and the sidecar's `_pvtCornersCollectRowNames` returns `nil` (every row missing `row_name`, OR rows[] entirely empty — caught at the earlier "missing 'rows' array" gate, but the v1.9 check is defence-in-depth for the "rows present but all malformed" case), push refuses with `pvt_validation: replace=t with 0 valid rows would wipe every corner; refusing`. Live-verified the gate fires AND the live table stays untouched.
+
+**Design picks (sub-points):**
+
+- **D1: Removal API = `axlGetCorner` + `axlRemoveElement`.** Probed via skillbridge on fnxSession0 2026-05-18: `axlRemoveCorner` / `axlClearCorners` / `axlDeleteCorner` all exist as symbols (C built-ins, `getd` returns nothing on them) but were never vetted by any dogfood; `axlRemoveElement` was the proven v1.1 workaround per DECISIONS #54 #8. No reason to introduce a less-tested dependency for the same outcome.
+
+- **D2: Diff computation lives in SKILL, not Python.** Python could pull live → diff → call SKILL to delete each name individually, but that's N+2 round-trips vs. 1. SKILL already touches the corner table for the push; folding the diff in keeps the operation atomic from the user's perspective.
+
+- **D3: dry-run + replace = dry-run wins** (no live mutation, parse-validate only). Combined-flag output marker `pushed (dry-run, replace) -> ...`. Symmetric with how dry-run already short-circuits the push pass; matches user mental model "dry-run never touches state."
+
+- **D4: Wipe-protection check runs BEFORE the dry-run short-circuit.** So `--dry-run --replace` against a 0-valid-rows sidecar still surfaces the wipe error rather than silently succeeding the validate-only pass. Lets users catch "I would wipe everything" without actually running it.
+
+- **D5: Overlapping rows (sidecar row also exists in live) — push overwrites.** `axlPutCorner sdb rowName` is "create-or-update" on this build; replace-mode happens to skip the delete for these (keep set includes them), then push updates them in place. Verified live: TT was in both baseline and extras; final shape after replace = the extras' version of TT (same row_name, possibly different vars/models).
+
+**Alternatives considered (all rejected):**
+
+- *(API) `axlClearCorners(sdb)` followed by full push.* Simpler but: (a) untested, (b) doesn't preserve overlapping-row identity (clears + recreates rather than updates), (c) more disruptive in Maestro's GUI (transient empty state visible during the cycle).
+
+- *(default flip) Make replace the default, add `--add` flag.* Cleaner semantics for new users but breaks any existing automation. Rejected — defer to v2 after dogfood.
+
+- *(scope) Add a `--keep <name>` flag for partial-replace (delete some but not all of the missing-from-sidecar rows).* Real use case isn't surfaced; YAGNI for v1.9. Sidecar can always be the source of truth — if the user wants to keep something, they list it.
+
+- *(safety) Refuse `--replace` unless `--yes` confirmation flag is also passed.* Friction without payoff — `--dry-run --replace` already gives a safe preview path, and the wipe-protection gate catches the most-dangerous "0 rows" case.
+
+**Live-verified 2026-05-18 EOD on `fnxSession0`** via `/tmp/probe_push_replace_v19.py`:
+
+| Step | Result |
+|---|---|
+| Pull baseline (TT/TT_pvt/TT_2p5G via raw `axlGetCorners`) | ✓ |
+| Push 4-row extras WITHOUT --replace → 6 rows (baseline ∪ extras) | ✓ |
+| Push 4-row extras WITH --replace → 4 rows (extras only) | ✓ |
+| `rows: []` refused at earlier gate | ✓ |
+| Rows-without-row_name + replace → refused at new wipe-protection gate | ✓ |
+| Wipe-protection refusal did NOT mutate live table | ✓ |
+| `--dry-run --replace` → 0 mutations | ✓ |
+| Restore baseline via push --replace → live = 3-row baseline at exit | ✓ |
+
+**Two probe-environment discoveries (out of scope for v1.9 #1 but worth flagging):**
+
+- `load_union` rejected the live pull's output: one row had `_file_abs=""` (empty string). Could be a Maestro artifact from an earlier round-trip, or a real pull-side gap. Probe worked around it by using raw `axlGetCorners` for the names-check; full investigation deferred — only matters when the post-push pull is fed back through `load_union` (CLI doesn't do this in the normal push path).
+- pvtJson treats `"rows": []` as effectively absent (the earlier "missing 'rows' array" gate fires before our wipe-protection check sees it). Not a bug — both gates safely refuse without mutation — but means the new wipe-protection check is reached only when rows is present-but-all-malformed (every row missing row_name). Probe explicitly verified both gates.
+
+**Implementation notes:**
+
+- `skill/pvtCorners.il`: two new helpers (`_pvtCornersCollectRowNames`, `_pvtCornersRemoveByName`) + 6-arg signature on `pvtCornersPush` (adds `?replace nil`). ~50 net LOC.
+- `python/simkit/skill_bridge.py`: `pvt_corners_push` gains `replace: bool = False` kwarg; passed through as SKILL `replace=t` only when truthy (omitted otherwise so wire format stays unchanged for ADD-mode callers).
+- `python/simkit/cli/corners.py`: `--replace` flag on `pvt corners push`; output marker concatenates `dry-run, replace` when both set; help text references DECISIONS #54 #8.
+- Tests: 3 new SKILL bridge cases (`test_skill_bridge.py::TestPvtCornersPush` — replace kwarg pass-through + omit-when-false + combine-with-dry-run-and-session) + 3 CLI cases (`test_corners_cli.py::PushCliTests` — default-omits-replace + flag-passes-marks-output + dry-run+replace combo) + 6 SKILL Tier-1 cases (`testPvtCorners.il::corners/collectRowNames/*` — empty / single / preserves-order / skips-missing-row_name / skips-non-string-row_name / skips-non-table-entries). Python 1097 → 1103 (+6); SKILL Tier-1 +6 cases registered.
+
+**Out of scope (queued for v1.9 followups or v2):**
+
+- Investigate the `_file_abs=""` round-trip artifact noted above — needs reproduction in a clean session.
+- Flip default from `add` to `replace` after one user-visible release.
+- `--keep <name>` partial-replace flag (wait for a real ask).
+- `axlClearCorners` if/when probe confirms it works cleanly (could simplify the SKILL but the current path is fine).

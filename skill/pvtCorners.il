@@ -637,16 +637,62 @@
 )
 
 
-(procedure (pvtCornersPush @key (sess nil) (unionJsonPath nil) (dryRun nil))
+(procedure (_pvtCornersCollectRowNames rowsArr)
+  ;; Return a list of "row_name" strings extracted from a parsed sidecar's
+  ;; `rows` array. Skips rows missing the field (downstream push will
+  ;; surface those as pvtErr).
+  (let ((acc nil))
+    (foreach rowObj rowsArr
+      (cond
+        ((tablep rowObj)
+          (let ((n (_pvtCornersExtractJsonField rowObj "row_name")))
+            (cond
+              ((stringp n) (setq acc (cons n acc))))))))
+    (reverse acc)
+  )
+)
+
+
+(procedure (_pvtCornersRemoveByName sdb name)
+  ;; Drop one corner row by name. Returns (pvtOk t) on success, pvtErr
+  ;; otherwise. Uses axlGetCorner to fetch the handle then axlRemoveElement
+  ;; per DECISIONS #54 #8 (v1.1 dogfood workaround vetted on fnxSession0).
+  (let ((ch nil))
+    (setq ch (car (errset (axlGetCorner sdb name) nil)))
+    (cond
+      ((null ch)
+        (pvtErr 'pvt_io
+          (strcat "axlGetCorner returned nil for " name) nil))
+      (t
+        (let ((rv (errset (axlRemoveElement ch) nil)))
+          (cond
+            ((null rv)
+              (pvtErr 'pvt_io
+                (strcat "axlRemoveElement failed for " name) nil))
+            (t (pvtOk t))))))
+  )
+)
+
+
+(procedure (pvtCornersPush @key (sess nil) (unionJsonPath nil) (dryRun nil)
+                                (replace nil))
   ;; Push a `.union.json` sidecar into the live ADE-XL setup.
   ;;   - `sess`           : Maestro session id (string). nil => infer.
   ;;   - `unionJsonPath`  : path to the sidecar to load and push.
   ;;   - `dryRun`         : t means parse + validate but do not call axl*
   ;;                        write APIs. v1 only enforces parse-stage error
   ;;                        surfacing; write-stage validation lives in axl*.
+  ;;   - `replace`        : t means drop every live corner whose name is
+  ;;                        NOT in the sidecar's `rows[*].row_name` set
+  ;;                        before pushing. Default (nil) preserves the v1
+  ;;                        ADD-semantics where existing-but-unmentioned
+  ;;                        rows survive. Empty sidecar + replace = refused
+  ;;                        as pvt_validation (would wipe everything).
+  ;;                        dryRun + replace = combined (no deletes, no
+  ;;                        adds — just parse-validate).
   ;; Returns (pvtOk t_unionName) on success or pvtErr.
   (prog (sessResult resolvedSess sdb parsed rowsArr rowResult rowFailed
-         unionName)
+         unionName liveCorners liveNames keepNames toDelete delResult)
     (cond
       ((null unionJsonPath)
         (return (pvtErr 'pvt_validation
@@ -681,6 +727,16 @@
                   (strcat unionJsonPath ": 'rows' must be a JSON array")
                   unionJsonPath))))
 
+    ;; --- replace-mode accident guard (BEFORE dryRun short-circuits so
+    ;;     dry-run-replace also surfaces the empty-sidecar problem) -----
+    (setq keepNames (_pvtCornersCollectRowNames rowsArr))
+    (cond
+      ((and replace (null keepNames))
+        (return (pvtErr 'pvt_validation
+                  (strcat unionJsonPath ": replace=t with 0 valid rows would "
+                          "wipe every corner; refusing")
+                  unionJsonPath))))
+
     (cond
       (dryRun (return (pvtOk unionName))))
 
@@ -695,6 +751,31 @@
         (return (pvtErr 'pvt_validation
                   "axlGetMainSetupDB returned nil for the resolved session"
                   nil))))
+
+    ;; --- replace pass: drop live rows not in the keep set ----------------
+    (cond
+      (replace
+        (setq liveCorners (car (errset (axlGetCorners sdb) nil)))
+        (cond
+          ((null liveCorners)
+            (return (pvtErr 'pvt_io
+                      "axlGetCorners returned nil during replace" nil))))
+        ;; axlGetCorners returns (handle name-list); cadr is the names.
+        (setq liveNames (cadr liveCorners))
+        (setq toDelete nil)
+        (foreach n liveNames
+          (cond
+            ((not (member n keepNames))
+              (setq toDelete (cons n toDelete)))))
+        (setq toDelete (reverse toDelete))
+        (foreach n toDelete
+          (cond
+            ((null rowFailed)
+              (setq delResult (_pvtCornersRemoveByName sdb n))
+              (cond
+                ((pvtIsErr delResult) (setq rowFailed delResult))))))
+        (cond
+          (rowFailed (return rowFailed)))))
 
     (setq rowFailed nil)
     (foreach rowObj rowsArr

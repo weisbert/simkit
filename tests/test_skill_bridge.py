@@ -287,6 +287,56 @@ class TestPvtCornersPush(unittest.TestCase):
         self.assertEqual(ctx.exception.category, "pvt_validation")
         self.assertEqual(ctx.exception.source, "/x.json")
 
+    # --- v1.9 #1: --replace flag plumbing (DECISIONS #67) -----------------
+
+    def test_replace_true_passes_replace_kwarg(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            pvtproj = _write_pvtproject(tmp)
+            ws = _make_mock_ws(push_return=_ok("n"))
+            pvt_corners_push(
+                "/a/b.union.json",
+                pvtproject_path=pvtproj,
+                replace=True,
+                workspace=ws,
+            )
+        ws._table["pvtCornersPush"].assert_called_once_with(
+            unionJsonPath="/a/b.union.json", replace=True
+        )
+
+    def test_replace_false_omits_replace_kwarg(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            pvtproj = _write_pvtproject(tmp)
+            ws = _make_mock_ws(push_return=_ok("n"))
+            pvt_corners_push(
+                "/a/b.union.json",
+                pvtproject_path=pvtproj,
+                replace=False,
+                workspace=ws,
+            )
+        ws._table["pvtCornersPush"].assert_called_once_with(
+            unionJsonPath="/a/b.union.json"
+        )
+
+    def test_replace_combines_with_dry_run_and_session(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            pvtproj = _write_pvtproject(tmp)
+            ws = _make_mock_ws(push_return=_ok("n"))
+            pvt_corners_push(
+                "/a/b.union.json",
+                pvtproject_path=pvtproj,
+                session="fnxSession0",
+                dry_run=True,
+                replace=True,
+                workspace=ws,
+            )
+        ws._table["pvtCornersPush"].assert_called_once_with(
+            unionJsonPath="/a/b.union.json",
+            sess="fnxSession0", dryRun=True, replace=True,
+        )
+
 
 # --- result decoder -------------------------------------------------------
 

@@ -308,11 +308,19 @@ def pvt_corners_push(
     pvtproject_path: Path,
     session: Optional[str] = None,
     dry_run: bool = False,
+    replace: bool = False,
     workspace: Any = None,
 ) -> str:
     """Push ``union_json_path`` into the live ADE-XL setup.
 
     Returns the union ``name`` echoed by SKILL on success.
+
+    When ``replace=True``, every live corner whose name is NOT in the
+    sidecar's ``rows[*].row_name`` set is dropped via
+    ``axlGetCorner`` + ``axlRemoveElement`` before the sidecar's rows are
+    pushed. Empty sidecar + replace = pvt_validation error (would wipe
+    the corner table; almost certainly a typo). Default (``replace=False``)
+    preserves the v1 ADD-semantics so existing-but-unmentioned rows survive.
     """
     ws = workspace if workspace is not None else _open_workspace()
     with _prep(ws, pvtproject_path):
@@ -321,6 +329,8 @@ def pvt_corners_push(
             kwargs["sess"] = session
         if dry_run:
             kwargs["dryRun"] = True
+        if replace:
+            kwargs["replace"] = True
         return _unwrap(ws["pvtCornersPush"](**kwargs))
 
 

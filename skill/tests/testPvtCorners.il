@@ -184,3 +184,60 @@
         (let ((setForm (_pvtCornersFormatSectionValueFromJson jsonForm)))
           (pvtAssert setForm "\"tt\" \"ss\" \"ff\""
                      "sweep section: parse -> json-shape -> set is identity"))))))
+
+
+;; ---------- _pvtCornersCollectRowNames (Phase 3A v1.9 #1, DECISIONS #67) ----
+
+(pvtTestRegister "corners/collectRowNames/empty"
+  (lambda () (pvtAssert (_pvtCornersCollectRowNames nil) nil
+                        "empty rows list -> nil")))
+
+(pvtTestRegister "corners/collectRowNames/single"
+  (lambda ()
+    (let ((tab (makeTable 'r1 'unbound)))
+      (setarray tab "row_name" "TT")
+      (pvtAssert (_pvtCornersCollectRowNames (list tab))
+                 '("TT")
+                 "single-row table -> 1-elt name list"))))
+
+(pvtTestRegister "corners/collectRowNames/preserves-order"
+  (lambda ()
+    (let ((t1 (makeTable 'r1 'unbound))
+          (t2 (makeTable 'r2 'unbound))
+          (t3 (makeTable 'r3 'unbound)))
+      (setarray t1 "row_name" "TT")
+      (setarray t2 "row_name" "TT_pvt")
+      (setarray t3 "row_name" "TT_2p5G")
+      (pvtAssert (_pvtCornersCollectRowNames (list t1 t2 t3))
+                 '("TT" "TT_pvt" "TT_2p5G")
+                 "declaration order preserved"))))
+
+(pvtTestRegister "corners/collectRowNames/skips-missing-row_name"
+  (lambda ()
+    (let ((t1 (makeTable 'r1 'unbound))
+          (t2 (makeTable 'r2 'unbound))
+          (t3 (makeTable 'r3 'unbound)))
+      (setarray t1 "row_name" "good_a")
+      ;; t2 has no row_name field at all
+      (setarray t3 "row_name" "good_b")
+      (pvtAssert (_pvtCornersCollectRowNames (list t1 t2 t3))
+                 '("good_a" "good_b")
+                 "rows missing row_name silently dropped (push will pvtErr them)"))))
+
+(pvtTestRegister "corners/collectRowNames/skips-non-string-row_name"
+  (lambda ()
+    (let ((t1 (makeTable 'r1 'unbound))
+          (t2 (makeTable 'r2 'unbound)))
+      (setarray t1 "row_name" "ok")
+      (setarray t2 "row_name" 42)
+      (pvtAssert (_pvtCornersCollectRowNames (list t1 t2))
+                 '("ok")
+                 "non-string row_name dropped"))))
+
+(pvtTestRegister "corners/collectRowNames/skips-non-table-entries"
+  (lambda ()
+    (let ((t1 (makeTable 'r1 'unbound)))
+      (setarray t1 "row_name" "TT")
+      (pvtAssert (_pvtCornersCollectRowNames (list t1 "not_a_table" 42))
+                 '("TT")
+                 "non-table list entries dropped"))))

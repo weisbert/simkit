@@ -188,6 +188,17 @@ def add_subparser(sub) -> None:
         "--dry-run", dest="dry_run", action="store_true",
         help="Validate the sidecar but do not touch the live setup.",
     )
+    p_push.add_argument(
+        "--replace", dest="replace", action="store_true",
+        help=(
+            "Drop every live corner whose name is NOT in the sidecar's "
+            "rows[].row_name set before pushing. Default behavior ADDs "
+            "the sidecar's rows to whatever is already in the live setup, "
+            "which can surprise (DECISIONS #54 #8); --replace gives an "
+            "authoritative \"this sidecar IS the corner table\" push. "
+            "Refused if the sidecar has 0 rows (would wipe everything)."
+        ),
+    )
     p_push.set_defaults(func=_run_push)
 
 
@@ -468,12 +479,18 @@ def _run_push(args) -> int:
             pvtproject_path=pvtproject_path,
             session=args.session,
             dry_run=args.dry_run,
+            replace=args.replace,
         )
     except SkillBridgeError as exc:
         print(f"pvt corners push: {exc}", file=sys.stderr)
         return 4
 
-    marker = " (dry-run)" if args.dry_run else ""
+    marker_parts = []
+    if args.dry_run:
+        marker_parts.append("dry-run")
+    if args.replace:
+        marker_parts.append("replace")
+    marker = f" ({', '.join(marker_parts)})" if marker_parts else ""
     print(f"pushed{marker} -> {union_name}")
     return 0
 

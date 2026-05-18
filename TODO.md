@@ -294,13 +294,16 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 
 - [x] **`trans_pss_ic` strategy implementation** — landed as on-failure variant of v1.3 `ic_from` (DECISIONS #57's pre-run-script mechanism reused verbatim). The deferred `asiChangeAnalysis` probe (DECISIONS #52) is now moot: `additionalArgs`-based path covers the IC injection need without any new asi* surface. `StrategyContext` extended with optional `history_by_item` + `pvtproject_path` fields; `_run_strategy_chain` plumbs them through. Safe-write shape (`baseline_value=""`) inherits v1.7 A6 fix. Live-verified on fnxSession0 (TT_pvt_3 → simkit_verify/5/Test/netlist/spectre.ic, script + restoration clean). +28 tests. DECISIONS #66 records D1-D6 design + alternatives rejected + two probe-environment learnings.
 
-### Phase 3A v1.9 candidates (no priority assigned yet — pick next session):
+### Phase 3A v1.9 — IN PROGRESS
+
+- [x] **v1.2 #2: `pvt corners push --replace`** — DONE 2026-05-18 EOD (DECISIONS #67). Opt-in flag, default kept as ADD for back-compat. SKILL `pvtCornersPush` gains `?replace nil`; enumerates live corners, drops names not in sidecar via `axlGetCorner` + `axlRemoveElement`, then pushes. Wipe-protection guard catches 0-valid-rows accident. Live-verified on fnxSession0 (7-step probe end-to-end clean: ADD ✓ / REPLACE ✓ / empty rows refusal ✓ / no-row_name refusal at new gate ✓ / dry-run+replace 0-mutation ✓ / baseline restored ✓). +6 Python tests + 6 SKILL Tier-1 cases. Python 1097 → 1103.
+
+### Phase 3A v1.9 candidates (remaining):
 
 - [ ] **Auto-probe `baseline_value` from asi at strategy startup** (per DECISIONS #63 D4 deferral) — needs `pvt_runner_get_sim_option_val` bridge wrapper.
 - [x] ~~**run.json `history_name: None` fix**~~ — **PHANTOM, closed via display fix 2026-05-18 EOD (DECISIONS #64).** SKILL write side was already correct since v1.5 PM (`d["run"]["history_name"]` populated for every run); the "None" report was a `dict.get()` misread against the top-level envelope (5 keys: schema_version/run/results/artifacts/output_specs — no top-level history_name). DB column was also already correct. Real gap was the `pvt list` table not showing a `history` column at all; added in `cli/list_runs.py`, 2 new tests. Python 1028 → 1030.
 - [x] ~~**v1.8 #4: `pvt star` — sync DB starred runs to Maestro history locks (DECISIONS #65)**~~ — DONE 2026-05-18 EOD. Schema v2→v3 adds `runs.starred BOOLEAN DEFAULT FALSE`. New verbs: `pvt star <run_id>` / `pvt unstar <run_id>` / `pvt sync-stars push|pull [--dry-run]`. `pvt list` gets a `★` column and `--starred-only` filter. Bridge wrappers `pvt_runner_set_history_lock` (mae*) + `pvt_runner_get_history_lock_map` (axl*). Live-verified end-to-end on `fnxSession0`: star → bridge read-back lock=T → unstar → bridge read-back lock=nil; 3 pre-existing user locks (simkit_verify / simkit_simerr / simkit_Rtime_err) untouched throughout. Python 1030 → 1069 (+39). SKILL Tier-1 unchanged. Future hook for the day `pvt forget` lands: default-block deletion of starred runs.
 
-- [ ] **v1.2 #2: `pvt corners push --replace`** — current ADD-semantics surface unexpectedly (per DECISIONS #54 #8). Either add `--replace` flag or change default. v1.1 live verify worked around by deleting the added corner directly via `axlRemoveElement`.
 - [ ] **v1.3 known-gap #1: capture + restore prior `additionalArgs` simoption** alongside pre-run script (currently clobbered then cleared on cleanup). ~20 lines.
 - [ ] **v1.3 known-gap #2: per-test pre-run scripts** for multi-test consumer items.
 - [ ] **v1.3 known-gap #3: 3-item chain dogfood** (v1.3 → v1.3 → v1.3) to confirm `_resolve_ic_path` handles the per-corner-history case.

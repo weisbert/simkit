@@ -377,6 +377,45 @@ class PushCliTests(unittest.TestCase):
             )
         self.assertEqual(push.call_args.kwargs["session"], "fnxSession0")
 
+    # --- v1.9 #1: --replace flag (DECISIONS #67) --------------------------
+
+    def test_push_default_does_not_send_replace(self):
+        with patch(
+            "simkit.skill_bridge.pvt_corners_push", return_value="u"
+        ) as push:
+            _run(
+                "corners", "push", str(self.union_file),
+                "--project", str(self.pvtproject),
+            )
+        self.assertFalse(push.call_args.kwargs["replace"])
+
+    def test_push_replace_flag_passes_and_marks_output(self):
+        with patch(
+            "simkit.skill_bridge.pvt_corners_push", return_value="u"
+        ) as push:
+            rc, out, err = _run(
+                "corners", "push", str(self.union_file),
+                "--project", str(self.pvtproject),
+                "--replace",
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertTrue(push.call_args.kwargs["replace"])
+        self.assertIn("pushed (replace) -> u", out)
+
+    def test_push_dry_run_plus_replace_marks_both(self):
+        with patch(
+            "simkit.skill_bridge.pvt_corners_push", return_value="u"
+        ) as push:
+            rc, out, err = _run(
+                "corners", "push", str(self.union_file),
+                "--project", str(self.pvtproject),
+                "--dry-run", "--replace",
+            )
+        self.assertEqual(rc, 0, f"err={err}")
+        self.assertTrue(push.call_args.kwargs["dry_run"])
+        self.assertTrue(push.call_args.kwargs["replace"])
+        self.assertIn("pushed (dry-run, replace) -> u", out)
+
 
 # --- build CLI tests -----------------------------------------------------
 
