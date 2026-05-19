@@ -220,6 +220,16 @@ class CornersEditor(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.horizontalHeader().setStretchLastSection(True)
+        # Explicit row height — Qt's auto-section-size can resolve to 0 px on
+        # some plugin/platform combos (observed on the 1AXX dogfood host:
+        # log says "pulled 3 rows" but the table is visually empty because
+        # every row got 0 pixels). Fixed-size sections + ResizeToContents
+        # gives Qt the strongest hint that rows must have non-zero height.
+        from PyQt5.QtWidgets import QHeaderView
+        vh = self.table.verticalHeader()
+        vh.setDefaultSectionSize(24)
+        vh.setMinimumSectionSize(20)
+        vh.setSectionResizeMode(QHeaderView.Fixed)
 
         # Per-cell dropdowns for the known-value columns (spec §11.1).
         self._process_delegate = _ComboBoxDelegate(
@@ -297,6 +307,14 @@ class CornersEditor(QWidget):
                 self._append_row_from_dict(row)
         finally:
             self._model.blockSignals(False)
+        # blockSignals suppressed every rowsInserted notification — the
+        # QTableView attached to this model never learned about the new rows,
+        # so its row heights stayed at zero and the table rendered visually
+        # empty (1AXX dogfood: "pulled 3 rows" log but blank Corners tab).
+        # layoutChanged is the standard Qt way to say "the whole shape just
+        # changed, reset everything" without re-emitting one-rowsInserted
+        # per row.
+        self._model.layoutChanged.emit()
         # One refresh after the bulk load so validation reflects the
         # final contents, not each intermediate insert.
         self._refresh_push_enabled()
