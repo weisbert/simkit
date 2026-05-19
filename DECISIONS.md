@@ -2434,3 +2434,124 @@ The dict-pop pattern is the same one ErrorTranslator uses internally (`on_op_fai
 2. **§12 dogfood acceptance gate** — user completes one real signoff cycle (NDIV PDR or CDR pass) entirely inside the GUI on red zone. Until this clears, Tier-2 work (cross-module dashboard, charts, etc.) is locked.
 3. **§16 top-bar status strip** — 30s DuckDB query for cross-module 24h summary. Schema migration needed (`runs.failed_corners`, `runs.start_ts`, `runs.finish_ts` if not already there). Light work; can land alongside Stage 4 milestone work.
 4. **Red-zone deploy + dogfood smoke** — recommended BEFORE Stage 4 lands more code. Stage 3 hasn't been physically verified on red zone yet; the home-Linux `.venv` smoke confirms the wiring but the LD_LIBRARY_PATH + Qt-5.15.3-shadowing fixes from [[reference-cadence-qt-ldpath]] need a fresh deploy to re-verify on the actual EDA host.
+
+
+## #79 — Phase 4 §1AXX dogfood: 8-commit run of UX/schema fixes surfaced by real-Maestro use
+_Date: 2026-05-19 evening → night (same session, immediately after #78)_
+
+**Context:** Stage 3 (#78) shipped end-to-end wired GUI. User immediately switched from the synthetic `simkit_p3b_dogfood` Claude-created sandbox to a real production workarea targeting the live `sim_yusheng/Test/maestro` testbench (project name `1AXX`). The 8-commit arc captures every UX gap, schema constraint, adapter bug, and Qt-signature crash the live Maestro use surfaced inside one continuous session. Tests 1502 → 1511.
+
+### D1 — Project-name regex loosened to `[A-Za-z0-9_-]+` (lowercase-only was a Phase 1 convention with no concrete reason)
+
+**Fix sites (3):**
+- `python/simkit/project.py:_PROJECT_NAME_RE`
+- `python/simkit/validate.py:_PROJECT_ID_RE`
+- `skill/pvtProject.il:_PVT_PROJECT_NAME_RE`
+- Plus `python/simkit/review.py:_REVIEW_NAME_RE` and `python/simkit/union.py:_UNION_NAME_RE` extended similarly.
+
+**Why:** Engineers' project codenames (`1AXX`, `NDIV_pre_FDR`, etc) are mixed-case. Spaces / punctuation still rejected (filesystem-portability). Dialog's `_pvtDlgValidateProject` kept lowercase-only — it's a separate Phase 2 UX-normaliser layer; will be revisited when Stage 4 builds a GUI new-project wizard.
+
+### D2 — `_file_abs` empty in pulled unions is informational, not a load failure
+
+**Live observation:** SKILL `pvtCornersPull` returns `_file_abs=""` for multi-section model rows (`axlGetModelFile` can't disambiguate when section is an array like `["tt","ss","ff"]`). Python validator was rejecting these as "must be a non-empty string if present" — hard load blocker on every realistic corner table.
+
+**Fix (Python side only):** validator coerces empty → None; only non-string types still rejected. `_file_abs` was already documented as `_`-prefixed informational (spec §4.2, doesn't round-trip), so empty meaning "not resolved" is semantically right.
+
+**Outstanding:** SKILL root cause — `pvtCornersPull` should resolve `_file_abs` per-section, not give up on multi-section rows. Deferred to next session as queued v1AXX follow-up.
+
+### D3 — Process column maps to `model.section`, not `vars["process"]`
+
+**Live observation:** Real Maestro setups encode process variation via model.section (`tt`/`ss`/`ff`), NOT a var named `process`. Original adapter only looked for the var → process column was empty for every row → user thought load failed even though data was there.
+
+**Forward direction (pull side, `union_to_editor_rows`):** when no `process` var exists, fall back to first model's section (comma-joined for multi-section sweeps).
+
+**Reverse direction (push side, `editor_rows_to_union_rows`):** process column parses comma-separated → `ModelEntry.section` tuple. Does NOT write to vars (prior code wrote `vars["process"]` which round-tripped wrong).
+
+**Editor side:** process column delegate gains `editable=True` so user can type `tt,ss,ff` directly; dropdown still offers 5 canonical single picks.
+
+### D4 — Corner-table 0-px rows: `blockSignals` suppressed `rowsInserted`
+
+**Bug class:** Stage 2 CornersEditor.load_union wrapped bulk inserts in `blockSignals(True)` to avoid validation spam. Side effect: QTableView never got notified of new rows → `verticalHeader().sectionSize(N)` stayed at 0 px for every row → table rendered visually empty despite `model.rowCount() == 3`.
+
+**Fix:** emit `layoutChanged` after the bulk insert + unblock. layoutChanged is the Qt-idiomatic "everything reset, recompute" signal — single emit, no validation storm.
+
+**Belt-and-suspenders:** explicit `verticalHeader().setDefaultSectionSize(24)` + `setMinimumSectionSize(20)` + `setSectionResizeMode(Fixed)` so future schema changes that don't blockSignals also can't regress to invisible rows.
+
+**Class-of-bug callout:** Stage 2 tests only asserted model-level state (`rowCount`, `item().text()`). No widget test verified rendered visibility. See process-improvement discussion (PROJECT_STATE handoff).
+
+### D5 — Auto-detect Maestro session via `axlGetWindowSession`
+
+Users don't know session names (`fnxSession0` is a Cadence-internal handle). `MainWindow.set_bridge_worker` now queues an async probe; if the session input is empty when the probe returns, prefill it. Race-safe (explicit user input always wins). Silent on failure.
+
+**New bridge wrapper:** `skill_bridge.pvt_runner_get_window_session()` (no SKILL load needed — `axlGetWindowSession` is built-in).
+
+### D6 — Meaningful History node labels: `label > history_name > short_id` + relative timestamp
+
+Original tree rendering led with the 8-char run_id hash + full ISO timestamp + name at the end. 18 dogfood runs all had `label=None` and Maestro-generated `history_name` like `v17gmin_v17_gmin_demo_1779086137_1` — visually indistinguishable wall of hashes.
+
+**New rendering:** `<label-or-history_name-or-short_id>  ·  <relative_ts>` (e.g. `v17_gmin_demo__gmin2  ·  yesterday`). Star prefix kept. Full disclosure (short_id + raw timestamp + milestone) moved to the item's tooltip for power users.
+
+**Companion:** `pvt run --label "<text>"` CLI flag — applied to every ingested run row via `simkit.label.set_run_label`. GUI's "Run this review" pops a QInputDialog for the run name; sanitized form becomes `--history-prefix`, original becomes `--label`. Sanitization via `_sanitize_history_prefix` strips to `[A-Za-z0-9_]+` (Maestro history-name safety).
+
+### D7 — Right-click context menus (Stage-4-lite affordances)
+
+User feedback: "general software convention is right-click menus for delete/edit". Added 3 menus this session, on top of the Stage 2 click-only navigation:
+
+| Where | Items |
+|---|---|
+| Left tree → Reviews group | + New Review… / Refresh tree (rescan reviews/) |
+| Left tree → Review node | Run / Open .review.json (via $EDITOR) / Delete file |
+| Left tree → History row | View results / Set as Baseline for Compare / Compare-to baseline-or-pick / Copy run_id / (TODO Set milestone — Stage 4) |
+| Corners table row | Duplicate row / Delete row |
+
+Measures editor + bundle nodes' right-click queued for next session. The pattern is now established — adding more is mechanical.
+
+### D8 — MVP "New Review" via right-click input dialog (proper wizard deferred Stage 4 §14)
+
+Reviews-group right-click → "+ New Review…" pops a single-field name input, writes a minimal one-item `.review.json` (default tests=`["Test"]`, union=`union_default`), refreshes tree, opens in `$EDITOR` so user can flesh out items. Filesystem watcher (D9) catches the save and re-refreshes.
+
+### D9 — `QFileSystemWatcher` on reviews/ + unions/ + bundles/ + manual Refresh menu + visible parse-error labels
+
+User edited `.review.json` externally + tree didn't refresh. Three fixes:
+- `MainWindow._rewire_fs_watcher` watches all 3 sidecar dirs; directoryChanged triggers reload. Re-adds watch path on event (vim and editors replace-via-rename, drop the inode-bound watch).
+- Reviews-group right-click → "Refresh tree (rescan reviews/)" as manual backstop (NFS, slow filesystems).
+- `loaders.LoadedReview.parse_error` field + tree label `⚠ name (parse error)` + tooltip showing JSONDecodeError msg. Previously broken JSON silently showed as `name (0 items)` looking identical to a valid empty review. Same pattern applied to `LoadedBundle` (D10).
+
+### D10 — Pull symmetry for Measures + Bundles group in left tree
+
+**Pull side:** MeasuresEditor gained "Pull from Maestro" button + `pull_requested` signal (mirror of Corners' Pull). MainWindow handler prompts for the Maestro test name, queues `pvt_measure_pull`, converts the snapshot via new `loaders.snapshot_to_bundle_dict` (every Outputs row → `raw_expression` apply entry — template-aware reverse engineering is P3B v2 deferred), writes to `bundles/live_pulled_<ts>.measure.json`. FS watcher auto-refreshes the tree.
+
+**Bundle visibility:** New `Bundles` group between Reviews and Milestones in left tree. Populated by `loaders._scan_bundles` (mirror of `_scan_reviews`). Bundle node click → loads into Measures editor + switches focus. Tests shifted from "3 groups" to "4 groups" (6 indexing tests updated).
+
+### D11 — Closing two user-blocker crashes:
+
+(a) RunController crashed on every `[Run this review]` click with `TypeError: decorated slot has no signature compatible with errorOccurred(QProcess::ProcessError)` → Aborted (core dumped). Root cause: `@pyqtSlot(object)` on `_on_error_occurred` but `QProcess::errorOccurred` carries a `QProcess::ProcessError` enum. PyQt5 strict-validates at .connect() time and aborts on mismatch. Fix: drop decorator (PyQt5 introspects actual signature at runtime).
+
+(b) Process column was single-select (D3 — see above).
+
+### D12 — Numbers
+
+- **Python tests: 1502 → 1511 (+9 net)**: bug fixes mostly inverted/replaced existing tests (regex-uppercase-rejected → -accepted, empty_file_abs-rejected → -treated-as-unresolved, single-axis-round-trip with new semantic, etc.); 4 group → "4 groups" indexing rebase; new: multi_process_sweep round trip, _relative_ts, sanitize_history_prefix, label-leads-over-history_name, parse-error visibility.
+- **Files modified: ~15** spanning python/simkit/{project,validate,review,union,skill_bridge,cli/run,gui/main_window,gui/loaders,gui/tree_model,gui/views/{corners_editor,measures_editor},gui/controllers/run}.py + skill/{pvtProject.il,tests/testPvtProject.il} + tests/{test_project_loader,test_validate,test_review,test_union,test_cli_run,gui/test_tree_model,gui/test_main_window,gui/test_loaders}.py.
+- **Commits**: 8 (`2b6dd68` → `aa8318c`).
+- **Live-verified**: every commit via direct skillbridge probe against `fnxSession0` (testbench `sim_yusheng/Test/maestro`, 3 live corners: TT scalar / TT_pvt with multi-section + multi-VDD sweep / TT_2p5G with LO sweep).
+
+### D13 — Process-improvement discussion queued for next session (per user request)
+
+Quoting user verbatim: "我觉得我们开发流程可能出了问题，有太多问题没有被防御住，漏到我我这里，你先把当前问题修了，我们下一个窗口讨论一下流程问题."
+
+7 categorized leak patterns from this session:
+1. `_file_abs` empty — Phase 2 only tested both-present + single-section; no multi-section live pull regression.
+2. CornersEditor 0-px rows — Stage 2 tests asserted model state, no widget rendering test.
+3. Process single-select — same class as #2; no widget test of editor column accepting multi-value.
+4. RunController @pyqtSlot signature mismatch — no end-to-end QProcess spawn test, only signal-dispatch smoke.
+5. Measures Pull missing — spec didn't mandate Pull/Apply symmetry across editors.
+6. Tree no FS watcher — no test for "user edits file externally" scenario.
+7. Bundles invisible in tree — UI inventory wasn't explicit about user navigation.
+
+**Common patterns:**
+- Synthetic fixtures don't match live Maestro shape (`[[feedback_mock_match_production_shape]]` recorded but not strictly executed during agent dispatch).
+- Data-layer assertions instead of view-layer (`model.rowCount() == 3` ≠ "user can see 3 rows").
+- No end-to-end live verification (Stage 3 smoke verified signal dispatch only, didn't run QProcess to confirm slot connect didn't crash).
+
+Discussion target next session: a checklist + mandates that catch this class of bug at agent-dispatch time so they don't surface during user dogfood.
