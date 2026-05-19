@@ -355,7 +355,7 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 - [x] CRLF defense (3 layers): `.gitattributes` + `make_payload.py` pack-time normalize + `unpack_payload.sh` post-extract sed-strip.
 - [x] `--no-wheels` code-only payload mode (`make_payload.py --no-wheels` → `unpack_payload.sh` auto-copies wheels from `<deploys>/current/vendor/wheels/`).
 - [x] `deploy_venv.sh` patches `.venv/bin/activate` + `activate.csh` with `LD_LIBRARY_PATH` prepend for the wheel's bundled Qt5 (Cadence's `/software/public/qt/5.15.3_xcb/lib` shadows it otherwise).
-- [x] `scripts/README.md` updated with all of the above; `scripts/PHASE4_DEPS_HANDOFF.md` is now redundant — pending deletion.
+- [x] `scripts/README.md` updated with all of the above; `scripts/PHASE4_DEPS_HANDOFF.md` deleted 2026-05-19 PM late (content fully folded into `scripts/README.md`).
 - [x] Live-verified on red zone: `bash scripts/deploy_venv.sh` clean with 5 smoke tests (duckdb / skillbridge / simkit / `pvt` / PyQt5).
 
 ### §3. App skeleton (architecture proves out) — DONE 2026-05-19 PM (DECISIONS #74)

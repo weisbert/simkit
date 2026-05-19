@@ -2362,7 +2362,7 @@ Pre-created `python/simkit/gui/views/__init__.py` before dispatch to remove the 
 
 ### Outstanding (next session)
 
-1. ~~Delete `scripts/PHASE4_DEPS_HANDOFF.md`~~ — **still pending**; the 1-minute cleanup.
-2. **Stage 3: Run path (§5) + Diff (§6) + module loading**. This unlocks the Stage 2 stub handlers (D2) — once `pvt run --gui-jsonl` subprocess dispatch exists and `ModuleSession` wires a real project into the editors, the log-only `_on_*_requested` handlers become BridgeWorker queues and QProcess spawns. The union↔flat adapter (D3) lives here too.
+1. ~~Delete `scripts/PHASE4_DEPS_HANDOFF.md`~~ — **DONE same session as a handoff-prep cleanup**.
+2. **Stage 3: Run path (§5) + Diff (§6) + module loading** (NEXT). This unlocks the Stage 2 stub handlers (D2) — once `pvt run --gui-jsonl` subprocess dispatch exists and `ModuleSession` wires a real project into the editors, the log-only `_on_*_requested` handlers become BridgeWorker queues and QProcess spawns. The union↔flat adapter (D3) lives here too.
 3. **Stage 4: Milestone tagging UI (§15) + Wizard (§14) + Polish + Tier-1 dogfood gate**.
-4. **`ImportError` translation table (B5)** — spec §8.3 lists 7 SkillBridgeError categories that should map to plain-English user messages. Mostly mechanical; can be Stage 3 or earlier.
+4. **Error translation table (B5)** — spec §8.3 lists 7 SkillBridgeError categories that should map to plain-English user messages. Mostly mechanical; can be Stage 3 or earlier.
