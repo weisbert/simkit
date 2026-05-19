@@ -84,6 +84,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         BridgeStatus,
         build_bridge,
     )
+    from simkit.gui.loaders import LoadedModule, load_module
     from simkit.gui.main_window import MainWindow
 
     qapp = QApplication.instance() or QApplication(sys.argv[:1])
@@ -117,7 +118,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # --- build window -------------------------------------------------
     window = MainWindow()
-    if session is not None:
+    loaded: Optional[LoadedModule] = None
+    if module_path is not None:
+        try:
+            loaded = load_module(module_path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not load_module(%s): %s", module_path, exc)
+    if loaded is not None:
+        window.load_module(loaded)
+    elif session is not None:
         window.setWindowTitle(f"simkit — {session.project_name or session.project_path.name}")
     if app_state.window_geometry:
         try:
@@ -138,12 +147,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     thread, worker = build_bridge()
     worker.status_changed.connect(window.set_bridge_status)
     window.set_bridge_status(BridgeStatus.AMBER)
+    window.set_bridge_worker(worker)
     thread.start()
+
+    # --- restore per-module session bits (after worker is wired) ------
+    if session is not None:
+        window.restore_session(session.session_name, session.active_baseline)
 
     # --- shutdown wiring ---------------------------------------------
     def _persist_on_close():
         # Per-module: write the live session back to its project dir.
         if session is not None:
+            # Pull current session-name + baseline back from the window
+            # so the next launch restores them.
+            try:
+                session.session_name = window.current_session_name()
+                session.active_baseline = window.current_baseline_run_id()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("could not capture window session bits: %s", exc)
             try:
                 save_session(session)
             except Exception as exc:  # noqa: BLE001

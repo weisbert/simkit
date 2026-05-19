@@ -1,34 +1,38 @@
-"""MainWindow scaffold (spec §13 layout, §6.1 zone descriptions).
+"""MainWindow — Phase 4 Stage 3 wiring.
 
-Phase 4 §3 shipped pure placeholders; Stage 2 (§4 / §7 / §8) fills the
-right panel with three live tabs (Results / Corners / Measures) backed
-by the views in ``simkit.gui.views``. The BridgeWorker routing for the
-tabs' outbound signals is **deferred** to Stage 3 — for now the signals
-are wired only to the bottom log panel for visibility, since the GUI
-has no module-loading / project-context plumbing yet (without that,
-``pvt_corners_pull`` etc. have nothing to call against).
+Stage 2 shipped 3 right-panel tabs with log-only stub handlers. Stage 3
+wires those stubs to real ``BridgeWorker.queue_op`` calls, adds module
+loading via :mod:`simkit.gui.loaders`, introduces the left-tree
+``ProjectTreeModel``, and instantiates the three Stage-3 controllers
+(``RunController`` / ``DiffController`` / ``ErrorTranslator``).
 
-Zones (per spec §6 ASCII diagram):
-  * ``topBar``        — module selector dropdown + recent-5 + bridge dot
-  * ``statusStrip``   — narrow cross-module 24h summary (B1)
-  * ``leftTree``      — Reviews / Milestones / History tree
-  * ``rightPanel``    — ``QTabWidget`` hosting Results / Corners / Measures
-  * ``bottomLog``     — collapsible log panel (default expanded)
-  * ``statusDot``     — bridge heartbeat indicator inside ``topBar``
+External integration points (called from ``simkit.gui.app``):
 
-PyQt5 is imported at module load. Callers gate that via ``app.py`` —
-this module is only imported once we're certain PyQt5 is available.
+* :meth:`set_bridge_worker` — inject the shared :class:`BridgeWorker`
+  after the worker thread is started. All controllers are instantiated
+  lazily inside this method so MainWindow stays runnable for tests that
+  don't need a bridge (the 5 outbound signal handlers fall back to
+  log-only when no worker is set).
+* :meth:`load_module` — populate editors / left tree / Maestro-session
+  input from a :class:`LoadedModule` (the output of
+  :func:`simkit.gui.loaders.load_module`).
 """
 
 from __future__ import annotations
 
-from typing import Optional
+import json
+import logging
+import tempfile
+from pathlib import Path
+from typing import Any, Callable, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QModelIndex
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
+    QMessageBox,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -37,15 +41,31 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from simkit.gui.bridge_worker import BridgeStatus
+from simkit.gui.bridge_worker import BridgeError, BridgeStatus, BridgeWorker
+from simkit.gui.controllers.diff import DiffController
+from simkit.gui.controllers.error_translator import ErrorTranslator
+from simkit.gui.controllers.run import RunController
+from simkit.gui.error_translation import TranslatedError
+from simkit.gui.loaders import (
+    LoadedHistoryRun,
+    LoadedModule,
+    LoadedReview,
+    editor_rows_to_union_rows,
+    load_bundle_for_editor,
+    union_to_editor_rows,
+)
+from simkit.gui.tree_model import ProjectTreeModel
 from simkit.gui.views.corners_editor import CornersEditor
+from simkit.gui.views.diff_tab import DiffTab
 from simkit.gui.views.measures_editor import MeasuresEditor
 from simkit.gui.views.results_tab import ResultsTab
+from simkit.gui.views.run_progress import RunProgressWidget
+from simkit.union import load_union
 
 
-# Status-dot colours per spec §8.2. Plain hex; the visual treatment will
-# be refined when the design picks an icon set (QtAwesome is locked in
-# spec §2 but not exercised yet).
+log = logging.getLogger(__name__)
+
+
 _DOT_COLORS = {
     BridgeStatus.GREEN: "#2ecc71",
     BridgeStatus.AMBER: "#f1c40f",
@@ -54,15 +74,23 @@ _DOT_COLORS = {
 
 
 class MainWindow(QMainWindow):
-    """Top-level window. Placeholders only in Phase 4 §3."""
+    """Top-level window. Stage 3 wires real controllers + module loading."""
 
     DEFAULT_SIZE = (1200, 800)
-    """Spec §6: single ~1200x800 default window."""
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("simkit")
         self.resize(*self.DEFAULT_SIZE)
+
+        # --- live state (populated lazily) ------------------------------
+        self._loaded_module: Optional[LoadedModule] = None
+        self._worker: Optional[BridgeWorker] = None
+        self._run_controller: Optional[RunController] = None
+        self._diff_controller: Optional[DiffController] = None
+        self._error_translator: Optional[ErrorTranslator] = None
+        self._run_progress: Optional[RunProgressWidget] = None
+        self._pending_ops: dict[int, dict[str, Any]] = {}
 
         # --- top bar ----------------------------------------------------
         self.top_bar = QWidget(objectName="topBar")
@@ -70,13 +98,21 @@ class MainWindow(QMainWindow):
         top_bar_layout.setContentsMargins(8, 4, 8, 4)
 
         self.module_selector = QWidget(objectName="moduleSelector")
-        # Placeholder label until the real combo + recent-5 lands.
         ms_layout = QHBoxLayout(self.module_selector)
         ms_layout.setContentsMargins(0, 0, 0, 0)
-        ms_layout.addWidget(QLabel("[Module: -]"))
+        self.module_label = QLabel("[Module: -]")
+        ms_layout.addWidget(self.module_label)
         top_bar_layout.addWidget(self.module_selector)
 
         top_bar_layout.addStretch(1)
+
+        # Maestro session input — required for every bridge call. Persisted
+        # via ModuleSession so the user types it once per module.
+        top_bar_layout.addWidget(QLabel("Session:"))
+        self.session_input = QLineEdit(objectName="sessionInput")
+        self.session_input.setPlaceholderText("e.g. fnxSession0")
+        self.session_input.setFixedWidth(160)
+        top_bar_layout.addWidget(self.session_input)
 
         self.status_dot = QLabel(objectName="statusDot")
         self.status_dot.setFixedSize(14, 14)
@@ -85,23 +121,21 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(self.status_dot)
 
         # --- status strip (spec B1) -------------------------------------
-        self.status_strip = QLabel(
-            "Last 24h: -", objectName="statusStrip",
-        )
+        self.status_strip = QLabel("Last 24h: -", objectName="statusStrip")
         self.status_strip.setContentsMargins(8, 0, 8, 4)
 
         # --- left tree --------------------------------------------------
         self.left_tree = QTreeView(objectName="leftTree")
         self.left_tree.setHeaderHidden(True)
         self.left_tree.setMinimumWidth(180)
+        self._tree_model = ProjectTreeModel(self)
+        self.left_tree.setModel(self._tree_model)
+        self.left_tree.clicked.connect(self._on_tree_clicked)
 
         # --- right panel ------------------------------------------------
-        # Stage 2 (§4 / §7 / §8): QTabWidget with three live tabs. Tab
-        # order = Tier-1 capability order from spec §4 (view first, then
-        # edit corners, then edit measures). Diff / Wizard / Run-progress
-        # tabs are Stage 3+; their slots open here on-demand.
         self.right_panel = QTabWidget(objectName="rightPanel")
         self.right_panel.setDocumentMode(True)
+        self.right_panel.setTabsClosable(False)
 
         self.results_tab = ResultsTab()
         self.corners_editor = CornersEditor()
@@ -111,12 +145,10 @@ class MainWindow(QMainWindow):
         self.right_panel.addTab(self.corners_editor, "Corners")
         self.right_panel.addTab(self.measures_editor, "Measures")
 
-        # Stage 2 wiring: every outbound signal lands in the bottom log
-        # for visibility. Stage 3 will replace these log-only handlers
-        # with BridgeWorker.queue_op calls once module loading + project
-        # context are in place. The signal contracts (names, signatures)
-        # are pinned now so Stage 3 just swaps the slot bodies.
+        # --- editor signal wiring ---------------------------------------
         self.results_tab.run_requested.connect(self._on_run_requested)
+        self.results_tab.compare_requested.connect(self._on_compare_requested)
+        self.results_tab.baseline_pinned.connect(self._on_baseline_pinned)
         self.corners_editor.pull_requested.connect(self._on_corners_pull_requested)
         self.corners_editor.push_requested.connect(self._on_corners_push_requested)
         self.corners_editor.show_diff.connect(self._on_corners_show_diff)
@@ -129,21 +161,19 @@ class MainWindow(QMainWindow):
         # --- bottom log -------------------------------------------------
         self.bottom_log = QTextEdit(objectName="bottomLog")
         self.bottom_log.setReadOnly(True)
-        self.bottom_log.setFixedHeight(160)  # spec §6: 160px default
+        self.bottom_log.setFixedHeight(160)
         self.bottom_log.setPlaceholderText(
             "Log output streams here when pvt run is active."
         )
 
-        # --- assemble: splitters --------------------------------------
-        # Horizontal splitter: leftTree | rightPanel
+        # --- assemble ---------------------------------------------------
         h_splitter = QSplitter(Qt.Horizontal, objectName="mainHSplitter")
         h_splitter.addWidget(self.left_tree)
         h_splitter.addWidget(self.right_panel)
         h_splitter.setStretchFactor(0, 0)
         h_splitter.setStretchFactor(1, 1)
-        h_splitter.setSizes([260, 940])  # spec §6.1: default 260 px left tree
+        h_splitter.setSizes([260, 940])
 
-        # Vertical container: topBar / statusStrip / h_splitter / bottomLog
         central = QWidget()
         v = QVBoxLayout(central)
         v.setContentsMargins(0, 0, 0, 0)
@@ -154,10 +184,11 @@ class MainWindow(QMainWindow):
         v.addWidget(self.bottom_log)
         self.setCentralWidget(central)
 
-    # --- public surface used by AppController ----------------------------
+    # ----------------------------------------------------------------
+    # Public surface (called from simkit.gui.app)
+    # ----------------------------------------------------------------
 
     def set_bridge_status(self, status: BridgeStatus) -> None:
-        """Render the heartbeat dot in the top-right corner."""
         color = _DOT_COLORS.get(status, "#888")
         self.status_dot.setStyleSheet(
             f"background-color: {color}; border-radius: 7px;"
@@ -165,43 +196,508 @@ class MainWindow(QMainWindow):
         self.status_dot.setToolTip(f"Bridge: {status.value}")
 
     def append_log(self, line: str) -> None:
-        """Append one line to the bottom log panel."""
         self.bottom_log.append(line)
 
     def set_status_strip(self, text: str) -> None:
-        """Update the cross-module status strip text (spec B1)."""
         self.status_strip.setText(text)
 
-    # --- Stage 2 right-panel signal handlers (log-only stubs) -----------
-    # Stage 3 swaps these for real BridgeWorker.queue_op calls + QProcess
-    # subprocess dispatch. The signatures match the views' signal
-    # contracts so the swap is local to this file.
+    def set_bridge_worker(self, worker: BridgeWorker) -> None:
+        """Inject the shared BridgeWorker + instantiate Stage-3 controllers.
 
-    def _on_run_requested(self, review_path: str) -> None:
-        self.append_log(f"[run] review_path={review_path} (Stage 3 will dispatch QProcess pvt run)")
+        Called once from ``app.py`` after the worker thread is started.
+        Wires ``op_complete`` / ``op_failed`` to MainWindow's dispatch +
+        the ErrorTranslator. Builds the RunController + DiffController so
+        the 5 outbound signal handlers can dispatch real work.
+        """
+        self._worker = worker
+        worker.op_complete.connect(self._on_op_complete)
+        worker.op_failed.connect(self._on_op_failed)
 
-    def _on_corners_pull_requested(self) -> None:
-        self.append_log("[corners] pull requested (Stage 3 will call BridgeWorker pvt_corners_pull)")
+        self._error_translator = ErrorTranslator(self)
+        worker.op_failed.connect(self._error_translator.on_op_failed)
+        self._error_translator.translated.connect(self._show_translated_error)
 
-    def _on_corners_push_requested(self, payload: object) -> None:
-        row_count = len(payload) if isinstance(payload, list) else "?"
-        self.append_log(
-            f"[corners] push requested ({row_count} rows) "
-            "(Stage 3 will call BridgeWorker pvt_corners_push --replace)"
+        self._run_controller = RunController(parent=self)
+        self._run_controller.progress_event.connect(self._on_run_progress_event)
+        self._run_controller.run_finished.connect(self._on_run_finished)
+        self._run_controller.cancelled.connect(self._on_run_cancelled)
+        self._run_controller.error.connect(self._on_run_controller_error)
+
+        self._diff_controller = DiffController(
+            db_path_resolver=self._resolve_db_path,
+            parent=self,
+        )
+        self._diff_controller.diff_ready.connect(self._on_diff_ready)
+        self._diff_controller.error.connect(
+            lambda msg: self.append_log(f"[diff] {msg}")
         )
 
+    def load_module(self, module: LoadedModule) -> None:
+        """Populate editors + tree + session input from a LoadedModule.
+
+        Idempotent; replaces any previously loaded module.
+        """
+        self._loaded_module = module
+        self.module_label.setText(f"[Module: {module.project_name}]")
+        self.setWindowTitle(f"simkit — {module.project_name}")
+        self._tree_model.populate(module)
+        self.left_tree.expandAll()
+        self.corners_editor.set_project_root(module.project_root)
+
+        # Auto-load the default union/bundle if exactly one candidate each.
+        if module.union_default is not None:
+            self._load_union_from_disk(module.union_default)
+        if module.bundle_default is not None:
+            self._load_bundle_from_disk(module.bundle_default)
+
+    def restore_session(self, session_name: Optional[str], baseline: Optional[str]) -> None:
+        """Apply persisted ModuleSession bits to the live UI."""
+        if session_name:
+            self.session_input.setText(session_name)
+        if baseline:
+            self.results_tab.set_baseline(baseline)
+
+    def current_session_name(self) -> Optional[str]:
+        text = self.session_input.text().strip()
+        return text or None
+
+    def current_baseline_run_id(self) -> Optional[str]:
+        return self.results_tab.baseline_run_id()
+
+    # ----------------------------------------------------------------
+    # Left tree
+    # ----------------------------------------------------------------
+
+    def _on_tree_clicked(self, index: QModelIndex) -> None:
+        kind = self._tree_model.node_kind(index)
+        payload = self._tree_model.node_payload(index)
+        if kind == ProjectTreeModel.NODE_KIND_REVIEW and isinstance(payload, LoadedReview):
+            self.results_tab.set_review_path(str(payload.review_path))
+            self.append_log(f"[tree] selected review {payload.review_name}")
+        elif kind == ProjectTreeModel.NODE_KIND_HISTORY and isinstance(
+            payload, LoadedHistoryRun
+        ):
+            self._show_history_run(payload)
+
+    def _show_history_run(self, run: LoadedHistoryRun) -> None:
+        if self._loaded_module is None:
+            return
+        from simkit.db import connect
+
+        try:
+            con = connect(self._loaded_module.db_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[results] could not open DB: {exc}")
+            return
+        try:
+            self.results_tab.set_run(run.run_id, con)
+            self.results_tab.set_header(
+                history_name=run.history_name or "",
+                project_id=self._loaded_module.project_name,
+                timestamp=run.timestamp,
+                milestone=run.milestone or "",
+            )
+            self.right_panel.setCurrentWidget(self.results_tab)
+        finally:
+            con.close()
+
+    # ----------------------------------------------------------------
+    # Run path (§5)
+    # ----------------------------------------------------------------
+
+    def _on_run_requested(self, review_path: str) -> None:
+        if self._run_controller is None:
+            self.append_log(f"[run] no bridge — would run {review_path}")
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn("缺少 Maestro session", "请在顶部 Session 输入框填写 Maestro session 名 (e.g. fnxSession0).")
+            return
+        # Show the progress widget as a transient tab.
+        self._run_progress = RunProgressWidget()
+        self._run_progress.cancel_requested.connect(self._on_run_cancel_clicked)
+        progress_idx = self.right_panel.addTab(self._run_progress, "Run progress")
+        self.right_panel.setCurrentIndex(progress_idx)
+        review_name = Path(review_path).stem.replace(".review", "")
+        # total_items unknown until first item_started event; use 0 placeholder
+        self._run_progress.reset(review_name, total_items=0)
+        ok = self._run_controller.start_run(review_path, session=session)
+        if not ok:
+            self.append_log("[run] could not start — another run in flight or spawn failed")
+
+    def _on_run_cancel_clicked(self) -> None:
+        if self._run_controller is not None and self._run_controller.is_running:
+            self._run_controller.cancel()
+            self.append_log("[run] cancel requested (SIGTERM, 5s grace then SIGKILL)")
+
+    def _on_run_progress_event(self, event: dict) -> None:
+        if self._run_progress is not None:
+            self._run_progress.handle_event(event)
+        # Mirror log events into the bottom panel for visibility.
+        if event.get("event") == "log":
+            self.append_log(f"[run] {event.get('msg', '')}")
+        elif event.get("event") == "error":
+            self.append_log(
+                f"[run] error: {event.get('code', '?')} {event.get('msg', '')}"
+            )
+
+    def _on_run_finished(self, exit_code: int, summary: dict) -> None:
+        self.append_log(f"[run] finished exit={exit_code}")
+        if self._run_progress is not None:
+            self._run_progress.set_running(False)
+        # Refresh history so the just-finished run appears.
+        if self._loaded_module is not None:
+            try:
+                from simkit.gui.loaders import load_module
+
+                self._loaded_module = load_module(self._loaded_module.project_path)
+                self._tree_model.populate(self._loaded_module)
+                self.left_tree.expandAll()
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[run] history refresh failed: {exc}")
+
+    def _on_run_cancelled(self) -> None:
+        self.append_log("[run] cancelled (SIGKILL fired)")
+        if self._run_progress is not None:
+            self._run_progress.set_running(False)
+
+    def _on_run_controller_error(self, msg: str) -> None:
+        self.append_log(f"[run] controller error: {msg}")
+
+    # ----------------------------------------------------------------
+    # Diff path (§6)
+    # ----------------------------------------------------------------
+
+    def _on_compare_requested(self) -> None:
+        if self._diff_controller is None or self._loaded_module is None:
+            self.append_log("[diff] no bridge / module loaded")
+            return
+        current = self.results_tab.current_run_id()
+        if not current:
+            self.append_log("[diff] no current run selected")
+            return
+        other = self._diff_controller.pick_run_for_compare(
+            self._loaded_module.project_path, current, parent_widget=self,
+        )
+        if other is None:
+            return  # user cancelled
+        self._diff_controller.open_diff(
+            self._loaded_module.project_path, current, other,
+        )
+
+    def _on_baseline_pinned(self, run_id: object) -> None:
+        self.append_log(f"[baseline] pin = {run_id!r}")
+
+    def _on_diff_ready(self, widget: object) -> None:
+        if not isinstance(widget, DiffTab):
+            self.append_log(f"[diff] unexpected widget type {type(widget).__name__}")
+            return
+        idx = self.right_panel.addTab(widget, widget.title)
+        widget.closed.connect(lambda: self._close_tab(widget))
+        self.right_panel.setCurrentIndex(idx)
+
+    def _close_tab(self, widget: QWidget) -> None:
+        idx = self.right_panel.indexOf(widget)
+        if idx >= 0:
+            self.right_panel.removeTab(idx)
+            widget.deleteLater()
+
+    # ----------------------------------------------------------------
+    # Corners (§7)
+    # ----------------------------------------------------------------
+
+    def _on_corners_pull_requested(self) -> None:
+        if not self._can_dispatch_bridge("corners pull"):
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn_session_required()
+            return
+        out_path = self._scratch_path("union_pull", ".union.json")
+        self._queue_op(
+            "pvt_corners_pull",
+            on_ok=lambda result: self._on_corners_pulled(out_path),
+            kwargs={
+                "out_path": str(out_path),
+                "pvtproject_path": self._loaded_module.project_path,
+                "session": session,
+            },
+        )
+        self.append_log(f"[corners] pull queued → {out_path.name}")
+
+    def _on_corners_pulled(self, sidecar_path: Path) -> None:
+        try:
+            u = load_union(sidecar_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[corners] pulled union failed to load: {exc}")
+            return
+        self.corners_editor.load_union(union_to_editor_rows(u))
+        from datetime import datetime
+        self.corners_editor.set_last_sync(
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        )
+        self.append_log(f"[corners] pulled {len(u.rows)} rows")
+
+    def _on_corners_push_requested(self, rows: object) -> None:
+        row_count = len(rows) if isinstance(rows, list) else "?"
+        self.append_log(f"[corners] push requested ({row_count} rows)")
+        if not self._can_dispatch_bridge("corners push"):
+            return
+        if not isinstance(rows, list):
+            self.append_log(f"[corners] push payload not a list: {type(rows).__name__}")
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn_session_required()
+            return
+        # Build a Union from editor rows + serialize to a temp sidecar
+        # (pvt_corners_push expects a file path, not in-memory rows).
+        module = self._loaded_module
+        try:
+            u = editor_rows_to_union_rows(
+                rows,
+                name="gui_push",
+                project=module.project_name,
+                testbench_id="",  # populated by the SKILL side or rejected; surface error
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[corners] push rejected: {exc}")
+            return
+        out_path = self._scratch_path("union_push", ".union.json")
+        out_path.write_text(_serialize_union(u), encoding="utf-8")
+        self._queue_op(
+            "pvt_corners_push",
+            on_ok=lambda result: self.append_log(f"[corners] pushed: {result}"),
+            kwargs={
+                "union_json_path": str(out_path),
+                "pvtproject_path": module.project_path,
+                "session": session,
+                "replace": True,
+            },
+        )
+        self.append_log(f"[corners] push queued ({len(rows)} rows, --replace)")
+
     def _on_corners_show_diff(self) -> None:
-        self.append_log("[corners] show-diff requested (Stage 3 will open diff dialog)")
+        self.append_log("[corners] show-diff requested (sidecar vs live)")
 
     def _on_corners_pull_overrides_sidecar(self) -> None:
-        self.append_log("[corners] pull-overrides-sidecar requested (Stage 3 will pull + replace local)")
+        self.append_log("[corners] pull-overrides-sidecar requested")
+        # Same as plain pull — load_union into editor overwrites local state.
+        self._on_corners_pull_requested()
 
     def _on_corners_keep_sidecar(self) -> None:
-        self.append_log("[corners] keep-sidecar requested (Stage 3 will dismiss divergence strip)")
+        self.corners_editor.set_divergence(0, 0)  # hides the strip
+        self.append_log("[corners] keep-sidecar requested — divergence strip dismissed")
+
+    # ----------------------------------------------------------------
+    # Measures (§8)
+    # ----------------------------------------------------------------
 
     def _on_measures_apply_requested(self, rendered_rows: object) -> None:
         row_count = len(rendered_rows) if isinstance(rendered_rows, list) else "?"
-        self.append_log(
-            f"[measures] apply requested ({row_count} rendered rows) "
-            "(Stage 3 will call BridgeWorker pvt_measure_apply)"
+        self.append_log(f"[measures] apply requested ({row_count} rendered rows)")
+        if not self._can_dispatch_bridge("measure apply"):
+            return
+        if not isinstance(rendered_rows, list):
+            self.append_log(
+                f"[measures] apply payload not a list: {type(rendered_rows).__name__}"
+            )
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn_session_required()
+            return
+        # template_render.RenderedRow → JSONL-able rows dict (the shape
+        # pvt_measure_push expects from disk).
+        rows_serialized = [
+            {
+                "output_name": r.output_name,
+                "expression": r.expression,
+                "test": r.test,
+                "type": r.type,
+                "eval_type": r.eval_type,
+                "plot": r.plot,
+                "save": r.save,
+                "alias": r.alias,
+                "spec": r.spec,
+            }
+            for r in rendered_rows
+        ]
+        rendered_path = self._scratch_path("rendered", ".measure.json")
+        rendered_path.write_text(
+            json.dumps(
+                {"rendered_schema_version": 1, "rows": rows_serialized},
+                indent=2,
+            ),
+            encoding="utf-8",
         )
+        self._queue_op(
+            "pvt_measure_push",
+            on_ok=lambda result: self.append_log(f"[measures] applied: {result}"),
+            kwargs={
+                "rendered_json_path": str(rendered_path),
+                "session": session,
+                "pvtproject_path": self._loaded_module.project_path,
+                "replace": True,
+            },
+        )
+        self.append_log(
+            f"[measures] apply queued ({len(rows_serialized)} rendered rows)"
+        )
+
+    # ----------------------------------------------------------------
+    # BridgeWorker dispatch + error rendering
+    # ----------------------------------------------------------------
+
+    def _queue_op(
+        self,
+        func_name: str,
+        *,
+        on_ok: Optional[Callable[[Any], None]] = None,
+        on_err: Optional[Callable[[BridgeError], None]] = None,
+        kwargs: Optional[dict] = None,
+    ) -> int:
+        if self._worker is None:
+            raise RuntimeError("queue_op called before set_bridge_worker")
+        req = self._worker.queue_op(func_name, **(kwargs or {}))
+        self._pending_ops[req] = {"on_ok": on_ok, "on_err": on_err, "func": func_name}
+        return req
+
+    def _on_op_complete(self, request_id: int, result: object) -> None:
+        info = self._pending_ops.pop(request_id, None)
+        if info is None:
+            return
+        cb = info.get("on_ok")
+        if cb is None:
+            return
+        try:
+            cb(result)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(
+                f"[ui] on_ok for {info.get('func')} raised: {exc}"
+            )
+
+    def _on_op_failed(self, request_id: int, error: object) -> None:
+        info = self._pending_ops.pop(request_id, None)
+        if info is None:
+            return
+        cb = info.get("on_err")
+        if cb is None:
+            return
+        try:
+            cb(error)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(
+                f"[ui] on_err for {info.get('func')} raised: {exc}"
+            )
+
+    def _show_translated_error(
+        self, request_id: int, translated: object,
+    ) -> None:
+        if not isinstance(translated, TranslatedError):
+            return
+        self.append_log(
+            f"[error] {translated.headline}\n        {translated.detail}\n"
+            f"        {translated.action_hint}"
+        )
+        # For known errors fire a modal so the user notices immediately;
+        # unknown errors stay in the log to avoid dialog spam.
+        if translated.is_known:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("simkit — bridge error")
+            box.setText(translated.headline)
+            box.setInformativeText(translated.action_hint)
+            box.setDetailedText(translated.detail)
+            box.exec_()
+
+    # ----------------------------------------------------------------
+    # Helpers
+    # ----------------------------------------------------------------
+
+    def _resolve_db_path(self, project_path: Path) -> Path:
+        from simkit.project import _parse_pvtproject
+
+        proj = _parse_pvtproject(Path(project_path).expanduser().resolve())
+        return proj.db_root / "simkit.duckdb"
+
+    def _scratch_path(self, prefix: str, suffix: str) -> Path:
+        return Path(tempfile.gettempdir()) / f"simkit_{prefix}_{id(self)}{suffix}"
+
+    def _can_dispatch_bridge(self, label: str) -> bool:
+        if self._worker is None:
+            self.append_log(f"[{label}] no bridge worker — operation skipped")
+            return False
+        if self._loaded_module is None:
+            self.append_log(f"[{label}] no module loaded")
+            return False
+        return True
+
+    def _warn_session_required(self) -> None:
+        self._warn(
+            "缺少 Maestro session",
+            "请在顶部 Session 输入框填写 Maestro session 名 (e.g. fnxSession0).",
+        )
+
+    def _warn(self, title: str, text: str) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle(f"simkit — {title}")
+        box.setText(text)
+        box.exec_()
+
+    def _load_union_from_disk(self, union_path: Path) -> None:
+        try:
+            u = load_union(union_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[corners] load_union({union_path}) failed: {exc}")
+            return
+        self.corners_editor.load_union(union_to_editor_rows(u))
+        self.append_log(f"[corners] loaded {len(u.rows)} rows from {union_path.name}")
+
+    def _load_bundle_from_disk(self, bundle_path: Path) -> None:
+        if self._loaded_module is None:
+            return
+        try:
+            raw, templates, signals = load_bundle_for_editor(
+                bundle_path, self._loaded_module.project_root,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[measures] load_bundle({bundle_path}) failed: {exc}")
+            return
+        self.measures_editor.set_available_templates(templates)
+        self.measures_editor.set_available_signal_groups(signals)
+        self.measures_editor.load_bundle(raw)
+        self.append_log(f"[measures] loaded bundle {bundle_path.name}")
+
+
+def _serialize_union(u: Any) -> str:
+    """JSON-serialize a Union back into the .union.json on-disk shape."""
+    rows_out = []
+    for r in u.rows:
+        row_dict: dict[str, Any] = {"row_name": r.row_name}
+        if r.vars:
+            row_dict["vars"] = {k: list(v) for k, v in r.vars.items()}
+        if r.models:
+            row_dict["models"] = [
+                {
+                    "file": m.file,
+                    "block": m.block,
+                    "test": m.test,
+                    "section": list(m.section),
+                }
+                for m in r.models
+            ]
+        if not r.enabled:
+            row_dict["enabled"] = False
+        rows_out.append(row_dict)
+    return json.dumps(
+        {
+            "union_schema_version": u.union_schema_version,
+            "name": u.name,
+            "project": u.project,
+            "testbench_id": u.testbench_id,
+            "rows": rows_out,
+        },
+        indent=2,
+    )

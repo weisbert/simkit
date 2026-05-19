@@ -71,6 +71,9 @@ class ModuleSession:
     active_baseline: Optional[str] = None
     dirty_editors: dict[str, Any] = field(default_factory=dict)
     last_run_id_viewed: Optional[str] = None
+    # Maestro session name (e.g. "fnxSession0"). Required for every
+    # BridgeWorker call; persisted so the user types it once per module.
+    session_name: Optional[str] = None
 
     # Live (non-serialised) state. Spec §7 lists these on the dataclass
     # but they hold Qt handles that don't survive a process restart.
@@ -91,6 +94,7 @@ class ModuleSession:
             "active_baseline": self.active_baseline,
             "dirty_editors": dict(self.dirty_editors),
             "last_run_id_viewed": self.last_run_id_viewed,
+            "session_name": self.session_name,
         }
 
     @classmethod
@@ -115,6 +119,7 @@ class ModuleSession:
             active_baseline=raw.get("active_baseline"),
             dirty_editors=dict(raw.get("dirty_editors") or {}),
             last_run_id_viewed=raw.get("last_run_id_viewed"),
+            session_name=raw.get("session_name"),
         )
 
 
