@@ -920,6 +920,8 @@ def _run_strategy_chain(
     ingest_cb,
     query_failed_cb,
     history_by_item: dict[str, str] | None = None,
+    progress_cb=None,
+    item_index: int = 0,
 ) -> tuple[tuple[StrategyAttempt, ...], tuple[str, ...]]:
     """Drive ``item.on_failure.strategies`` until FAIL set drains or chain
     exhausts. Mutates ``histories`` / ``run_dirs`` in place with each retry's
@@ -932,6 +934,22 @@ def _run_strategy_chain(
     corner names show up in final_failed_corners untouched.
     """
     attempts: list[StrategyAttempt] = []
+
+    def _record(att: StrategyAttempt) -> None:
+        attempts.append(att)
+        if progress_cb is not None:
+            try:
+                progress_cb({
+                    "event": "strategy_attempt",
+                    "item_index": item_index,
+                    "strategy_name": att.strategy_name,
+                    "attempt_number": att.attempt_number,
+                    "outcome": att.outcome,
+                    "targeted": list(att.corners_targeted),
+                    "remaining": list(att.corners_remaining),
+                })
+            except Exception as exc:  # noqa: BLE001 — progress is best-effort
+                notes.append(f"progress_cb(strategy_attempt) raised: {exc}")
 
     try:
         first_run_id = _load_run_id(primary_run_dir)
@@ -997,7 +1015,7 @@ def _run_strategy_chain(
                 notes.append(
                     f"strategy {strat.name!r} attempt {attempt} raised: {exc}"
                 )
-                attempts.append(StrategyAttempt(
+                _record(StrategyAttempt(
                     strategy_name=strat.name, attempt_number=attempt,
                     outcome="gave_up", history_name=None, run_dir=None,
                     corners_targeted=tuple(sorted(remaining)),
@@ -1008,7 +1026,7 @@ def _run_strategy_chain(
 
             if (res.outcome == StrategyOutcome.GAVE_UP
                     or res.new_history_name is None):
-                attempts.append(StrategyAttempt(
+                _record(StrategyAttempt(
                     strategy_name=strat.name, attempt_number=attempt,
                     outcome="gave_up",
                     history_name=res.new_history_name,
@@ -1030,7 +1048,7 @@ def _run_strategy_chain(
                 notes.append(
                     f"PvtSave({res.new_history_name}) error: {exc}"
                 )
-                attempts.append(StrategyAttempt(
+                _record(StrategyAttempt(
                     strategy_name=strat.name, attempt_number=attempt,
                     outcome="gave_up",
                     history_name=res.new_history_name, run_dir=None,
@@ -1052,7 +1070,7 @@ def _run_strategy_chain(
                 notes.append(
                     f"ingest({res.new_history_name}) error: {exc}"
                 )
-                attempts.append(StrategyAttempt(
+                _record(StrategyAttempt(
                     strategy_name=strat.name, attempt_number=attempt,
                     outcome="gave_up",
                     history_name=res.new_history_name,
@@ -1072,7 +1090,7 @@ def _run_strategy_chain(
                 )
                 # We can't tell what shrunk; mark as gave_up and surface
                 # the current remaining set as-is.
-                attempts.append(StrategyAttempt(
+                _record(StrategyAttempt(
                     strategy_name=strat.name, attempt_number=attempt,
                     outcome="gave_up",
                     history_name=res.new_history_name,
@@ -1086,7 +1104,7 @@ def _run_strategy_chain(
             still_failing = set(auto_retry_corners(retry_failed)) & remaining
             recovered = remaining - still_failing
             outcome = "recovered" if recovered else "unchanged"
-            attempts.append(StrategyAttempt(
+            _record(StrategyAttempt(
                 strategy_name=strat.name, attempt_number=attempt,
                 outcome=outcome,
                 history_name=res.new_history_name,
@@ -1117,6 +1135,8 @@ def execute(
     item_done_cb=None,
     run_kwargs: Optional[dict] = None,
     query_failed_cb=None,
+    progress_cb=None,
+    cancel_check=None,
 ) -> ExecuteReport:
     """Drive Maestro through the plan via ``bridge``. v1 sync-blocking path.
 
@@ -1151,6 +1171,19 @@ def execute(
                 to look up FAIL corners after each ingest. Default opens
                 the project DB read-only. Tests inject a stub when
                 ingest_cb is mocked too (no real DB available).
+        progress_cb: Optional callable(event_dict) — invoked at item
+                start, item complete, and per strategy_attempt. Used by
+                ``pvt run --gui-jsonl`` to stream JSONL progress to a
+                QProcess parent (Phase 4 §9). Event dicts follow spec
+                §9.2 shape; exceptions raised by the callback are
+                swallowed + logged to notes (best-effort, never blocks
+                the run).
+        cancel_check: Optional callable() -> bool — polled BEFORE each
+                item dispatch. When True, the orchestrator breaks the
+                loop cleanly (no in-flight Maestro poll is interrupted)
+                and lets the finally block restore the test snapshot.
+                Used by the CLI's SIGTERM handler so the GUI's Cancel
+                button cleanly stops the run at the next item boundary.
     """
     import time
 
@@ -1172,10 +1205,35 @@ def execute(
     # with ic_from can find the upstream history dir on disk.
     history_by_item: dict[str, str] = {}
 
+    def _emit(event: dict) -> None:
+        if progress_cb is None:
+            return
+        try:
+            progress_cb(event)
+        except Exception as exc:  # noqa: BLE001 — progress is best-effort
+            print(f"[orch] WARNING: progress_cb raised on "
+                  f"{event.get('event')!r}: {exc}")
+
     try:
         for idx, planned in enumerate(plan.planned, start=1):
+            if cancel_check is not None:
+                try:
+                    if cancel_check():
+                        print(f"[orch] cancel requested; stopping before "
+                              f"item {idx}/{len(plan.planned)}")
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[orch] WARNING: cancel_check raised: {exc}")
+
             item = planned.item
             notes: list[str] = []
+
+            _emit({
+                "event": "item_started",
+                "item_index": idx,
+                "item_name": item.name,
+                "total_items": len(plan.planned),
+            })
 
             # 1. enable only this item's tests
             bridge.pvt_runner_enable_only(list(item.tests), session=session)
@@ -1246,6 +1304,8 @@ def execute(
                             ingest_cb=ingest_cb,
                             query_failed_cb=query_failed_cb,
                             history_by_item=history_by_item,
+                            progress_cb=progress_cb,
+                            item_index=idx,
                         )
                     except Exception as exc:
                         notes.append(f"strategy chain error: {exc}")
@@ -1271,6 +1331,23 @@ def execute(
             item_results.append(result)
             if item_done_cb:
                 item_done_cb(result)
+
+            # Progress event — item_completed. run_id pulled from the
+            # primary run.json if we got that far; "" otherwise.
+            completed_run_id = ""
+            if run_dirs:
+                try:
+                    completed_run_id = _load_run_id(run_dirs[0])
+                except Exception:
+                    completed_run_id = ""
+            _emit({
+                "event": "item_completed",
+                "item_index": idx,
+                "run_id": completed_run_id,
+                "completed": 1 if completed else 0,
+                "failed": len(final_failed),
+                "history_name": histories[0] if histories else None,
+            })
 
     finally:
         try:

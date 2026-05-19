@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 from typing import List, Optional
 
+from simkit.gui_events import GuiEventEmitter
 from simkit.orchestrator import (
     NotImplementedYetError,
     OrchestratorError,
@@ -35,6 +37,26 @@ from simkit.orchestrator import (
     plan_review,
     synthesize_adhoc_review,
 )
+
+
+# Module-level cancel flag set by the SIGTERM handler (spec §9.3 +
+# Phase 4 §9). The orchestrator polls it via ``cancel_check`` at each
+# item boundary; in-flight Maestro polls are NOT interrupted (too risky
+# — partial Spectre state mid-axlRunAllTests is unrecoverable). v1
+# cancel = "stop after the current item".
+_cancel_requested = False
+
+
+def _sigterm_handler(_signum, _frame):
+    global _cancel_requested
+    _cancel_requested = True
+    # Echo to stderr so a non-GUI user can see why a Ctrl+C-style stop
+    # is taking until the current item ends.
+    try:
+        print("[pvt run] SIGTERM received — will stop after current item",
+              file=sys.stderr, flush=True)
+    except Exception:
+        pass
 from simkit.project import (
     PvtProjectError,
     PvtProjectNotFoundError,
@@ -139,21 +161,54 @@ def add_subparser(sub) -> None:
             "(<prefix>_<item>_<timestamp>). Default: 'orch'."
         ),
     )
+    p.add_argument(
+        "--gui-jsonl",
+        action="store_true",
+        help=(
+            "Emit one JSON object per line on stdout for each progress event "
+            "(item_started / item_completed / strategy_attempt / review_done / "
+            "error). Used by the Phase 4 GUI to drive a live kanban. "
+            "Additive — when absent, normal human-readable output is printed."
+        ),
+    )
     p.set_defaults(func=_cli_run)
 
 
 def _cli_run(args: argparse.Namespace) -> int:
+    global _cancel_requested
+    _cancel_requested = False
+
+    # GUI-JSONL emitter is constructed FIRST so even early input-validation
+    # errors surface as structured events (per spec §9.4). All non-GUI
+    # text continues to print to stderr unchanged.
+    emitter = GuiEventEmitter(enabled=bool(getattr(args, "gui_jsonl", False)))
+
+    # SIGTERM handler — installed for both GUI + non-GUI mode so a parent
+    # process can request a clean stop. Re-entrant safe (signal module
+    # reinstalls per process).
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except (ValueError, OSError):
+        # In threaded test harnesses signal.signal can refuse — fine,
+        # the GUI-side cancel still SIGKILLs after the 5s grace.
+        pass
+
     # --- mode resolution -------------------------------------------------
     if args.review_path and args.tests:
-        print("ERROR: cannot mix sidecar mode (review_path) with ad-hoc mode "
-              "(--tests). Pick one.", file=sys.stderr)
+        msg = ("cannot mix sidecar mode (review_path) with ad-hoc mode "
+               "(--tests). Pick one.")
+        print(f"ERROR: {msg}", file=sys.stderr)
+        emitter.error(code="bad_args", msg=msg)
         return 2
     if not args.review_path and not args.tests:
-        print("ERROR: provide either a review.json path OR --tests + --union.",
-              file=sys.stderr)
+        msg = "provide either a review.json path OR --tests + --union."
+        print(f"ERROR: {msg}", file=sys.stderr)
+        emitter.error(code="bad_args", msg=msg)
         return 2
     if args.tests and not args.union:
-        print("ERROR: --tests requires --union.", file=sys.stderr)
+        msg = "--tests requires --union."
+        print(f"ERROR: {msg}", file=sys.stderr)
+        emitter.error(code="bad_args", msg=msg)
         return 2
 
     items_filter: Optional[List[str]] = None
@@ -175,9 +230,17 @@ def _cli_run(args: argparse.Namespace) -> int:
             )
     except ReviewError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        emitter.error(code="review_load", msg=str(exc))
         return 2
     except PvtProjectError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        emitter.error(code="pvtproject", msg=str(exc))
+        return 2
+    except FileNotFoundError as exc:
+        # The Phase 4 GUI passes review paths verbatim; a missing file
+        # should surface as a structured error not a Python traceback.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        emitter.error(code="review_missing", msg=str(exc))
         return 2
 
     # --- project-match check (sidecar mode only) ------------------------
@@ -193,6 +256,7 @@ def _cli_run(args: argparse.Namespace) -> int:
                 check_project_match(review, pvtproj.project)
             except ReviewError as exc:
                 print(f"ERROR: {exc}", file=sys.stderr)
+                emitter.error(code="project_mismatch", msg=str(exc))
                 return 2
 
     # --- build the plan -------------------------------------------------
@@ -201,6 +265,7 @@ def _cli_run(args: argparse.Namespace) -> int:
     except OrchestratorError as exc:
         msg = str(exc)
         print(f"ERROR: {msg}", file=sys.stderr)
+        emitter.error(code="plan", msg=msg)
         return 4 if "--items" in msg else 2
 
     # --- dispatch -------------------------------------------------------
@@ -213,16 +278,20 @@ def _cli_run(args: argparse.Namespace) -> int:
     # --- live mode ------------------------------------------------------
     session = args.session or os.environ.get("PVT_SESSION")
     if not session:
-        print("ERROR: live mode requires --session NAME (or PVT_SESSION env "
-              "var). Use --dry-run to skip Maestro.", file=sys.stderr)
+        msg = ("live mode requires --session NAME (or PVT_SESSION env var). "
+               "Use --dry-run to skip Maestro.")
+        print(f"ERROR: {msg}", file=sys.stderr)
+        emitter.error(code="missing_session", msg=msg)
         return 2
 
     pvtproject_path = _resolve_pvtproject_path(
         args.project, review_path=args.review_path,
     )
     if pvtproject_path is None:
-        print("ERROR: live mode requires a .pvtproject — pass --project PATH "
-              "or run from inside a project directory.", file=sys.stderr)
+        msg = ("live mode requires a .pvtproject — pass --project PATH or "
+               "run from inside a project directory.")
+        print(f"ERROR: {msg}", file=sys.stderr)
+        emitter.error(code="missing_pvtproject", msg=msg)
         return 2
 
     try:
@@ -230,6 +299,7 @@ def _cli_run(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"ERROR: cannot import simkit.skill_bridge: {exc}",
               file=sys.stderr)
+        emitter.error(code="bridge_import", msg=str(exc))
         return 7
 
     try:
@@ -240,13 +310,17 @@ def _cli_run(args: argparse.Namespace) -> int:
             pvtproject_path=pvtproject_path,
             history_prefix=args.history_prefix,
             push_union=not args.no_push_union,
+            progress_cb=emitter.emit_dict_event_callback,
+            cancel_check=lambda: _cancel_requested,
         )
     except OrchestratorError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
+        emitter.error(code="orchestrator", msg=str(exc))
         return 6
     except Exception as exc:
         print(f"ERROR: execute() raised {type(exc).__name__}: {exc}",
               file=sys.stderr)
+        emitter.error(code="execute_raised", msg=f"{type(exc).__name__}: {exc}")
         return 7
 
     print("---")
@@ -276,7 +350,80 @@ def _cli_run(args: argparse.Namespace) -> int:
             for line in ir.notes.splitlines():
                 print(f"           ! {line}")
 
-    return 0 if not (incomplete or failed_any) else 6
+    if _cancel_requested:
+        # SIGTERM-cancelled: tag the LAST ingested run as partial_run so
+        # the GUI's Results view can flag it. Best-effort — failure to
+        # touch the DB is logged but doesn't change the exit code (130
+        # always wins so the parent knows we were terminated).
+        _mark_partial_run(report, pvtproject_path, emitter)
+        summary = _build_summary(report, exit_code=130, cancelled=True)
+        emitter.review_done(exit_code=130, summary=summary)
+        return 130
+
+    exit_code = 0 if not (incomplete or failed_any) else 6
+    summary = _build_summary(report, exit_code=exit_code, cancelled=False)
+    emitter.review_done(exit_code=exit_code, summary=summary)
+    return exit_code
+
+
+def _build_summary(report, *, exit_code: int, cancelled: bool) -> dict:
+    """Serialise an ``ExecuteReport`` for the ``review_done`` JSONL event."""
+    return {
+        "exit_code": exit_code,
+        "cancelled": cancelled,
+        "snapshot_restored": report.snapshot_restored,
+        "items": [
+            {
+                "item_name": ir.item_name,
+                "completed": ir.completed,
+                "history_names": list(ir.history_names),
+                "failed_corners": list(ir.final_failed_corners),
+            }
+            for ir in report.items
+        ],
+    }
+
+
+def _mark_partial_run(report, pvtproject_path: Path, emitter: GuiEventEmitter) -> None:
+    """Tag the most recent run's row in DuckDB with ``partial_run=TRUE``.
+
+    Best-effort: any failure (no project DB, no ingested run, schema
+    mismatch) is logged via the emitter + stderr but doesn't propagate.
+    The exit code (130) is the source of truth for "cancelled" — this
+    just helps the GUI render the partial run with a yellow badge.
+    """
+    last_run_id: Optional[str] = None
+    for ir in reversed(report.items):
+        if not ir.run_dirs:
+            continue
+        try:
+            from simkit.orchestrator import _load_run_id  # local import
+            last_run_id = _load_run_id(ir.run_dirs[-1])
+            break
+        except Exception:
+            continue
+    if last_run_id is None:
+        emitter.log("warn", "cancel: no ingested run found to mark partial_run")
+        return
+
+    try:
+        from simkit.db import connect
+        from simkit.project import _parse_pvtproject
+        proj = _parse_pvtproject(Path(pvtproject_path).expanduser().resolve())
+        db_path = proj.db_root / "simkit.duckdb"
+        con = connect(db_path)
+        try:
+            con.execute(
+                "UPDATE runs SET partial_run = TRUE WHERE run_id = ?",
+                [last_run_id],
+            )
+        finally:
+            con.close()
+        emitter.log("info", f"cancel: marked run {last_run_id} as partial_run")
+    except Exception as exc:
+        emitter.log("warn", f"cancel: failed to mark partial_run: {exc}")
+        print(f"WARNING: failed to mark partial_run on {last_run_id}: {exc}",
+              file=sys.stderr)
 
 
 def _resolve_project_name(project_path: Optional[str]) -> str:
