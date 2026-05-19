@@ -2204,3 +2204,49 @@ _Date: 2026-05-19 (post Phase 3A closeout, same day as #72)_
 2. **Delete `scripts/PHASE4_DEPS_HANDOFF.md`** — user OK'd in principle; 1-commit cleanup.
 
 3. **Stage 2: §4 / §7 / §8 / §9a 4-parallel** — view results / corner editor / measure editor / milestone DuckDB schema migration. All independent file-wise after §3 skeleton landed.
+
+
+## #75 — skillbridge sbStart.il: PATH-based python auto-discovery (cross-repo, sibling skill_tools)
+_Date: 2026-05-19 (PM late)_
+
+**Context:** Post-§3 the GUI launches on red, but the next session reveal was friction on the SKILL side: `sbStart.il`'s old fallback was hardcoded `/usr/bin/python3` — a path that doesn't exist on red-zone EDA hosts where Python 3.11 lives behind `module load python/3.11` or in SCL paths like `/opt/rh/rh-python311/root/usr/bin/python3`. User raised two questions while orienting: (a) does the Cadence terminal need a Python env (.venv activated)? — answer: no, skillbridge is a 2-process architecture (server is `python_server.py`, stdlib-only; client lives in `.venv`); (b) can `load("...sbStart.il")` be zero-config? — answer: yes, after this fix. Whole change is in the sibling `skill_tools` repo, **not** simkit; per the design rule that skillbridge stays upstream / generic and doesn't know about its clients.
+
+### D1 — Three-tier python resolution chain in `sbStart.il`
+
+**Decision:** sbStart.il resolves the Python interpreter in this order:
+
+1. `$SKILLBRIDGE_PYTHON` env var — explicit override (kept for CI / debug)
+2. `sbFindPython()` — walks PATH via `command -v python3 || python3.11 || python3.10 || python3.9 || python3.8 || python || true` cascade in one `sh -c` invocation
+3. Fail loud via `error()` with actionable message: "Set `SKILLBRIDGE_PYTHON=/abs/path/to/python`, or add python3 to PATH (e.g. `module load python/3.11`) before launching Virtuoso."
+
+**Why:** The hardcoded `/usr/bin/python3` fallback silently failed on red — user got an obscure shell error without guidance. PATH auto-discovery moves the configuration burden from the per-user shell into the tool itself; `error()` with a concrete next step replaces the silent crash. User-visible effect: `load("...sbStart.il")` is now zero-config as long as the EDA shell has python3 on PATH (typically arranged by `module load python/3.11` or the EDA team's standard launcher).
+
+**Alternatives considered:**
+- **Hardcode multiple paths** (`/usr/bin/python3` / `/opt/rh/rh-python311/...` / ...): rejected because path zoology varies per EDA team — would need maintenance every time we onboard a new env.
+- **Auto-find `<somewhere>/simkit_deploys/current/.venv/bin/python`**: rejected. That's reverse-coupling — skillbridge is upstream of simkit and shouldn't know about it. Future skillbridge clients (e.g. ad-hoc SKILL debug notebooks) deserve the same zero-config experience.
+- **Ship a `launch_virtuoso.csh` wrapper**: rejected. Solves the wrong layer — `load()` should work directly without a launcher.
+
+### D2 — `ipcBeginProcess` $VARNAME mangling — use unrolled `||` chains, not shell loops
+
+**Decision:** SKILL `ipcBeginProcess` substitutes `$VARNAME` references in its command-string argument BEFORE handing to `/bin/sh`. Any shell construct that depends on `$n` / `$p` / `$VAR` silently runs with the variable empty. `$(...)` command substitution is NOT affected; only `$VARNAME` is. Backslash-escaping does not help (SKILL's string parser eats `\$` first). Therefore `sbFindPython()` uses a hand-unrolled `command -v X || command -v Y || ... || true` cascade rather than the natural `for n in candidates; do ...; done` form.
+
+**Why:** Caught via live bridge probe during impl. First-draft `sbFindPython()` used the for-loop form and returned `\n` (echo of empty `$n`). Five incremental shell tests narrowed it: `$(command -v python3)` works (correct output), `for n in a b; do echo $n; done` produces `\n\n` (two empty lines). The single behavioral anomaly is `$VARNAME` mangling — wide blast radius for anyone writing SKILL shell-out in the future. Captured as memory `[[feedback-skill-ipcbeginprocess-var-mangling]]` with the full do/don't list.
+
+**Verified:** Live skillbridge probe (5 shell-pattern iterations + final round-trip). Defined the updated `sbFindPython()` via `ws['evalstring'](defn)`, called it, got `'/usr/bin/python3'` (trimmed, no trailing `\n`). Round-tripped through the `pcreReplace(pcreCompile("\\s+$") out "" 0)` trim correctly.
+
+### D3 — Land in sibling `skill_tools` repo, not simkit
+
+**Decision:** All code change lives in `skill_tools/skillbridge/sbStart.il`. Commit `d284bd4` on `skill_tools` main, pushed to `github.com/weisbert/cadence-skill-tools`. Simkit gets only this DECISIONS entry + memory entry + PROJECT_STATE summary — no Python code changed.
+
+**Why:** Repo separation matters here. `skill_tools` is the "small Cadence-side tools" umbrella; skillbridge is one of those tools. simkit is a downstream client. Keeping the python-resolution logic in skillbridge means:
+- Any future skillbridge client (next person doing SKILL automation) inherits zero-config.
+- simkit doesn't carry a dependency on skillbridge internals.
+- Pushing a new simkit version doesn't require a paired skill_tools push.
+
+### Outstanding (next session)
+
+Unchanged from #74. Today's late PM was orthogonal to Phase 4 GUI work:
+
+1. **BridgeWorker timer cross-thread bug** — still top priority for Stage 2 dispatch.
+2. **Delete `scripts/PHASE4_DEPS_HANDOFF.md`** — still pending.
+3. **Stage 2: §4 / §7 / §8 / §9a 4-parallel** — still queued.
