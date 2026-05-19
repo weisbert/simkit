@@ -81,19 +81,82 @@ bash scripts/deploy_venv.sh
 
 This creates `.venv/` (fully isolated — **does NOT** inherit from the
 red-zone global Python), installs every package from `vendor/wheels/`,
-installs simkit in editable mode, and runs 4 smoke tests.
+installs simkit in editable mode, runs 4 smoke tests, and **atomically
+points `~/simkit_deploys/current` → this deploy dir** so the "active"
+deploy has a stable, version-independent path.
 
-After it's done:
+After it's done, use the stable `current` path:
 
 ```bash
+cd ~/simkit_deploys/current
 source .venv/bin/activate
 pvt --help
 ```
 
-**Re-deploying / upgrading:**
+**Re-deploying same SHA:**
 
 ```bash
 bash scripts/deploy_venv.sh --force    # wipe + recreate .venv
+```
+
+**Deploy without activating (don't touch the `current` symlink):**
+
+```bash
+bash scripts/deploy_venv.sh --no-current   # leaves 'current' on previous deploy
+```
+
+---
+
+## Iterating — multiple deployments over time
+
+Every iteration produces a new `simkit_<date>_<sha>/` directory in
+`~/simkit_deploys/`. Old deploys are preserved for rollback. The
+`current` symlink always points at the most-recently-deployed one.
+
+**One-line iteration from red zone:**
+
+```bash
+bash scripts/unpack_payload.sh new_payload.tar.gz \
+  && cd ~/simkit_deploys/$(basename new_payload.tar.gz .tar.gz) \
+  && bash scripts/deploy_venv.sh
+```
+
+**Daily work** — your activation command **never changes**:
+
+```bash
+cd ~/simkit_deploys/current
+source .venv/bin/activate
+pvt run review.json
+```
+
+**Rollback to an earlier deploy** (instant — just retarget the symlink):
+
+```bash
+ln -sfn ~/simkit_deploys/simkit_<earlier-date>_<sha> ~/simkit_deploys/current
+# next 'cd current && source .venv/bin/activate' uses the earlier env
+```
+
+**Cleanup old deploys** to reclaim disk:
+
+```bash
+bash scripts/cleanup_deploys.sh --keep 3 --dry-run   # preview
+bash scripts/cleanup_deploys.sh --keep 3             # actually delete
+```
+
+Cleanup rules:
+- Keeps the N most-recently-modified deploys (default `--keep 3`).
+- **Always protects the deploy that `current` points to**, even if it
+  would otherwise be older than the keep cutoff.
+- Pure `rm -rf` on the rest. No tarball, no archive — gone.
+
+`--dry-run` lists what *would* be deleted, including each dir's size
+and the total disk that would be freed. Always preview before deleting
+in shared environments.
+
+Override deploys dir (e.g. for testing):
+
+```bash
+bash scripts/cleanup_deploys.sh --deploys-dir /opt/simkit --keep 5
 ```
 
 ---

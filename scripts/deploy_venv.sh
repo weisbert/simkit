@@ -6,13 +6,19 @@
 #   cd ~/simkit_deploys/simkit_YYYYMMDD_SHA
 #   bash scripts/deploy_venv.sh
 #
+# On success, atomically points ../current -> this deploy dir so the
+# "currently active" deployment has a stable path. Use --no-current to
+# skip this step (e.g. for a trial deploy you don't want to activate
+# yet).
+#
 # Env vars:
 #   PYTHON     Python interpreter to use (default: python3)
 #   VENV_DIR   Where to put the venv (default: .venv)
 #
 # Flags:
-#   --force    Remove existing .venv before creating
-#   --no-smoke Skip post-install smoke tests
+#   --force        Remove existing .venv before creating
+#   --no-smoke     Skip post-install smoke tests
+#   --no-current   Skip updating ../current symlink
 #
 # Exit codes:
 #   0 ok
@@ -30,11 +36,13 @@ PYTHON="${PYTHON:-python3}"
 VENV_DIR="${VENV_DIR:-.venv}"
 FORCE=0
 NO_SMOKE=0
+NO_CURRENT=0
 
 for arg in "$@"; do
     case "$arg" in
-        --force)    FORCE=1 ;;
-        --no-smoke) NO_SMOKE=1 ;;
+        --force)      FORCE=1 ;;
+        --no-smoke)   NO_SMOKE=1 ;;
+        --no-current) NO_CURRENT=1 ;;
         -h|--help)
             grep '^#' "$0" | grep -v '^#!' | sed 's/^# \?//'
             exit 0
@@ -163,12 +171,41 @@ if [[ "$NO_SMOKE" == "0" ]]; then
     fi
 fi
 
+# --- Update 'current' symlink (../current -> this deploy) ---
+
+CURRENT_LINK=""
+if [[ "$NO_CURRENT" == "0" ]]; then
+    DEPLOYS_PARENT="$(dirname "$REPO_DIR")"
+    CURRENT_LINK="$DEPLOYS_PARENT/current"
+
+    # `ln -sfn` atomically replaces the existing symlink. `-f` removes
+    # an existing link/file; `-n` is critical — without it, if `current`
+    # already points to a directory, ln descends INTO that dir and
+    # creates a nested symlink (classic ln footgun).
+    if ln -sfn "$REPO_DIR" "$CURRENT_LINK"; then
+        echo ""
+        echo "[deploy_venv] Updated symlink: $CURRENT_LINK -> $(basename "$REPO_DIR")"
+    else
+        echo ""
+        echo "WARNING: failed to update $CURRENT_LINK symlink (deploy still OK)" >&2
+        CURRENT_LINK=""
+    fi
+fi
+
 echo ""
 echo "[deploy_venv] Done."
 echo "  venv: $REPO_DIR/$VENV_DIR"
-echo ""
-echo "Activate with:"
-echo "  cd $REPO_DIR && source $VENV_DIR/bin/activate"
+
+if [[ -n "$CURRENT_LINK" ]]; then
+    echo ""
+    echo "Activate via the stable 'current' path (recommended):"
+    echo "  cd $CURRENT_LINK && source $VENV_DIR/bin/activate"
+else
+    echo ""
+    echo "Activate via the absolute deploy path:"
+    echo "  cd $REPO_DIR && source $VENV_DIR/bin/activate"
+fi
+
 echo ""
 echo "Try:"
 echo "  pvt --help"
