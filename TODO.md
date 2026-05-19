@@ -312,10 +312,18 @@ Spec at `docs/phase3a_orchestrator_spec.md`. Four design decisions in `DECISIONS
 
 ### Phase 3A v1.9 #4 candidates (newly surfaced):
 - [x] ~~**2 pre-existing SKILL Tier-1 FAILs**~~ — RESOLVED 2026-05-19 (DECISIONS #70). Not pre-existing: the count was a `LiteralRemoteFunction` readback proxy mis-read (`ws[name]` doesn't read SKILL var values; must `ws['evalstring'](name)`). After correct readback: (a) `corners/collectRowNames/skips-missing-row_name` was a real v1.9 #1 fixture regression (`'unbound` symbol collides with SKILL "variable unbound" sentinel); fixed 7× → `PVT_JSON_ABSENT` in `testPvtCorners.il`. (b) `dialog/fresh path under existing dir accepted` is a `/tmp/dialog_*` cleanup race, not a code bug; pre-run `rm -rf /tmp/dialog_*` clears it. Clean baseline now **462/0/0**.
-- [ ] **Probe oddity from Gap #1 live verify** — `Test`'s sentinel write via `pvt_runner_set_ic_source` didn't visibly land on read-back while `Test_trans`'s did. Restore round-trip was still byte-identical for both (Gap #1 contract held). Suspected: `Set` short-circuits on similar values, or asi caching on main session interacts with per-test setter. Probe target for next bridge dive.
-- [ ] **Orchestrator opt-in to per-test pre-run scripts** — Gap #2 landed the data shape + helper. Switch `_execute_ic_chained_item` to use `write_per_test_pre_run_scripts` when `per_test_corner_to_arg` is set. Wait for a real multi-test consumer with divergent ICs.
-- [ ] **runTests.il simplification via `get_filename(piport)`** — Agent B's 4-layer fallback works but missed this canonical SKILL self-locate primitive (used in user's own `skill_tools.il:102`). The defvar block could collapse to ~10 lines. Cosmetic; defer until next SKILL pass.
-- [ ] **Dialog test fixture race-proof** — `dialog/*` tests should clean their own `/tmp/dialog_*` in setUp/tearDown rather than relying on an external `rm -rf`. Wait for a real second occurrence before touching.
+- [x] ~~**runTests.il simplification via `get_filename(piport)`**~~ — DONE 2026-05-19 (DECISIONS #71, Phase 3A closeout). Replaced Agent B's 4-layer fallback with 1 primary path (canonical SKILL `get_filename(piport)` — same idiom user's own `skill_tools.il:102` uses) + 2 fallbacks (env vars, cwd default). Removed: `_pvtFindRepoRoot` upward walk helper, `_PVT_FORCE_ROOT` global, `getSkillPath` scan. Net `-37 LOC` (80 → 43). Probe-verified: `get_filename(piport)` returns the absolute path of the file being loaded via skillbridge `ws['load']`; cwd-independent. Live-verified 462/0/0 from both `cwd=simkit` and `cwd=/tmp`.
+
+### Phase 3A deferred items (with explicit "wait for X" triggers):
+- [ ] **Probe oddity from Gap #1 live verify** — `Test`'s sentinel write via `pvt_runner_set_ic_source` didn't visibly land on read-back while `Test_trans`'s did. Restore round-trip was still byte-identical for both (Gap #1 contract held). Suspected: `Set` short-circuits on similar values, or asi caching on main session interacts with per-test setter. **Trigger**: another mysterious sentinel-not-landing case OR free time on a SKILL day.
+- [ ] **Orchestrator opt-in to per-test pre-run scripts** — Gap #2 landed the data shape + helper (`PreRunSpec.per_test_corner_to_arg` + `write_per_test_pre_run_scripts`). Switch `_execute_ic_chained_item` to use them when set. **Trigger**: a real multi-test consumer item with divergent per-test ICs.
+- [ ] **Dialog test fixture race-proof** — `dialog/*` tests should clean their own `/tmp/dialog_*` in setUp/tearDown. **Trigger**: a second occurrence of the cleanup race biting somebody.
+
+---
+
+## 🎯 Phase 3A — CLOSED 2026-05-19
+
+All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No active phase — observing real usage to surface true next pain points before picking the next phase. See `PHASE_PLAN.md` for parked candidates and `PROJECT_STATE.md` for the full closeout summary.
 
 ### Deferred to Phase 3A v1.3 (do NOT block v1.2):
 

@@ -1946,3 +1946,78 @@ _Date: 2026-05-19 (same day as #69)_
 
 - The v1.9 #4 backlog from #69 narrows: the "2 pre-existing FAILs" item drops entirely (one fixed here, one explained as fixture race + documented). Probe-oddity + per-test orchestrator opt-in still queued.
 - Consider adding `dialog/*` test cleanup to its setUp/tearDown to make the fixture race-proof. Wait for a real second occurrence first.
+
+---
+
+## #71 — Phase 3A closeout: runTests.il self-locate via `get_filename(piport)` + Phase 3A DONE
+_Date: 2026-05-19 (same-day closeout)_
+
+**Decision:** Two acts:
+
+1. **`skill/tests/runTests.il` simplification** — replaced #69 Agent B's 4-layer self-locate fallback (`_PVT_FORCE_ROOT` global → env vars → upward marker walk → cwd default) with 1 primary path + 2 fallbacks:
+   - **Primary**: `(get_filename piport)` — canonical SKILL self-locate idiom. SKILL binds `piport` to the input port for the duration of `(load ...)`; `get_filename` returns the absolute path of the file being read. errset-wrapped for the interactive-paste case where piport isn't bound to a file.
+   - **Fallback 1**: env vars `PVT_TEST_ROOT` / `PVT_SKILL_ROOT` (user shell override). Kept the `_pvtEnvOrNil` helper that coerces empty-string env values to nil (the v1.3-era `(or "" X)` bug fix is real).
+   - **Fallback 2**: cwd default + load-time printf warning when `pvtError.il` not found.
+   - **Removed**: `_pvtFindRepoRoot` upward-walk helper (12 LOC), `_PVT_FORCE_ROOT` SKILL global override (no longer needed since `get_filename(piport)` covers the case it was added for), `getSkillPath()` scan loop.
+   - **Net**: `-37 LOC` (80 → 43). 4-layer → 1+2-layer. Same external contract.
+
+2. **Formal Phase 3A closure** — `PHASE_PLAN.md` header changed from `IN PROGRESS — §1 spec DONE 2026-05-16` to `DONE 2026-05-19 (v1 → v1.9 #3 + closeout)`. Three architectural pillars all shipped and dogfooded: Data (Phase 1), Define (Phase 2 + 3B), Execute (Phase 3A). No active phase declared; observing real usage to surface the next pain point before picking. v1.9 #4 deferred items (probe oddity, orchestrator opt-in to per-test scripts, dialog fixture race) all explicitly gated on real triggers documented in TODO.md.
+
+**Why:**
+- *(simplification)* Agent B's 4-layer fallback worked but missed the canonical SKILL primitive — `get_filename(piport)` is the same idiom the user's own `skill_tools.il:102` uses for skill_tools self-location. A probe via skillbridge `ws['load']` confirmed it returns the loaded file's absolute path regardless of caller's cwd; that single layer covers the 99% case. Keeping the 4-layer scaffolding for the 1% would be over-engineering after the better primitive was found.
+- *(closure)* "v1.9 #3 followup" already left Phase 3A functionally complete. The remaining v1.9 #4 candidates are all explicit "wait for real driver" — implementing them speculatively would be feature creep with no validated demand. Closing Phase 3A is a documentation event, not a code event; the code has been ready since #70. User chose "扫尾后收" (sweep loose ends then seal) with the cheap-to-land runTests.il simplification being the only "sweep" — the rest defer.
+
+**Design picks (sub-points):**
+
+- **D1 (simplification): `get_filename(piport)` priority is highest, env vars demoted to fallback.** Previously `_PVT_FORCE_ROOT` was layer 1 and env vars layer 2 because the script couldn't self-locate. With self-locate working in 99% of cases, demoting env vars to fallback inverts the right precedence — automatic resolution wins by default, env vars only override when the user has a specific reason.
+- **D2 (simplification): kept `_pvtEnvOrNil` despite no longer being layer-1-critical.** The empty-string env coercion fixes a latent SKILL `or` bug that would silently mis-resolve any user who exported `PVT_TEST_ROOT=""`. Cheap to keep, eliminates a future footgun.
+- **D3 (simplification): removed `_PVT_FORCE_ROOT` entirely.** It was added in #69 specifically as a workaround for the "no self-locate primitive" assumption. With `get_filename(piport)` confirmed working, no caller should need this escape hatch — they can either `load()` normally (auto-resolves) or set env vars (explicit). Removing keeps the API surface minimum.
+- **D4 (simplification): kept the load-time `printf` diagnostics.** The 3-line warning when `pvtError.il` not found at the resolved root is cheap and tells the user exactly what to do. Worth keeping even though it should fire ~never with the new primary path.
+- **D5 (closure): v1.9 #4 items deferred with explicit triggers, not pulled into the closeout.** "Wait for real driver" items have a specific bar (e.g., "a real multi-test consumer with divergent ICs"); when that bar trips, the item gets promoted. Hard-coding them now would be over-engineering against speculative future needs.
+
+**Alternatives considered (all rejected):**
+
+- *(simplification) Keep all 4 layers, just promote `get_filename(piport)` to layer 1.* Adds maintenance surface for fallback layers that should never fire. Reductive shape (1+2) is cleaner.
+- *(simplification) Drop the cwd-default fallback entirely, error loudly when both primary and env fail.* Tempting for purity but breaks any historical user who exported `PVT_TEST_ROOT=""` (treated as "I want default") — those would now hit a hard error instead of silently using the cwd path. Backwards-compatible fallback wins.
+- *(simplification) Strip the trailing slash in `_PVT_REPO_ROOT` to make path output prettier (`simkit/skill` vs `simkit//skill`).* Cosmetic; SKILL filesystem ops normalize `//` to `/` so functionally identical. Added code to fix something users don't see is over-engineering.
+- *(closure) Treat v1.9 #4 as the final v1 of Phase 3A and gate closeout on doing all 4 items.* Two of them are explicit "wait for real driver"; doing them speculatively is feature creep. Per the "don't add features beyond what the task requires" principle.
+
+**Live-verified 2026-05-19** via skillbridge probe:
+
+| Test | Result |
+|---|---|
+| `get_filename(piport)` available in IC6.1.8 | ✓ (returns `/tmp/tmpXXX.il` for a probe .il loaded via `ws['load']`) |
+| Self-locate from `cwd=simkit` repo root | ✓ PASS=462 FAIL=0 SKIP=0 |
+| Self-locate from `cwd=/tmp` | ✓ PASS=462 FAIL=0 SKIP=0 (cwd-independent) |
+| Resolved `_PVT_REPO_ROOT` matches actual repo path (modulo trailing slash) | ✓ `/home/yusheng/cadence_work/Test/workarea/simkit/` |
+| No regression in test count vs. Agent B's 4-layer version | ✓ Both produce 462/0/0 |
+
+**Files touched:**
+- `skill/tests/runTests.il` (-37 LOC: 80 → 43 in the self-locate section)
+- `PHASE_PLAN.md` — header + 30-line closure summary
+- `PROJECT_STATE.md` — top-of-file italic block + new "Current phase" entry
+- `TODO.md` — checkbox + deferred-items section restructured
+- `~/.claude/projects/.../memory/skill_self_locate_via_piport.md` (NEW) — records the `get_filename(piport)` idiom as a permanent SKILL-self-locate recipe.
+
+**Out of scope (Phase 3A v1.9 #4 deferred per "wait for trigger"):**
+- Probe oddity (Test sentinel write didn't visibly land) — trigger: another mysterious sentinel-not-landing case OR free SKILL day
+- Orchestrator opt-in to per-test pre-run scripts — trigger: real multi-test consumer with divergent ICs
+- Dialog fixture race-proofing — trigger: second occurrence
+
+**Phase 3A arc (for the historical record):**
+
+| Version | Date | Headline |
+|---|---|---|
+| v1 | 05-16 | Skeleton: §1-§5 + §6 partial; end-to-end smoke |
+| v1.1 | 05-16 | Submit/Rename split + handle-0 translation |
+| v1.2/v1.3 | 05-17 | `ic_from` cross-item IC piping (single-batch + pre-run script) |
+| v1.4 | 05-18 AM | Baseline-corner preservation + worker-VM socket-steal fix |
+| v1.5 | 05-18 PM | CLI ↔ execute() wiring + rdb-walker discriminator |
+| v1.6 | 05-18 PM | Per-corner FAIL detection + strategy chain |
+| v1.7 | 05-18 EOD | `gmin_bump` strategy + worker-VM asi leak fix |
+| v1.8 | 05-18 EOD | `pvt list history`, `pvt star`, `trans_pss_ic` |
+| v1.9 #1-#2 | 05-18 EOD | `corners push --replace`, auto-probe baseline |
+| v1.9 #3 + followup | 05-19 | additionalArgs snap/restore + 4 closeout items + `'unbound` fix + skillbridge readback discovery |
+| v1.9 #4 closeout | 05-19 | runTests.il `get_filename(piport)` simplification + **Phase 3A DONE** |
+
+19-day execution arc, 22 DECISIONS entries (#50-#71), Python 835→1153 (+318), SKILL Tier-1 407→462 (+55), 0 regressions at close.

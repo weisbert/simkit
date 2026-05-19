@@ -28,7 +28,30 @@ Rationale for going B before A (sim orchestrator): Phase 3A explicitly waits on 
 
 ---
 
-## Phase 3A: simulation orchestrator (IN PROGRESS — §1 spec DONE 2026-05-16)
+## Phase 3A: simulation orchestrator — DONE 2026-05-19 (v1 → v1.9 #3 + closeout)
+
+**Closed at v1.9 #3 + same-day followup + runTests.il `get_filename(piport)` simplification.** Three weakly-coupled pillars of the project — Data (Phase 1) + Define (Phase 2 + 3B) + **Execute (Phase 3A)** — all green. Engineer can now author one `*.review.json` describing N items (tests × union × bundle), `pvt run` drives Maestro through the battery with per-corner FAIL detection + 3 built-in retry strategies (`naive_retry`, `gmin_bump`, `trans_pss_ic`), per-item snapshot/restore protects user's live session, results auto-ingested into the Phase 1 data layer.
+
+**Final ship state (Python 1153/0, SKILL Tier-1 462/0/0, 19-day execution arc):**
+
+- v1 (2026-05-16) skeleton: §1-§5 + §6 partial. End-to-end smoke on fnxSession0.
+- v1.1 (2026-05-16): Submit/Rename split + handle-0 translation + state machine.
+- v1.2/v1.3 (2026-05-17 PM): cross-item IC piping (`ic_from`) via single-batch + Maestro pre-run script. DECISIONS #57.
+- v1.4 (2026-05-18 AM): baseline-corner preservation. DECISIONS #59.
+- v1.4 (2026-05-18 PM): skillbridge worker-VM socket-steal root cause + fix. DECISIONS #60.
+- v1.5 (2026-05-18 PM): CLI ↔ `execute()` wiring + rdb-walker run-completion discriminator. DECISIONS #61.
+- v1.6 (2026-05-18 PM late): per-corner FAIL detection + strategy chain dispatch. DECISIONS #62.
+- v1.7 (2026-05-18 EOD): `gmin_bump` strategy + worker-VM asi state-leak fix. DECISIONS #63.
+- v1.8 (2026-05-18 EOD): `pvt list history` column + `pvt star` lock sync + `trans_pss_ic` strategy. DECISIONS #64-66.
+- v1.9 #1-#2 (2026-05-18 EOD): `corners push --replace` + auto-probe `baseline_value`. DECISIONS #67-68.
+- v1.9 #3 + followup (2026-05-19): additionalArgs snap/restore + per-test pre-run script infra + 3-item chain offline pin + tracer + sys.modules audit + runTests.il loader fix; same-day Tier-1 re-verify caught the `'unbound` SKILL sentinel collision in v1.9 #1's new corners test + the skillbridge `LiteralRemoteFunction` readback trap. DECISIONS #69-70.
+- v1.9 #4 closeout (2026-05-19): runTests.il self-locate via `get_filename(piport)` (4-layer fallback → 1-layer + 2 fallbacks; -37 LOC). DECISIONS #71.
+
+**Deferred to "when needed" — explicit triggers in TODO.md:**
+- Per-test pre-run script orchestrator opt-in (data shape + helper landed; awaits real multi-test consumer with divergent ICs)
+- Probe oddity: `Test` sentinel write didn't visibly land while `Test_trans` did during v1.9 #3 verify (contract held; benign so far)
+- Dialog test fixture race-proofing (awaits second occurrence)
+- Multi-Maestro orchestration / dependency graph / per-test bundle dict (no real driver yet)
 
 **§1 spec frozen** at `docs/phase3a_orchestrator_spec.md`. DECISIONS #50-53. Open questions below resolved during the §1 spec push (see DECISIONS); leaving the original list here for historical context:
 

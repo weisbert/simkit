@@ -15,70 +15,34 @@
 ;; ============================================================================
 
 ;; --------------------------------------------------------------------------
-;; Resolve the on-disk location of THIS script so we can find sibling files
-;; regardless of cwd. Classic SKILL exposes no in-flight "current loading
-;; file" primitive (getAllLoadedFiles only records the file after the load
-;; completes, so it cannot help during the in-flight load that needs the
-;; path NOW), so we layer four strategies, in priority order:
-;;   1. SKILL global `_PVT_FORCE_ROOT` set by the caller before `(load ...)`.
-;;      Useful for skillbridge / Python launchers that compute the path
-;;      from the script name they're about to load.
-;;   2. Env vars PVT_TEST_ROOT / PVT_SKILL_ROOT. Empty-string env values
-;;      are treated as unset because SKILL's (or "" X) returns "" — a
-;;      real-world stumble when callers export blank values "to clear them".
-;;   3. Upward walk from cwd looking for a marker `skill/tests/runTests.il`.
-;;      Handles cwd anywhere inside the simkit checkout, including the
-;;      `cd <simkit> && virtuoso -replay skill/tests/runTests.il` path.
-;;      Also scans `getSkillPath()` entries.
-;;   4. Last-resort: cwd + "/skill[/tests]" (preserves the original
-;;      pre-fix behavior). If layer 4 trips, the subsequent (load ...)
-;;      calls will fail loudly at line 168 with a clear "can't access
-;;      file" error pointing at the bad path printed below.
+;; Resolve sibling-file paths via `get_filename(piport)` (sklangref.pdf —
+;; piport is bound to the input port during a (load ...) call and
+;; get_filename returns the absolute path of the file being read). Same
+;; idiom the user's sibling `skill_tools.il:102` uses. Env vars
+;; PVT_{TEST,SKILL}_ROOT override; cwd default is the last-resort
+;; fallback for the rare interactive-paste case where piport isn't
+;; bound to a file. Empty-string env values coerced to nil because
+;; SKILL's `(or "" X)` returns "" (real-world stumble when callers
+;; export blank values to "clear" them).
 ;; --------------------------------------------------------------------------
 
 (procedure (_pvtEnvOrNil name)
-  "(getShellEnvVar name) returns \"\" both when the var is unset AND when
-   it is exported as the empty string. SKILL's `or` treats \"\" as truthy,
-   so we coerce empty values to nil here."
   (let ((v (getShellEnvVar name)))
     (cond
       ((null v) nil)
       ((zerop (strlen v)) nil)
       (t v))))
 
-(procedure (_pvtFindRepoRoot startDir)
-  "Walk up from startDir looking for the marker `skill/tests/runTests.il`.
-   Returns the directory containing `skill/...` or nil if nothing found
-   within 12 parent levels. simplifyFilename collapses `..` segments so
-   the loop terminates at filesystem root."
-  (let ((dir (simplifyFilename startDir)) (hit nil) (i 0))
-    (while (and (not hit) (lessp i 12) dir (nequal dir ""))
-      (when (isFile (strcat dir "/skill/tests/runTests.il"))
-        (setq hit dir))
-      (let ((parent (simplifyFilename (strcat dir "/.."))))
-        (cond
-          ((equal parent dir) (setq dir nil))   ;; hit filesystem root
-          (t (setq dir parent))))
-      (setq i (plus i 1)))
-    hit))
-
 (defvar _PVT_REPO_ROOT
-  (or
-    ;; (1) caller-set SKILL global override
-    (and (boundp '_PVT_FORCE_ROOT)
-         _PVT_FORCE_ROOT
-         (stringp _PVT_FORCE_ROOT)
-         (not (zerop (strlen _PVT_FORCE_ROOT)))
-         (simplifyFilename _PVT_FORCE_ROOT))
-    ;; (3a) upward walk from cwd
-    (_pvtFindRepoRoot (getWorkingDir))
-    ;; (3b) scan SKILL search path entries
-    (let ((found nil))
-      (foreach p (or (getSkillPath) (list "."))
-        (unless found
-          (let ((cand (_pvtFindRepoRoot p)))
-            (when cand (setq found cand)))))
-      found)))
+  ;; runTests.il lives at <repo>/skill/tests/runTests.il, so three `..`
+  ;; segments off the self path land at <repo>. errset guards
+  ;; CIW-paste / `*ciwInPort*` and other contexts where piport doesn't
+  ;; yield a filesystem path.
+  (let ((self (car (errset (get_filename piport) t))))
+    (cond
+      ((and (stringp self) (isFile self))
+        (simplifyFilename (strcat self "/../../..")))
+      (t nil))))
 
 (defvar PVT_TEST_ROOT
   (or (_pvtEnvOrNil "PVT_TEST_ROOT")
@@ -94,9 +58,8 @@
 (printf "[runTests] PVT_TEST_ROOT=%s\n"  PVT_TEST_ROOT)
 (unless (isFile (strcat PVT_SKILL_ROOT "/pvtError.il"))
   (printf "[runTests] WARNING: %s/pvtError.il not found.\n" PVT_SKILL_ROOT)
-  (printf "[runTests]   To fix: (a) cd into the simkit repo root, OR\n")
-  (printf "[runTests]           (b) (setq _PVT_FORCE_ROOT \"/abs/path/to/simkit\") before (load ...), OR\n")
-  (printf "[runTests]           (c) export PVT_SKILL_ROOT / PVT_TEST_ROOT env vars.\n"))
+  (printf "[runTests]   To fix: load via SKILL `load()` (so get_filename(piport) resolves),\n")
+  (printf "[runTests]           OR export PVT_SKILL_ROOT / PVT_TEST_ROOT before launching virtuoso.\n"))
 
 
 ;; --------------------------------------------------------------------------
