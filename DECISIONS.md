@@ -2084,3 +2084,55 @@ Six concrete deliverables:
 - Add `PyQt5`, `pytest-qt`, `QtAwesome` to `requirements.txt` once Phase 4 §1 spec is written. Re-freeze lock, re-download wheels, re-bundle.
 - Consider adding `pyinstaller` step to scripts/ if standalone binary becomes desirable for non-developer engineers.
 - Document the regen-lock recipe as a `scripts/regen_lock.sh` for one-command bumping. (Currently inline in `scripts/README.md` troubleshooting section.)
+
+---
+
+## #73 — Phase 4 §1 GUI spec freeze + workflow-driven scope corrections
+_Date: 2026-05-19 (post Phase 3A closeout, same day as #72)_
+
+**Decision:** `docs/phase4_gui_spec.md` is the §1 design contract for Phase 4 GUI. PyQt5 desktop + module-centric + 8-capability Tier-1 + 11 binding mandates from agent review. Several earlier decisions corrected by workflow-conversation findings before the spec was written.
+
+**Five corrections to earlier locked decisions** (all surfaced by the 2026-05-19 workflow conversation):
+
+1. **User has NEVER used the `pvt` CLI.** This was an assumption baked into Phase 1-3A — 19 days of "CLI is the user-facing surface, GUI wraps it later". User confirmed verbatim: "cli 我就没用过, 我就想用 GUI". Implication: Phase 4 GUI is not a wrapper for an experienced CLI user; it is the FIRST real entry point. Tier-1 must enable end-to-end signoff in-GUI; "wrap all CLI commands" is wrong framing.
+
+2. **"Design Review" = engineering noun (multi-module), not file noun (one `.review.json`).** User's DR cycle spans NDIV + CP + LDO + …, with each module having multiple review files. Earlier project_phase4_gui_direction memory framed reviews as per-module units; that's correct at the file level but missed the multi-module DR-cycle layer.
+
+3. **PDR / CDR / FDR gates are real and need first-class support.** Same modules revisited at each gate with possibly more corners / tighter specs. Decided architecture: free-string `milestone` tag on runs row (extends existing `★ starred` + Maestro history-lock infra from DECISIONS #65). Avoids file-level explosion (rejected alternative B in conversation: ndiv_pn.cdr.review.json variants) and naming-convention fragility (rejected C).
+
+4. **Diff is core, not auxiliary.** User verbatim: "电路仿真没有对比就没有设计". Diff promoted from Tier-2 to Tier-1 first class. Trigger via explicit "Compare" button + sticky baseline pin (NOT double-click; UX agent B#3 caught this).
+
+5. **Cross-module visibility partially restored to Tier-1.** Original direction deferred all cross-module UI to Tier-2. UX agent B#1 surfaced that the morning ritual ("看看昨天跑了什么 / 有没有 error") is inherently cross-module. Compromise: NOT a full dashboard, but a single-line status strip at the top ("Last 24h: 7 done / 1 running / 2 FAIL"). Low impl cost, addresses the workflow gap.
+
+**Eleven architectural / UX mandates from parallel agent review** (full text in spec §2.1; summary):
+
+| Tag | Source | Mandate |
+|---|---|---|
+| A1 | Arch | Single `BridgeWorker` QObject + request queue; "bridge busy" is GLOBAL state |
+| A2 | Arch | `pvt run` as QProcess + JSONL stdout for progress (not regex); SIGTERM+grace+SIGKILL cancel; partial-run state in DB |
+| A3 | Arch | `QAbstractTableModel` + `QSortFilterProxyModel` everywhere; ban `QTableWidget`; diff model wraps two run_ids |
+| A4 | Arch | `ModuleSession` object holds per-module state; QSettings persistence; restart restores last session |
+| A5 | Arch | Bridge heartbeat every 10s; green/amber/red status dot; one-click restart-bridge runs documented recovery recipe |
+| B1 | UX | Top-bar narrow cross-module status strip (overrides earlier Tier-2 defer) |
+| B2 | UX | "Run this review" button in review-header bar, NOT buried in Run tab |
+| B3 | UX | Explicit Compare button + baseline pin + tabbed diff (spec-delta vs netlist-delta separate) |
+| B4 | UX | Corner editor mirrors Maestro Tools→Corners affordances (add/dup/enable/dropdown) |
+| B5 | UX | Error translation layer; raw text behind "Details" disclosure |
+
+**Why parallel agents (architecture + UX):** Single-perspective review misses half the failure modes. Architecture review didn't catch UX cliffs (e.g. "Run button buried in tab"); UX review didn't catch bridge-socket-corruption-on-concurrent-call. Two-agent cross-validation surfaced consensus items (bridge errors need both proactive heartbeat AND error translation — A5 + B5) that single review would have under-scoped.
+
+**Tier-1 scope (8 user capabilities):** view results / run review / diff / edit corners / edit measures / tag milestone / copy-edit review / from-scratch wizard. Wizard is in Tier-1 per user's explicit ask ("从零向导的 wizard 我也要的"). Cross-cutting: status strip + bridge worker + error translation + module session persistence.
+
+**Tier-2 deferred (do not implement in v1):** full cross-module dashboard, multi-window, charts, richer run-progress (gantt/ETA), `pvt corners explode` / `validate` / `install-builtins` GUI surface, cross-project review sharing.
+
+**Schema migrations needed for v1:**
+
+- `runs.milestone VARCHAR DEFAULT NULL` (free-string milestone tag) — DuckDB schema v3 → v4.
+- `runs.partial_run BOOLEAN DEFAULT FALSE` (set by cancelled QProcess) — same migration.
+- Optional: `runs.started_ts TIMESTAMPTZ` if existing `timestamp` semantics don't fit running-vs-done queries for the status strip.
+
+**Open questions / parking-lot items (spec §20):** wizard's testbench-list source for offline drafting; multi-monitor; theme; i18n; keyboard shortcuts; offline-Virtuoso read-only mode details.
+
+**Suggested impl order (spec §21):** deps → app skeleton + bridge + heartbeat → view results → run path → diff → corner editor → measure editor → milestone + status strip → wizard → polish + dogfood gate.
+
+**Acceptance gate:** Phase 4 is "done" when user has completed one real signoff cycle entirely inside the GUI (not "all tests pass" — running tool must satisfy real workflow).

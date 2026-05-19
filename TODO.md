@@ -333,3 +333,111 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 - **Item dependency graph** — `depends_on: [item_name]`. Promote when "干扰仿真 must wait for PSS pass" type workflow surfaces.
 - **Multi-Maestro orchestration** — one review driving N parallel Maestro sessions.
 - **Report generator** — PDF/HTML with waveform PNG attachments. Its own phase per `PHASE_PLAN.md`.
+
+---
+
+## Phase 4 — GUI / Adoption Layer (KICKED OFF 2026-05-19)
+
+**Goal:** PyQt5 desktop GUI as the **first real user entry point** for simkit. User (analog IC designer) has never used the `pvt` CLI; Tier-1 must enable one complete signoff cycle entirely inside the GUI. Spec at `docs/phase4_gui_spec.md` (DECISIONS #73).
+
+### §1. Specification (no code yet — pure documentation)
+
+- [x] `docs/phase4_gui_spec.md` — 22-section design contract (problem statement, locked decisions, Tier-1/Tier-2 scope, layout, module session lifecycle, bridge layer, subprocess layer, diff workflow, corner editor, measure editor, run progress, wizard, milestone tagging, status strip, CLI entry, tests, deployment, open questions, impl order). 558 lines. DECISIONS #73.
+- [x] User workflow learnings captured in DECISIONS #73 (never-used-CLI, multi-module DR cycle, PDR/CDR/FDR gates, diff-is-core, partial cross-module restore).
+- [x] Two parallel design-review agents (architecture + UX) ran before spec writing; all 10 recommendations absorbed into §2.1 mandates (A1-A5, B1-B5).
+- [x] 6 ASCII-mockup open decisions + 2 deeper workflow questions all answered before spec writing.
+
+### §2. Deployment pipeline integration (PyQt5 deps)
+
+- [ ] Add `PyQt5==5.15.9` + `pytest-qt==4.5.0` + `QtAwesome==1.4.2` to `requirements.txt`.
+- [ ] Re-freeze `requirements.lock.txt` via `pip freeze --all`.
+- [ ] On yellow Windows: re-run `scripts/download_wheels.py` for the new wheels (PyQt5 wheel is ~50MB single file).
+- [ ] Bundle fresh tarball via `scripts/make_payload.py`.
+- [ ] On red Linux: deploy via `scripts/unpack_payload.sh` + `deploy_venv.sh`; verify `pvt gui --help` works in the new venv.
+
+### §3. App skeleton (architecture proves out)
+
+- [ ] `python/simkit/gui/` package created with `__init__.py` + `app.py` (`main()` entry).
+- [ ] `pvt gui` subcommand in `python/simkit/cli/gui.py` → calls `simkit.gui.app.main()`.
+- [ ] `MainWindow` with top bar (module selector placeholder), status strip placeholder, left tree placeholder, right panel placeholder, bottom log.
+- [ ] `BridgeWorker` singleton on dedicated QThread per spec §8 (A1 + A5). Heartbeat every 10s; status dot wired to top bar.
+- [ ] `ModuleSession` dataclass + serializer per spec §7 (A4).
+- [ ] `~/.simkit/gui_app.json` global state + `.simkit/gui_state.json` per-module state read/write.
+- [ ] Unit tests for ModuleSession + BridgeWorker (mock bridge) + state persistence round-trip.
+- [ ] **Verification gate:** `pvt gui` boots an empty shell window with green bridge status dot when Virtuoso is running, red when not. App restart restores last-visited module.
+
+### §4. View results path
+
+- [ ] Left tree: Reviews / Milestones / History groups with proper data binding.
+- [ ] Results tab: `ResultsModel(QAbstractTableModel)` + `QSortFilterProxyModel` per spec §10/A3.
+- [ ] Review header bar with "Run this review" button (B2) per spec §6.1.
+- [ ] Results table: corner × test × measure × pass/fail/spec/spec_status columns.
+- [ ] Failed-corner highlight via `BackgroundRole`.
+- [ ] Widget tests (pytest-qt) for table rendering.
+
+### §5. Run path (subprocess + JSONL progress)
+
+- [ ] `pvt run --gui-jsonl` CLI flag (additive) — emits structured progress events per spec §9.2.
+- [ ] `GuiEventEmitter` hooked into `_run_strategy_chain` + post-PvtSave.
+- [ ] `RunController` (Python class) spawns QProcess, parses JSONL events, emits Qt signals.
+- [ ] Run progress UI per spec §13 (items kanban + text log streaming to bottom panel).
+- [ ] Cancel semantics per spec §9.3 (SIGTERM + 5s grace + SIGKILL + partial_run DB flag).
+- [ ] DuckDB schema migration: `runs.partial_run BOOLEAN DEFAULT FALSE`.
+- [ ] Live-verified end-to-end on fnxSession0: pick review → click Run → progress UI updates → results populate when done → cancel mid-run leaves partial state correctly tagged.
+
+### §6. Diff path
+
+- [ ] `DiffResultsModel(QAbstractTableModel)` wraps two run_ids per spec §10.3.
+- [ ] "Compare" button on every run row in History + Results header (B3).
+- [ ] Run-picker dialog (filterable list) for compare-against selection.
+- [ ] Baseline pin in Results header; per-module sticky.
+- [ ] Diff view = new right-panel tab with sub-tabs (Spec delta / Netlist delta / Spec-string delta).
+- [ ] Color coding: pass→fail red, fail→pass green, value-change-only yellow, unchanged grey.
+- [ ] "Show only changed" filter via QSortFilterProxyModel.
+
+### §7. Corner editor
+
+- [ ] Corners tab content: table editor with add-row / duplicate-row / per-row enable checkbox / per-cell dropdown (B4).
+- [ ] "Sync from Maestro" / "Send to Maestro" buttons with last-sync timestamp.
+- [ ] Live-vs-sidecar divergence yellow strip on tab open.
+- [ ] Live validation (cell highlight on invalid).
+- [ ] Push via BridgeWorker → `pvt_corners_push --replace`.
+
+### §8. Measure bundle editor
+
+- [ ] Measures tab content: split pane (edit / live render preview right sidebar).
+- [ ] Template picker + signal-group picker + param entry per spec §12.
+- [ ] Live render preview re-renders on edit; show render errors inline.
+- [ ] Apply to Maestro disabled while render shows errors.
+
+### §9. Milestone + status strip
+
+- [ ] DuckDB schema migration: `runs.milestone VARCHAR DEFAULT NULL`. Schema v3 → v4.
+- [ ] Right-click run → "Set milestone…" with autocomplete from existing milestone strings.
+- [ ] Milestone-set triggers star+lock round-trip via BridgeWorker.
+- [ ] Left-tree Milestones group with counters + filter behavior.
+- [ ] Top-bar status strip per spec §16: 30s DuckDB query, FAIL chips with click-to-jump.
+
+### §10. Review wizard + copy-edit
+
+- [ ] "Copy as…" right-click action: form editor pre-populated from existing review.
+- [ ] Wizard: step 1 project/name, step 2 items (multi-select tests via bridge, file pickers for union/bundle), step 3 failure handling, step 4 review/save.
+- [ ] `simkit.review.validate` run before write; errors inline.
+
+### §11. Error translation + polish
+
+- [ ] `simkit/gui/error_translation.py` with curated known-error table per spec §8.3.
+- [ ] "Details" disclosure for raw error text.
+- [ ] Unknown errors fall through with "Report this" link.
+
+### §12. Dogfood acceptance gate
+
+- [ ] User completes one real signoff cycle (e.g. NDIV PDR or CDR pass) entirely inside the GUI on red zone.
+- [ ] Until this gate clears, Tier-2 work (cross-module dashboard, charts, etc.) is locked.
+
+### Phase 4 open decisions (spec §20 parking lot — pick up when they bite):
+
+- [ ] Wizard testbench-list source for offline drafting (current Tier-1: live bridge fetch).
+- [ ] Multi-monitor / theme / i18n (locale files for translation table).
+- [ ] Keyboard shortcuts default set + help dialog.
+- [ ] Offline-Virtuoso read-only mode details.
