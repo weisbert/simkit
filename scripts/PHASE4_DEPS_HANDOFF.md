@@ -24,6 +24,16 @@ git pull
 
 ## Step 2 — yellow Windows: fetch new wheels + bundle
 
+> **First-time / deps-changed:** full payload (with wheels).
+> **Code-only iteration (no requirements.txt change):** use `--no-wheels` — skips the 70 MB wheel bundle. Red zone reuses wheels from the prior deploy. See "Code-only iteration" section at the bottom.
+
+> **One-time after this commit lands:** yellow's working tree may have CRLF-converted `*.sh` files from before `.gitattributes` existed. Run this once to renormalize:
+> ```bash
+> git pull
+> git add --renormalize .
+> git checkout -- .
+> ```
+
 ```bash
 cd simkit
 git pull
@@ -89,6 +99,31 @@ rebuild the venv from scratch.
 
 ---
 
+## Code-only iteration (no requirements.txt change)
+
+When you only changed Python / SKILL / docs / configs — no `requirements*.txt`
+diff — skip the 70 MB wheel bundle:
+
+```bash
+# Yellow
+cd simkit && git pull
+python scripts/make_payload.py --no-wheels
+# → dist/simkit_<date>_<sha>_code.tar.gz  (few MB, no vendor/wheels/)
+```
+
+```bash
+# Red
+bash $SIMKIT_DEPLOYS_DIR/current/scripts/unpack_payload.sh /path/to/simkit_<...>_code.tar.gz
+# unpack auto-copies wheels from <deploys>/current/vendor/wheels/ into the new deploy.
+cd $SIMKIT_DEPLOYS_DIR/simkit_<...>_code
+bash scripts/deploy_venv.sh
+```
+
+Hard requirement: a prior **full-payload** deploy must exist as `<deploys>/current/`.
+If not, `unpack_payload.sh` exits with code 5 and tells you to do a full deploy first.
+
+---
+
 ## Notes
 
 - **Display required for actually launching `pvt gui`** — Qt needs a
@@ -98,5 +133,8 @@ rebuild the venv from scratch.
 - **No changes to the 3 deploy scripts were needed.** They read from
   `requirements.lock.txt` and `vendor/wheels/` generically — adding
   wheels to the lock is the only required action.
+- **Line endings:** `.gitattributes` forces LF on `*.sh` / `*.py` so
+  yellow Windows can't bake CRLF into the tarball. `unpack_payload.sh`
+  also strips CRLF defensively post-extract — double safety net.
 - **Optional cleanup later:** `bash $SIMKIT_DEPLOYS_DIR/current/scripts/cleanup_deploys.sh --keep 3 --dry-run`
   to preview removing older Phase 3 deploys.

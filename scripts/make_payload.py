@@ -160,6 +160,15 @@ def main() -> int:
         help="Skip the 'vendor/wheels must contain *.whl' precheck",
     )
     parser.add_argument(
+        "--no-wheels",
+        action="store_true",
+        help=(
+            "Skip vendor/wheels entirely — produces a code-only payload "
+            "(~MB, not ~70 MB). Red zone reuses wheels from <deploys>/current/. "
+            "Tarball name gets '_code' suffix."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -167,27 +176,33 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Precheck: vendor/wheels must have content (unless overridden)
+    # Precheck: vendor/wheels must have content (unless overridden OR --no-wheels)
     wheels_dir = REPO_ROOT / "vendor" / "wheels"
-    if not args.allow_empty_wheels:
+    if not args.allow_empty_wheels and not args.no_wheels:
         if not wheels_dir.exists() or not list(wheels_dir.glob("*.whl")):
             print(
                 f"ERROR: {wheels_dir.relative_to(REPO_ROOT)} is empty or missing.\n"
                 f"Run scripts/download_wheels.py first, or pass "
-                f"--allow-empty-wheels to override.",
+                f"--allow-empty-wheels to override, or --no-wheels for a "
+                f"code-only payload (reuses wheels from prior red-zone deploy).",
                 file=sys.stderr,
             )
             return 2
+
+    # Filter INCLUDE: drop vendor/wheels when --no-wheels
+    include_paths = [p for p in INCLUDE if not (args.no_wheels and p == "vendor/wheels")]
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     sha = get_short_sha()
     date = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
-    stem = args.name or f"simkit_{date}_{sha}"
+    default_stem = f"simkit_{date}_{sha}_code" if args.no_wheels else f"simkit_{date}_{sha}"
+    stem = args.name or default_stem
     archive_path = args.output_dir / f"{stem}.tar.gz"
     manifest_path = args.output_dir / f"{stem}.manifest.txt"
 
-    print(f"[make_payload] Building {archive_path.relative_to(REPO_ROOT)}")
+    mode_banner = "CODE-ONLY (no wheels)" if args.no_wheels else "FULL (with wheels)"
+    print(f"[make_payload] Building {archive_path.relative_to(REPO_ROOT)}  [{mode_banner}]")
 
     # Pack into a temporary file first, then rename — avoids leaving a
     # half-written tarball on disk if the build is interrupted.
@@ -196,7 +211,7 @@ def main() -> int:
 
     filt = make_filter(verbose=args.verbose)
     with tarfile.open(tmp_path, "w:gz") as tar:
-        for path_str in INCLUDE:
+        for path_str in include_paths:
             src = REPO_ROOT / path_str
             if not src.exists():
                 print(f"  (skipped — not found: {path_str})")
@@ -221,6 +236,7 @@ def main() -> int:
 
     with manifest_path.open("w") as f:
         f.write(f"Payload:    {archive_path.name}\n")
+        f.write(f"Mode:       {'code-only' if args.no_wheels else 'full'}\n")
         f.write(f"Size:       {size_bytes} bytes ({size_mb:.2f} MB)\n")
         f.write(f"SHA256:     {sha256}\n")
         f.write(f"Members:    {members_count}\n")
@@ -230,7 +246,7 @@ def main() -> int:
                 f"{os.uname().nodename if hasattr(os, 'uname') else 'unknown'}\n")
 
     print()
-    print(f"[make_payload] Done.")
+    print(f"[make_payload] Done.  [{mode_banner}]")
     print(f"  Archive:  {archive_path}")
     print(f"  Size:     {size_mb:.2f} MB ({members_count} members)")
     print(f"  SHA256:   {sha256}")
@@ -242,6 +258,11 @@ def main() -> int:
     print(f"       {manifest_path.name}")
     print(f"  2. On red zone:")
     print(f"       bash scripts/unpack_payload.sh {archive_path.name}")
+    if args.no_wheels:
+        print()
+        print("  NOTE: code-only payload — unpack_payload.sh will copy wheels")
+        print("        from <deploys>/current/vendor/wheels/ automatically.")
+        print("        Requires a prior full-payload deploy to exist.")
     return 0
 
 

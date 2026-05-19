@@ -18,6 +18,7 @@
 #   2  tarball file not found
 #   3  SHA256 mismatch
 #   4  extraction failed
+#   5  code-only payload but no wheels found in <deploys>/current/
 
 set -euo pipefail
 
@@ -46,7 +47,7 @@ Examples:
 The script looks for a sibling <payload>.manifest.txt and verifies the
 SHA256 if found. Missing manifest = skipped verification with a warning.
 
-Exit codes: 0 ok / 1 usage / 2 not found / 3 checksum / 4 extract fail
+Exit codes: 0 ok / 1 usage / 2 not found / 3 checksum / 4 extract / 5 no-wheels missing prior deploy
 EOF
     exit 1
 }
@@ -135,10 +136,39 @@ fi
 echo "[unpack] Extracting to $TARGET"
 tar -xzf "$TARBALL" -C "$TARGET"
 
+# Defensive: strip CRLF from text scripts. Belt-and-suspenders behind
+# .gitattributes — if yellow zone ever bakes CRLF back in (stale working
+# tree before .gitattributes lands), this keeps red zone unblocked.
+if [[ -d "$EXTRACT_PATH/scripts" ]]; then
+    find "$EXTRACT_PATH/scripts" -type f \( -name "*.sh" -o -name "*.py" \) \
+        -exec sed -i 's/\r$//' {} +
+fi
+
 # Make scripts executable (tarfile preserves bits but defensively chmod)
 if [[ -d "$EXTRACT_PATH/scripts" ]]; then
     chmod +x "$EXTRACT_PATH"/scripts/*.sh 2>/dev/null || true
     chmod +x "$EXTRACT_PATH"/scripts/*.py 2>/dev/null || true
+fi
+
+# Code-only payload — copy wheels from the prior deploy (current/).
+# Detected by: vendor/wheels/ missing OR empty in extracted tree.
+WHEELS_DIR="$EXTRACT_PATH/vendor/wheels"
+if [[ ! -d "$WHEELS_DIR" ]] || ! compgen -G "$WHEELS_DIR/*.whl" > /dev/null; then
+    PRIOR_WHEELS="$TARGET/current/vendor/wheels"
+    if [[ -d "$PRIOR_WHEELS" ]] && compgen -G "$PRIOR_WHEELS/*.whl" > /dev/null; then
+        echo "[unpack] Code-only payload detected — wheels missing in tarball."
+        mkdir -p "$WHEELS_DIR"
+        # Use cp -L to dereference any symlinks in the source.
+        cp -L "$PRIOR_WHEELS"/*.whl "$WHEELS_DIR/"
+        WHEEL_COUNT=$(ls "$WHEELS_DIR"/*.whl 2>/dev/null | wc -l)
+        echo "[unpack]   copied $WHEEL_COUNT wheels from $PRIOR_WHEELS"
+    else
+        echo "ERROR: code-only payload but no wheels available." >&2
+        echo "       Looked at: $PRIOR_WHEELS" >&2
+        echo "       Do a full payload deploy first (without --no-wheels) to" >&2
+        echo "       seed wheels into <deploys>/current/." >&2
+        exit 5
+    fi
 fi
 
 echo ""

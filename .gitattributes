@@ -1,0 +1,28 @@
+# Force LF line endings for all text files, regardless of platform.
+#
+# Why: yellow zone is Windows. Without this, git's default core.autocrlf
+# on Windows rewrites .sh checkouts as CRLF, which make_payload.py then
+# bakes into the tarball — red zone bash chokes on `set -euo pipefail\r`.
+#
+# `text=auto` lets git auto-detect text vs binary; `eol=lf` forces LF on
+# anything detected as text. Explicit overrides below for common binary
+# extensions to short-circuit detection.
+
+* text=auto eol=lf
+
+# Shell + Python: belt-and-suspenders — explicit even though text=auto catches them.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.il   text eol=lf
+*.ils  text eol=lf
+
+# Binary — never touch line endings
+*.whl    binary
+*.tar.gz binary
+*.gz     binary
+*.zip    binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.pdf    binary
+*.duckdb binary
