@@ -119,7 +119,13 @@ class RunController(QObject):
             self.error.emit("RunController: another run is in flight; ignored.")
             return False
 
+        # Bug #1 (2026-05-19): force unbuffered stdout so the child Python
+        # flushes JSONL events line-by-line into the QProcess pipe. Without
+        # -u, CPython block-buffers stdout (~8 KB) when stdout is not a tty,
+        # so item_started / item_completed events all arrive in one burst
+        # at subprocess exit and the kanban row appears stuck on "pending".
         argv = [
+            "-u",
             "-m", "simkit.cli", "run", review_path,
             "--session", session, "--gui-jsonl",
         ]

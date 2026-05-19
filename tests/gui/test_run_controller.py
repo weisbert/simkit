@@ -156,6 +156,28 @@ class StartRunGuardTests(unittest.TestCase):
         msg = c.error.emit.call_args.args[0]
         self.assertIn("another run", msg)
 
+    def test_start_run_uses_unbuffered_python(self):
+        """Bug #1 (2026-05-19): argv must include ``-u`` so the child
+        Python flushes JSONL events line-by-line. Without ``-u``, CPython
+        block-buffers stdout (~8 KB) and the GUI sees ``item_started``
+        and ``item_completed`` arrive together at subprocess exit — the
+        kanban row appears stuck at "pending"."""
+        c = _make_controller_bypass()
+        with mock.patch("simkit.gui.controllers.run.QProcess") as MockQProc:
+            proc = MockQProc.return_value
+            proc.waitForStarted.return_value = True
+            ok = c.start_run("r.review.json", session="s")
+        self.assertTrue(ok)
+        args, _ = proc.start.call_args
+        argv = args[1]
+        self.assertIn("-u", argv, msg=f"argv={argv}")
+        # ``-u`` is a Python interpreter flag — it must precede ``-m``.
+        self.assertLess(
+            argv.index("-u"),
+            argv.index("-m"),
+            msg=f"-u must come before -m; argv={argv}",
+        )
+
 
 class SubprocessIntegrationTests(unittest.TestCase):
     """Spawn a real ``python -c`` subprocess via QProcess + drain JSONL."""

@@ -253,7 +253,7 @@
   ;; Calling this against a still-finalising setupdb is the documented
   ;; route to ASSEMBLER-2423 (DECISIONS #54 #5/#6). Returns the actual
   ;; post-rename name (in case Maestro mangles it).
-  (prog (sessR sessName newHist hname)
+  (prog (sessR sessName newHist hname rc)
     (cond
       ((or (null historyName) (not (stringp historyName)) (equal historyName ""))
         (return (pvtErr 'pvt_validation
@@ -268,9 +268,27 @@
       ((null newHist)
         (return (pvtErr 'pvt_runner_rename
                         "axlGetCurrentHistory returned nil"))))
-    (errset (axlSetHistoryName newHist historyName) nil)
+    ;; Bug #2 (2026-05-19): the rename used to be wrapped in errset/nil,
+    ;; which silently swallowed failures and left Maestro showing the
+    ;; auto-assigned "Interactive.<N>" label. Now surface the failure so
+    ;; the Python side raises pvt_runner_rename instead of pretending OK.
+    (setq rc (errset (axlSetHistoryName newHist historyName) nil))
+    (cond
+      ((null rc)
+        (return (pvtErr 'pvt_runner_rename
+                        (lsprintf "axlSetHistoryName failed (hist %L, name %L)"
+                                  newHist historyName)))))
     (setq hname (errset (axlGetHistoryName newHist) nil))
-    (setq hname (cond ((listp hname) (car hname)) (t historyName)))
+    (setq hname (cond ((listp hname) (car hname)) (t nil)))
+    (cond
+      ((null hname)
+        (return (pvtErr 'pvt_runner_rename
+                        (lsprintf "axlGetHistoryName returned nil after rename to %L"
+                                  historyName))))
+      ((not (equal hname historyName))
+        ;; Maestro accepted the rename but mangled it (e.g. duplicate
+        ;; collision -> name.1). Return the actual name; caller decides.
+        (return (pvtOk hname))))
     (return (pvtOk hname))))
 
 
