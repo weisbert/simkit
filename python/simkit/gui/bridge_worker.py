@@ -233,6 +233,7 @@ class BridgeWorker(QObject):
     # the emit thread differs from the worker thread).
     _op_queued = pyqtSignal(object)  # BridgeOp -> _dispatch
     _stop_requested = pyqtSignal()   # () -> _cleanup
+    _restart_requested = pyqtSignal()  # () -> _restart_local (spec A5)
 
     def __init__(
         self,
@@ -257,6 +258,7 @@ class BridgeWorker(QObject):
         # a worker thread.
         self._op_queued.connect(self._dispatch)
         self._stop_requested.connect(self._cleanup)
+        self._restart_requested.connect(self._restart_local)
 
     # --- public API (thread-safe) ----------------------------------------
 
@@ -285,6 +287,22 @@ class BridgeWorker(QObject):
         so cleanup runs before quit.
         """
         self._stop_requested.emit()
+
+    def restart(self) -> None:
+        """Request an immediate bridge re-probe (spec A5). Thread-safe.
+
+        Clears the failure counter and fires a heartbeat NOW instead of
+        waiting up to ``HEARTBEAT_INTERVAL_SEC`` for the next tick. Used
+        by the MainWindow "Restart bridge" button when the user has
+        re-launched the Cadence pyServer (e.g. ``(pyKillServer)
+        (pyStartServer ?python "/usr/bin/python3")`` in CIW).
+
+        Does NOT re-import :mod:`simkit.skill_bridge` — each bridge call
+        opens its own :class:`skillbridge.Workspace`, so there is no
+        cached socket to invalidate; only the worker's status state
+        needs to be primed.
+        """
+        self._restart_requested.emit()
 
     @property
     def is_busy(self) -> bool:
@@ -380,6 +398,21 @@ class BridgeWorker(QObject):
         if self._heartbeat_timer is not None:
             self._heartbeat_timer.stop()
             self._heartbeat_timer = None
+
+    @pyqtSlot()
+    def _restart_local(self) -> None:
+        """Worker-thread-local restart: reset state + immediate probe.
+
+        Connected to ``_restart_requested``. Mirrors the AMBER pre-probe
+        state and then runs one heartbeat synchronously so the dot flips
+        as soon as the bridge is healthy again.
+        """
+        self._consec_fails = 0
+        self._last_heartbeat_ok_at = None
+        if self._status != BridgeStatus.AMBER:
+            self._status = BridgeStatus.AMBER
+            self.status_changed.emit(BridgeStatus.AMBER)
+        self.heartbeat_tick()
 
     @pyqtSlot()
     def heartbeat_tick(self) -> None:

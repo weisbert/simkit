@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QTabWidget,
     QTextEdit,
@@ -127,8 +128,27 @@ class MainWindow(QMainWindow):
         self.status_dot = QLabel(objectName="statusDot")
         self.status_dot.setFixedSize(14, 14)
         self.status_dot.setToolTip("Bridge status")
-        self.set_bridge_status(BridgeStatus.AMBER)
         top_bar_layout.addWidget(self.status_dot)
+
+        # Spec A5: visible "Restart bridge" affordance. Always shown so
+        # the user can also force a re-probe on AMBER without waiting
+        # for the next 10s heartbeat tick. Visually emphasized in RED
+        # state via set_bridge_status() below.
+        self.restart_bridge_button = QPushButton(
+            "Restart bridge", objectName="restartBridgeButton",
+        )
+        self.restart_bridge_button.setToolTip(
+            "Re-probe the Cadence SKILL bridge. If the bridge stays RED "
+            "after clicking, the Cadence pyServer is down — run "
+            "(pyKillServer)(pyStartServer ?python \"/usr/bin/python3\") "
+            "in the CIW and click again."
+        )
+        self.restart_bridge_button.setVisible(False)
+        self.restart_bridge_button.clicked.connect(self._on_restart_bridge_clicked)
+        top_bar_layout.addWidget(self.restart_bridge_button)
+
+        # Initialize visual state (status dot + button visibility).
+        self.set_bridge_status(BridgeStatus.AMBER)
 
         # --- status strip (spec B1) -------------------------------------
         self.status_strip = QLabel("Last 24h: -", objectName="statusStrip")
@@ -214,6 +234,39 @@ class MainWindow(QMainWindow):
             f"background-color: {color}; border-radius: 7px;"
         )
         self.status_dot.setToolTip(f"Bridge: {status.value}")
+        # Spec A5: button is hidden when GREEN (no need to restart),
+        # visible + plain on AMBER (something flickering, user can probe
+        # early), and prominent on RED (clearly broken, one-click rescue).
+        self._bridge_status = status
+        if status == BridgeStatus.GREEN:
+            self.restart_bridge_button.setVisible(False)
+        else:
+            self.restart_bridge_button.setVisible(True)
+            if status == BridgeStatus.RED:
+                self.restart_bridge_button.setStyleSheet(
+                    "QPushButton { color: white; background-color: #c0392b; "
+                    "border: 1px solid #962d22; border-radius: 4px; "
+                    "padding: 2px 8px; font-weight: bold; }"
+                )
+            else:  # AMBER
+                self.restart_bridge_button.setStyleSheet(
+                    "QPushButton { padding: 2px 8px; }"
+                )
+
+    def _on_restart_bridge_clicked(self) -> None:
+        """Spec A5: user-initiated bridge re-probe.
+
+        Forwards to :meth:`BridgeWorker.restart`. If the worker hasn't
+        been wired yet (early in the app boot), no-ops silently — the
+        button only becomes interactive after ``set_bridge_worker``
+        flips status off GREEN.
+        """
+        worker = getattr(self, "_worker", None)
+        if worker is None:
+            self.append_log("[bridge] restart requested before worker wired; ignored")
+            return
+        self.append_log("[bridge] manual restart requested by user")
+        worker.restart()
 
     def append_log(self, line: str) -> None:
         self.bottom_log.append(line)

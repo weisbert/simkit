@@ -99,6 +99,66 @@ def test_measures_apply_requested_logs_row_count(qtbot):
     assert "3 rendered rows" in text
 
 
+# --- Spec A5: Restart bridge button ------------------------------------------
+
+def test_restart_bridge_button_hidden_when_green(qtbot):
+    from simkit.gui.bridge_worker import BridgeStatus
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.set_bridge_status(BridgeStatus.GREEN)
+    assert w.restart_bridge_button.isVisible() is False, (
+        "When bridge is healthy, the restart affordance must not clutter the top bar."
+    )
+
+
+def test_restart_bridge_button_visible_when_amber(qtbot):
+    from simkit.gui.bridge_worker import BridgeStatus
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.show()  # widgets need a visible parent to report isVisible() truthfully
+    w.set_bridge_status(BridgeStatus.AMBER)
+    assert w.restart_bridge_button.isVisible() is True
+
+
+def test_restart_bridge_button_visible_and_emphasized_when_red(qtbot):
+    from simkit.gui.bridge_worker import BridgeStatus
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.show()
+    w.set_bridge_status(BridgeStatus.RED)
+    assert w.restart_bridge_button.isVisible() is True
+    style = w.restart_bridge_button.styleSheet()
+    # Red theming + bold to draw the eye in the broken state.
+    assert "bold" in style.lower()
+    assert "c0392b" in style.lower() or "red" in style.lower()
+
+
+def test_restart_bridge_button_click_invokes_worker_restart(qtbot):
+    from unittest import mock as _mock
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    # Inject a fake worker to capture restart() — set_bridge_worker also
+    # wires controllers + does auto-detect probes, so go direct.
+    fake_worker = _mock.MagicMock()
+    w._worker = fake_worker
+    w._on_restart_bridge_clicked()
+    fake_worker.restart.assert_called_once_with()
+
+
+def test_restart_bridge_button_click_without_worker_is_safe(qtbot):
+    # Early in app boot the worker hasn't been wired yet. Clicking must
+    # not crash; it should log + return.
+    w = MainWindow()
+    qtbot.addWidget(w)
+    assert w._worker is None, "precondition: worker not wired yet"
+    w._on_restart_bridge_clicked()  # must not raise
+    assert "restart requested before worker" in w.bottom_log.toPlainText().lower()
+
+
 def test_sanitize_history_prefix_drops_punctuation():
     from simkit.gui.main_window import _sanitize_history_prefix
 

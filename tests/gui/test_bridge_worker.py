@@ -76,6 +76,7 @@ def _make_worker(bridge_module: Any, *, clock=None) -> BridgeWorker:
     worker.status_changed = mock.MagicMock(name="status_changed")
     worker._op_queued = mock.MagicMock(name="_op_queued")
     worker._stop_requested = mock.MagicMock(name="_stop_requested")
+    worker._restart_requested = mock.MagicMock(name="_restart_requested")
     return worker
 
 
@@ -286,6 +287,59 @@ class HeartbeatTests(unittest.TestCase):
         worker.heartbeat_tick()
         # The probe must NOT have fired (single-stream socket rule).
         bridge.evalstring.assert_not_called()
+
+
+class RestartTests(unittest.TestCase):
+    """Spec A5: user-initiated bridge re-probe."""
+
+    def test_restart_emits_restart_requested(self):
+        worker = _make_worker(bridge_module=mock.MagicMock())
+        worker.restart()
+        worker._restart_requested.emit.assert_called_once_with()
+
+    def test_restart_local_from_red_resets_and_reprobes(self):
+        """After 3 fails the worker is RED. ``_restart_local`` must clear
+        the failure counter, drop status to AMBER, and probe immediately —
+        so a successful probe instantly flips back to GREEN."""
+        bridge = mock.MagicMock()
+        bridge.evalstring.side_effect = RuntimeError("dead")
+        clock = [100.0]
+        worker = _make_worker(bridge_module=bridge, clock=lambda: clock[0])
+
+        # Drive into RED.
+        for _ in range(RED_AFTER_FAILS):
+            worker.heartbeat_tick()
+        self.assertEqual(worker.status, BridgeStatus.RED)
+        worker.status_changed.emit.reset_mock()
+
+        # User restarts the bridge in CIW (or just clicks the button
+        # before the server is healthy — same code path).
+        bridge.evalstring.side_effect = None
+        bridge.evalstring.return_value = "t"
+        worker._restart_local()
+
+        # AMBER pre-probe + GREEN post-probe both emit.
+        emit_calls = worker.status_changed.emit.call_args_list
+        self.assertEqual(
+            [c.args[0] for c in emit_calls],
+            [BridgeStatus.AMBER, BridgeStatus.GREEN],
+        )
+        self.assertEqual(worker.status, BridgeStatus.GREEN)
+        self.assertEqual(worker._consec_fails, 0)
+
+    def test_restart_local_from_amber_stays_amber_if_probe_still_fails(self):
+        bridge = mock.MagicMock()
+        bridge.evalstring.side_effect = RuntimeError("still dead")
+        worker = _make_worker(bridge_module=bridge)
+        # Pretend we already had one fail (AMBER state).
+        worker._consec_fails = 1
+        worker._status = BridgeStatus.AMBER
+
+        worker._restart_local()
+
+        # Counter resets to 0, then the probe bumps it back to 1 — still AMBER.
+        self.assertEqual(worker._consec_fails, 1)
+        self.assertEqual(worker.status, BridgeStatus.AMBER)
 
 
 class CleanupTests(unittest.TestCase):
