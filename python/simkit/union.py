@@ -295,10 +295,16 @@ def _validate_model_entry(
     )
 
     file_abs = raw.get("_file_abs")
-    if file_abs is not None and (not isinstance(file_abs, str) or file_abs == ""):
+    if file_abs is not None and not isinstance(file_abs, str):
         raise UnionValidationError(
-            f"{where}: '_file_abs' must be a non-empty string if present"
+            f"{where}: '_file_abs' must be a string if present (got "
+            f"{type(file_abs).__name__})"
         )
+    # Empty string is treated as "not resolved" — the SKILL pull side leaves
+    # _file_abs blank for multi-section rows it can't disambiguate, and a
+    # missing absolute path is informational, not a load blocker.
+    if file_abs == "":
+        file_abs = None
 
     return (
         ModelEntry(

@@ -209,10 +209,16 @@ class MainWindow(QMainWindow):
         Wires ``op_complete`` / ``op_failed`` to MainWindow's dispatch +
         the ErrorTranslator. Builds the RunController + DiffController so
         the 5 outbound signal handlers can dispatch real work.
+
+        Also kicks off a one-shot session auto-detect via ``queue_op`` —
+        if Maestro's current window session resolves and the input field
+        is still empty, prefill it. Avoids the "user must know what
+        fnxSession0 is" friction (DECISIONS #79 D2 + user feedback).
         """
         self._worker = worker
         worker.op_complete.connect(self._on_op_complete)
         worker.op_failed.connect(self._on_op_failed)
+        self._auto_detect_session()
 
         self._error_translator = ErrorTranslator(self)
         worker.op_failed.connect(self._error_translator.on_op_failed)
@@ -257,6 +263,32 @@ class MainWindow(QMainWindow):
             self.session_input.setText(session_name)
         if baseline:
             self.results_tab.set_baseline(baseline)
+
+    def _auto_detect_session(self) -> None:
+        """Probe Maestro for the currently-focused session; prefill if empty.
+
+        Asynchronous via BridgeWorker — never blocks the UI thread. Only
+        fills if the user hasn't typed anything yet (don't overwrite their
+        explicit choice). Failures are silent (just no auto-fill).
+        """
+        if self._worker is None:
+            return
+        if self.current_session_name():
+            return  # user already provided one
+        self._queue_op(
+            "pvt_runner_get_window_session",
+            on_ok=self._on_session_autodetected,
+            on_err=None,  # silent fail — user can still type manually
+        )
+
+    def _on_session_autodetected(self, sess: object) -> None:
+        if not isinstance(sess, str) or not sess:
+            return
+        # Race: user may have typed during the probe. Don't clobber.
+        if self.current_session_name():
+            return
+        self.session_input.setText(sess)
+        self.append_log(f"[session] auto-detected '{sess}' from Maestro")
 
     def current_session_name(self) -> Optional[str]:
         text = self.session_input.text().strip()

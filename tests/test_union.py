@@ -620,14 +620,28 @@ class FileAbsFieldTests(TempDirMixin, unittest.TestCase):
         for row in u.rows:
             self.assertEqual(row.models[0].file_abs, "/opt/pdk/models/rf018.scs")
 
-    def test_empty_file_abs_rejected(self):
+    def test_empty_file_abs_treated_as_unresolved(self):
+        # Phase 4 1AXX dogfood: SKILL pull leaves _file_abs="" for multi-section
+        # rows (`axlGetModelFile` can't disambiguate across sections). Empty is
+        # informational — load_union should treat it as None (= "not resolved"),
+        # not block the entire load. See DECISIONS #79 follow-up.
         doc = _doc_with_model()
         doc["rows"][0]["models"][0]["_file_abs"] = ""
         path = self.tmp / f"{doc['name']}.union.json"
         path.write_text(json.dumps(doc), encoding="utf-8")
+        u = load_union(path)
+        self.assertIsNone(u.rows[0].models[0].file_abs)
+
+    def test_wrong_type_file_abs_rejected(self):
+        # Non-string is still rejected — empty-string is a special semantic
+        # case ("not resolved"), but a number or list is a real schema bug.
+        doc = _doc_with_model()
+        doc["rows"][0]["models"][0]["_file_abs"] = 42
+        path = self.tmp / f"{doc['name']}.union.json"
+        path.write_text(json.dumps(doc), encoding="utf-8")
         with self.assertRaises(UnionValidationError) as ctx:
             load_union(path)
-        self.assertIn("'_file_abs' must be a non-empty string", str(ctx.exception))
+        self.assertIn("must be a string if present", str(ctx.exception))
 
 
 if __name__ == "__main__":

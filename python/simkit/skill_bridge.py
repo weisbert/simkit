@@ -607,6 +607,26 @@ def _load_runner_skill_files(ws) -> None:
         ws["load"](str(_SKILL_DIR / fname))
 
 
+def pvt_runner_get_window_session(
+    *, workspace: Any = None,
+) -> Optional[str]:
+    """Return Maestro's currently-focused session name, or None.
+
+    Phase 4 GUI uses this to auto-prefill the top-bar Session input so the
+    user doesn't have to know 'fnxSession0' verbatim. Returns None when no
+    Maestro window has focus (DECISIONS #53 — common on this user's setup).
+    No SKILL load needed — axlGetWindowSession is a built-in.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    try:
+        sess = ws["axlGetWindowSession"]()
+    except Exception:
+        return None
+    if sess is None or sess == "" or sess is False:
+        return None
+    return str(sess)
+
+
 def pvt_runner_snapshot_test_state(
     *, session: str, workspace: Any = None,
 ) -> list[tuple[str, bool]]:
