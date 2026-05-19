@@ -7,7 +7,7 @@
 # installed across home / yellow / red zones. This file is just where
 # we declare intent.
 
-duckdb==1.5.2
+duckdb==1.2.2
 skillbridge==1.8.0
 PyQt5==5.15.9
 QtAwesome==1.4.2

@@ -35,11 +35,14 @@ DEFAULT_PYTHON_VERSION = "3.11"
 DEFAULT_ABI = "cp311"
 DEFAULT_IMPLEMENTATION = "cp"
 
-# Multiple manylinux tags so we accept newer wheels too.
-# Order matters: pip tries each in turn, takes the first match.
+# Lowest-common-denominator: red zone is glibc 2.17 (RHEL7-era EDA farm).
+# Both names below mean the same baseline (manylinux2014 == manylinux_2_17).
+# NEVER add a newer baseline (e.g. manylinux_2_28) here — pip would
+# accept too-new wheels that won't install on red. If you must support a
+# package that no longer ships 2_17 wheels, pin its version DOWN in the
+# lock to the last release that does, OR custom-build the wheel.
 DEFAULT_PLATFORMS = [
     "manylinux2014_x86_64",
-    "manylinux_2_28_x86_64",
     "manylinux_2_17_x86_64",
 ]
 
