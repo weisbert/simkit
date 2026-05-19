@@ -20,7 +20,7 @@ from simkit.errors import SimkitError
 
 UNION_FILE_SUFFIX = ".union.json"
 
-_UNION_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
+_UNION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _ROW_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _VAR_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _SUPPORTED_UNION_SCHEMA_VERSIONS = frozenset({1})
@@ -151,7 +151,7 @@ def _validate_name(path: Path, data: dict) -> str:
     name = _validate_required_str(path, data, "name")
     if not _UNION_NAME_RE.match(name):
         raise UnionValidationError(
-            f"{path}: 'name' {name!r} does not match ^[a-z0-9_-]+$"
+            f"{path}: 'name' {name!r} does not match ^[A-Za-z0-9_-]+$"
         )
     basename = path.name
     if not basename.endswith(UNION_FILE_SUFFIX):

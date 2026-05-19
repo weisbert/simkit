@@ -26,13 +26,16 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PyQt5.QtCore import Qt, QModelIndex
+from PyQt5.QtCore import Qt, QModelIndex, QPoint
 from PyQt5.QtWidgets import (
+    QAction,
+    QApplication,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QSplitter,
     QTabWidget,
@@ -132,6 +135,8 @@ class MainWindow(QMainWindow):
         self._tree_model = ProjectTreeModel(self)
         self.left_tree.setModel(self._tree_model)
         self.left_tree.clicked.connect(self._on_tree_clicked)
+        self.left_tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.left_tree.customContextMenuRequested.connect(self._on_tree_context_menu)
 
         # --- right panel ------------------------------------------------
         self.right_panel = QTabWidget(objectName="rightPanel")
@@ -141,6 +146,13 @@ class MainWindow(QMainWindow):
         self.results_tab = ResultsTab()
         self.corners_editor = CornersEditor()
         self.measures_editor = MeasuresEditor()
+
+        # Right-click on corner-table rows: Duplicate / Delete (faster than
+        # the bottom button row for power users).
+        self.corners_editor.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.corners_editor.table.customContextMenuRequested.connect(
+            self._on_corners_table_context_menu
+        )
 
         self.right_panel.addTab(self.results_tab, "Results")
         self.right_panel.addTab(self.corners_editor, "Corners")
@@ -312,6 +324,186 @@ class MainWindow(QMainWindow):
         ):
             self._show_history_run(payload)
 
+    def _on_corners_table_context_menu(self, pos: QPoint) -> None:
+        """Right-click on a corner row → Duplicate / Delete shortcuts."""
+        table = self.corners_editor.table
+        index = table.indexAt(pos)
+        if not index.isValid():
+            return
+        # Select the right-clicked row so the existing helpers act on it
+        # (Qt's default context-menu policy doesn't auto-select for us).
+        table.selectRow(index.row())
+        menu = QMenu(table)
+        a_dup = menu.addAction("Duplicate row")
+        a_del = menu.addAction("Delete row")
+        chosen = menu.exec_(table.viewport().mapToGlobal(pos))
+        if chosen is a_dup:
+            self.corners_editor.duplicate_row()
+        elif chosen is a_del:
+            self.corners_editor.delete_row()
+
+    def _on_tree_context_menu(self, pos: QPoint) -> None:
+        """Right-click on a tree node → context menu (per node kind)."""
+        index = self.left_tree.indexAt(pos)
+        if not index.isValid():
+            return
+        kind = self._tree_model.node_kind(index)
+        payload = self._tree_model.node_payload(index)
+        menu = QMenu(self.left_tree)
+        if (
+            kind == ProjectTreeModel.NODE_KIND_GROUP
+            and payload == ProjectTreeModel.GROUP_REVIEWS
+        ):
+            a_new = menu.addAction("+ New Review…")
+            chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
+            if chosen is a_new:
+                self._new_review_dialog()
+            return
+        if kind == ProjectTreeModel.NODE_KIND_REVIEW and isinstance(payload, LoadedReview):
+            a_run = menu.addAction("Run this review…")
+            a_open = menu.addAction("Open .review.json")
+            menu.addSeparator()
+            a_del = menu.addAction("Delete .review.json")
+            chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
+            if chosen is a_run:
+                self.results_tab.set_review_path(str(payload.review_path))
+                self._on_run_requested(str(payload.review_path))
+            elif chosen is a_open:
+                self._open_in_editor(payload.review_path)
+            elif chosen is a_del:
+                self._confirm_delete_file(payload.review_path, refresh_tree=True)
+        elif kind == ProjectTreeModel.NODE_KIND_HISTORY and isinstance(
+            payload, LoadedHistoryRun
+        ):
+            a_view = menu.addAction("View results")
+            a_baseline = menu.addAction("Set as Baseline for Compare")
+            a_compare = menu.addAction("Compare to baseline / pick…")
+            menu.addSeparator()
+            a_copy = menu.addAction(f"Copy run_id ({payload.short_id})")
+            menu.addSeparator()
+            a_set_ms = menu.addAction("Set milestone… (Stage 4 — TODO)")
+            a_set_ms.setEnabled(False)
+            chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
+            if chosen is a_view:
+                self._show_history_run(payload)
+            elif chosen is a_baseline:
+                self.results_tab.set_baseline(payload.run_id)
+                self.append_log(f"[baseline] pinned to {payload.short_id}")
+            elif chosen is a_compare:
+                self._compare_from_history(payload.run_id)
+            elif chosen is a_copy:
+                QApplication.clipboard().setText(payload.run_id)
+                self.append_log(f"[clipboard] {payload.run_id}")
+
+    def _new_review_dialog(self) -> None:
+        """MVP 'New Review' creation flow (proper wizard is Stage 4 §14).
+
+        Asks for review name, defaults the item to (name='item1',
+        tests=['Test'], union=first available). Writes the .review.json,
+        refreshes the tree, selects the new node.
+        """
+        if self._loaded_module is None:
+            self._warn("没有 module 加载", "先用 --module 启动一个工程")
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "simkit — 新建 Review",
+            "Review 名 (字母/数字/下划线/连字符):",
+            QLineEdit.Normal,
+            "new_review",
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        # Validate: only [A-Za-z0-9_-] (mirror review.py's regex)
+        if not _is_valid_review_name(name):
+            self._warn(
+                "名称非法",
+                f"Review 名 {name!r} 含非法字符（只能 字母/数字/下划线/连字符）",
+            )
+            return
+        out_path = (
+            self._loaded_module.project_root / "reviews" / f"{name}.review.json"
+        )
+        if out_path.exists():
+            self._warn("已存在", f"{out_path.name} 已经在 reviews/ 下，换个名字")
+            return
+        # Pick a sane default union
+        union_default = self._loaded_module.union_default
+        if union_default is not None:
+            union_rel = "../" + union_default.relative_to(
+                self._loaded_module.project_root
+            ).as_posix()
+        else:
+            union_rel = "../unions/baseline.union.json"
+        import json as _json
+
+        review = {
+            "_doc": f"Created from GUI on {Path(__file__).name} — edit items as needed.",
+            "review_schema_version": 1,
+            "name": name,
+            "project": self._loaded_module.project_name,
+            "items": [
+                {
+                    "name": "item1",
+                    "tests": ["Test"],
+                    "union": union_rel,
+                }
+            ],
+        }
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(_json.dumps(review, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            self._warn("写入失败", f"{out_path}: {exc}")
+            return
+        self.append_log(f"[review] created {out_path.name}")
+        # Reload module so the new review shows in the tree
+        from simkit.gui.loaders import load_module
+        self._loaded_module = load_module(self._loaded_module.project_path)
+        self._tree_model.populate(self._loaded_module)
+        self.left_tree.expandAll()
+        # Auto-bind the review so Run button activates immediately
+        self.results_tab.set_review_path(str(out_path))
+        # Open the file in $EDITOR so user can flesh it out
+        self._open_in_editor(out_path)
+
+    def _open_in_editor(self, path: Path) -> None:
+        """Launch the user's $EDITOR on a file (falls back to xdg-open)."""
+        import os
+        import shutil
+        import subprocess
+
+        editor = os.environ.get("EDITOR") or shutil.which("xdg-open") or "xdg-open"
+        try:
+            subprocess.Popen([editor, str(path)])
+            self.append_log(f"[open] {editor} {path.name}")
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[open] failed: {exc}")
+
+    def _confirm_delete_file(self, path: Path, *, refresh_tree: bool) -> None:
+        """Confirm modal then delete a sidecar file from disk."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("simkit — 删除文件确认")
+        box.setText(f"确定要删除 {path.name}？")
+        box.setInformativeText(f"路径: {path}")
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        box.setDefaultButton(QMessageBox.Cancel)
+        if box.exec_() != QMessageBox.Yes:
+            return
+        try:
+            path.unlink()
+            self.append_log(f"[delete] {path.name}")
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[delete] failed: {exc}")
+            return
+        if refresh_tree and self._loaded_module is not None:
+            from simkit.gui.loaders import load_module
+            self._loaded_module = load_module(self._loaded_module.project_path)
+            self._tree_model.populate(self._loaded_module)
+            self.left_tree.expandAll()
+
     def _show_history_run(self, run: LoadedHistoryRun) -> None:
         if self._loaded_module is None:
             return
@@ -438,6 +630,27 @@ class MainWindow(QMainWindow):
             self._loaded_module.project_path, current, other,
         )
 
+    def _compare_from_history(self, run_id_a: str) -> None:
+        """History-row right-click 'Compare' — uses pinned baseline if set,
+        else opens the picker."""
+        if self._diff_controller is None or self._loaded_module is None:
+            self.append_log("[diff] no bridge / module loaded")
+            return
+        baseline = self.results_tab.baseline_run_id()
+        if baseline and baseline != run_id_a:
+            self._diff_controller.open_diff(
+                self._loaded_module.project_path, run_id_a, baseline,
+            )
+            return
+        other = self._diff_controller.pick_run_for_compare(
+            self._loaded_module.project_path, run_id_a, parent_widget=self,
+        )
+        if other is None:
+            return
+        self._diff_controller.open_diff(
+            self._loaded_module.project_path, run_id_a, other,
+        )
+
     def _on_baseline_pinned(self, run_id: object) -> None:
         self.append_log(f"[baseline] pin = {run_id!r}")
 
@@ -489,7 +702,12 @@ class MainWindow(QMainWindow):
         self.corners_editor.set_last_sync(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         )
-        self.append_log(f"[corners] pulled {len(u.rows)} rows")
+        # Switch focus to the Corners tab so the user sees the result of
+        # their action, and include row names in the log for diagnostic clarity
+        # (pull-of-same-data looks invisible otherwise).
+        self.right_panel.setCurrentWidget(self.corners_editor)
+        row_names = ", ".join(r.row_name for r in u.rows)
+        self.append_log(f"[corners] pulled {len(u.rows)} rows: {row_names}")
 
     def _on_corners_push_requested(self, rows: object) -> None:
         row_count = len(rows) if isinstance(rows, list) else "?"
@@ -722,6 +940,14 @@ class MainWindow(QMainWindow):
         self.measures_editor.set_available_signal_groups(signals)
         self.measures_editor.load_bundle(raw)
         self.append_log(f"[measures] loaded bundle {bundle_path.name}")
+
+
+def _is_valid_review_name(name: str) -> bool:
+    """Mirror review.py's _REVIEW_NAME_RE (lower-case only — review/union/
+    bundle file basenames need filesystem-portable lowercase per Phase 2 design
+    decision; project-id is the loosened one per DECISIONS #79)."""
+    import re
+    return bool(re.match(r"^[a-zA-Z0-9_-]+$", name))
 
 
 def _sanitize_history_prefix(name: str) -> str:

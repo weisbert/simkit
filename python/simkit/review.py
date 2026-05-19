@@ -26,7 +26,7 @@ from simkit.errors import SimkitError
 
 REVIEW_FILE_SUFFIX = ".review.json"
 
-_REVIEW_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
+_REVIEW_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Item names are surfaced in log lines + report tables. Allow unicode word
 # chars (covers CJK item names like "干扰仿真"), digits, dash, underscore,
 # whitespace, and a few punctuation marks engineers actually use in setup
@@ -238,7 +238,7 @@ def _validate_name(path: Path, data: dict) -> str:
     name = _validate_required_str(path, data, "name")
     if not _REVIEW_NAME_RE.match(name):
         raise ReviewValidationError(
-            f"{path}: 'name' {name!r} does not match ^[a-z0-9_-]+$"
+            f"{path}: 'name' {name!r} does not match ^[A-Za-z0-9_-]+$"
         )
     basename = path.name
     if not basename.endswith(REVIEW_FILE_SUFFIX):

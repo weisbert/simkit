@@ -142,10 +142,17 @@ class TopLevelTests(TempDirMixin, unittest.TestCase):
         with self.assertRaises(ReviewValidationError):
             load_review(self._write(doc))
 
-    def test_name_regex_lowercase_only(self):
+    def test_name_regex_accepts_uppercase(self):
+        # DECISIONS #79 follow-up: review names accept uppercase to match
+        # production naming (MyReview / sanity_v2_CDR / etc).
         doc = _min_doc(name="MyReview")
+        r = load_review(self._write(doc, name="MyReview"))
+        self.assertEqual(r.name, "MyReview")
+
+    def test_name_regex_rejects_spaces(self):
+        doc = _min_doc(name="bad name")
         with self.assertRaises(ReviewValidationError):
-            load_review(self._write(doc, name="MyReview"))
+            load_review(self._write(doc, name="bad name"))
 
     def test_filename_basename_must_equal_name(self):
         doc = _min_doc(name="actual_name")

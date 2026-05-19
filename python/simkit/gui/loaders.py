@@ -269,20 +269,30 @@ def union_to_editor_rows(union: Union) -> list[dict]:
             else:
                 extras.append(f"{var_name}={','.join(values)}")
         model_file_text = ""
+        # Process variation in real Maestro setups is almost always expressed
+        # as model.section (tt/ss/ff/sf/fs/...) rather than a var named
+        # "process". When no `process` var exists, fall back to the first
+        # model's section so the process column shows what the user expects.
+        section_for_process = ""
         if row.models:
             first = row.models[0]
             model_file_text = first.file
+            if first.section:
+                section_for_process = ",".join(first.section)
             if len(row.models) > 1:
                 tail_files = ", ".join(m.file for m in row.models[1:])
                 extras.append(f"models[1..]={tail_files}")
-            for k, m in enumerate(row.models):
-                if len(m.section) > 1:
-                    extras.append(
-                        f"model[{k}].section={','.join(m.section)}"
-                    )
+                # Surface sections of secondary models too (multi-model rows
+                # are rare but if present they encode multi-process sweeps).
+                for k, m in enumerate(row.models[1:], start=1):
+                    if m.section:
+                        extras.append(
+                            f"model[{k}].section={','.join(m.section)}"
+                        )
+        process_text = named.get("process") or section_for_process
         entry: dict = {
             "row_name": row.row_name,
-            "process": named.get("process", ""),
+            "process": process_text,
             "temperature": named.get("temperature", ""),
             "vdd": named.get("vdd", ""),
             "model_file": model_file_text,
