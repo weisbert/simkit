@@ -90,6 +90,19 @@ def _open_workspace():
     return Workspace.open()
 
 
+def evalstring(expr: str) -> Any:
+    """Evaluate a SKILL expression and return the decoded result.
+
+    Thin module-level passthrough to ``Workspace.evalstring``; opens a
+    workspace per call (cheap — Unix-socket connect to the running
+    python_server). Used by the GUI ``BridgeWorker``'s heartbeat probe
+    (spec §8.2): ``evalstring("t")`` returns ``"t"`` if Maestro is alive,
+    raises if the socket is dead.
+    """
+    ws = _open_workspace()
+    return ws["evalstring"](expr)
+
+
 def get_sdb(session: str, *, workspace: Any = None) -> int:
     """Look up the sdb handle for a session by name, ONCE.
 

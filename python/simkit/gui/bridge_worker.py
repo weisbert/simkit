@@ -1,10 +1,40 @@
 """Long-lived ``BridgeWorker`` (spec §8, mandates A1 + A5).
 
 The single ``QObject`` that owns every ``skillbridge`` call. Lives on a
-dedicated ``QThread`` (NOT the UI thread); all SKILL ops are marshalled
-via a ``queue.Queue`` so the single-stream socket never sees concurrent
-calls (which corrupts response framing — same wedge as the manual
-recovery dance).
+dedicated ``QThread`` (NOT the UI thread); ops are marshalled via a
+Qt-internal ``pyqtSignal`` with ``Qt.QueuedConnection`` so the single-
+stream socket never sees concurrent calls (which corrupts response
+framing — same wedge as the manual recovery dance).
+
+Architecture (post-2026-05-19 refactor — see DECISIONS #76):
+
+  Main thread                 Worker thread (QThread.exec_ event loop)
+  -----------                 ----------------------------------------
+  queue_op(...)
+      ↓ emit _op_queued        receive (queued)
+                                   ↓ _dispatch(op)
+                                   ↓ bridge.<func>(**kwargs)
+  receive (queued)            emit op_complete / op_failed
+       ↑
+
+  stop()                       heartbeat QTimer (started in initialize)
+      ↓ emit _stop_requested        ↓ every 10s
+                                receive: _cleanup            heartbeat_tick
+                                   ↓ timer.stop()                ↓
+                                                              evalstring("t")
+                                                              status_changed
+                                                                    ↑
+  set_bridge_status            receive (queued)
+
+The two-signal pattern (``_op_queued`` / ``_stop_requested``) replaces
+the previous blocking ``queue.Queue`` + ``thread.started.connect(run)``
+pattern. The old design was broken twice: (a) ``run()`` blocked the
+worker's event loop forever, so the heartbeat timer never actually fired;
+(b) on shutdown the timer was destroyed on the main thread (Python GC)
+while its affinity was the worker thread → ``QObject::killTimer: Timers
+cannot be stopped from another thread`` warning. Both bugs share the
+same root cause and are fixed by letting ``QThread.exec_()`` run the
+event loop normally.
 
 Public surface (the only one the rest of the GUI should touch):
 
@@ -20,7 +50,8 @@ Public surface (the only one the rest of the GUI should touch):
   - ``status_changed(BridgeStatus)`` — heartbeat dot colour
 
 * :func:`build_bridge` — convenience: spawn a ``QThread``, instantiate a
-  ``BridgeWorker`` on it, start. Returns ``(thread, worker)``.
+  ``BridgeWorker`` on it, wire ``started → initialize``. Returns
+  ``(thread, worker)``.
 
 PyQt5 is imported at module load (``QObject`` + signals are class-body
 declarations). Mock the import at test time via plain
@@ -33,7 +64,6 @@ PyQt5 in.
 from __future__ import annotations
 
 import logging
-import queue
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -61,6 +91,7 @@ log = logging.getLogger(__name__)
 
 try:
     from PyQt5.QtCore import (  # type: ignore[import-not-found]
+        Qt,
         QObject,
         QThread,
         pyqtSignal,
@@ -71,6 +102,14 @@ try:
     _QT_AVAILABLE = True
 except ImportError:  # pragma: no cover — env-specific
     _QT_AVAILABLE = False
+
+    class Qt:  # type: ignore[no-redef]
+        """Minimal Qt namespace stub — only the connection-type constants
+        we reference at module load (referenced in slot decorators / connect
+        calls). Real values come from PyQt5 when present."""
+
+        QueuedConnection = 2  # matches Qt::QueuedConnection enum value
+        AutoConnection = 0
 
     class _StubSignal:  # pylint: disable=too-few-public-methods
         """Fallback so class-body declarations don't blow up without PyQt5."""
@@ -180,11 +219,20 @@ class BridgeWorker(QObject):
     touching skillbridge.
     """
 
-    # Qt signals (declared at class body — fixed signatures).
+    # --- Qt signals (declared at class body — fixed signatures) ---------
+    #
+    # Public signals (consumed by the rest of the GUI):
     op_complete = pyqtSignal(int, object)
     op_failed = pyqtSignal(int, object)
     busy_changed = pyqtSignal(bool)
     status_changed = pyqtSignal(object)  # BridgeStatus
+
+    # Internal signals (cross-thread queuing — both connected to slots on
+    # this same QObject in __init__; after ``moveToThread`` is called,
+    # AutoConnection resolves to QueuedConnection at emit time whenever
+    # the emit thread differs from the worker thread).
+    _op_queued = pyqtSignal(object)  # BridgeOp -> _dispatch
+    _stop_requested = pyqtSignal()   # () -> _cleanup
 
     def __init__(
         self,
@@ -196,38 +244,47 @@ class BridgeWorker(QObject):
         super().__init__(parent)
         self._bridge_module = bridge_module  # may be None until started
         self._clock = clock
-        self._queue: "queue.Queue[Optional[BridgeOp]]" = queue.Queue()
         self._next_id = 1
         self._is_busy = False
         self._status = BridgeStatus.AMBER
         self._consec_fails = 0
         self._last_heartbeat_ok_at: Optional[float] = None
-        self._stopped = False
         self._heartbeat_timer: Optional[QTimer] = None
+        # Wire internal cross-thread dispatch signals. Connections are
+        # made in __init__ (before any moveToThread call) but Qt re-
+        # resolves the connection type at each emit based on current
+        # thread affinity, so this stays correct after we're moved onto
+        # a worker thread.
+        self._op_queued.connect(self._dispatch)
+        self._stop_requested.connect(self._cleanup)
 
     # --- public API (thread-safe) ----------------------------------------
 
     def queue_op(self, func_name: str, **kwargs: Any) -> int:
         """Enqueue an op. Thread-safe. Returns the request_id.
 
-        The worker thread will pick this up via its blocking ``Queue.get``
-        and dispatch it serially. Result delivered via ``op_complete`` /
-        ``op_failed`` signal carrying the same request_id.
+        Emits ``_op_queued`` which is connected to ``_dispatch`` —
+        AutoConnection across threads resolves to QueuedConnection,
+        posting the BridgeOp to the worker thread's event loop. Ops
+        dispatch strictly in FIFO order (single-slot connection;
+        events serialize through the event queue).
         """
         request_id = self._next_id
         self._next_id += 1
         op = BridgeOp(request_id=request_id, func_name=func_name, kwargs=kwargs)
-        self._queue.put(op)
+        self._op_queued.emit(op)
         return request_id
 
     def stop(self) -> None:
-        """Signal the worker thread to exit cleanly.
+        """Request worker-thread-local cleanup. Thread-safe.
 
-        Posts a sentinel to the op queue; the run loop drains it and
-        returns. Safe to call from any thread.
+        Emits ``_stop_requested`` which is connected to ``_cleanup``
+        (queued onto the worker thread). The caller should then call
+        ``thread.quit()`` + ``thread.wait()`` to actually end the worker
+        thread — both events queue on the same event loop in FIFO order
+        so cleanup runs before quit.
         """
-        self._stopped = True
-        self._queue.put(None)
+        self._stop_requested.emit()
 
     @property
     def is_busy(self) -> bool:
@@ -237,26 +294,13 @@ class BridgeWorker(QObject):
     def status(self) -> BridgeStatus:
         return self._status
 
-    # --- worker thread loop ----------------------------------------------
+    # --- worker-thread slots ---------------------------------------------
 
-    @pyqtSlot()
-    def run(self) -> None:
-        """Main worker loop. Invoked once when the QThread starts.
-
-        Pull ops one at a time, execute, emit result. Heartbeat is driven
-        independently by ``_heartbeat_tick`` via a QTimer (set up by
-        :meth:`start_heartbeat`); we do NOT inline the heartbeat into this
-        loop because that would couple op-latency to heartbeat cadence.
-        """
-        while not self._stopped:
-            op = self._queue.get()
-            if op is None:
-                break
-            self._dispatch(op)
-
+    @pyqtSlot(object)
     def _dispatch(self, op: BridgeOp) -> None:
         """Execute one op + emit the result signal.
 
+        Runs on the worker thread (queued from main via ``_op_queued``).
         Wrapped in try/except so any exception (skillbridge transport
         errors, SkillBridgeError, plain RuntimeError) becomes an
         ``op_failed`` signal rather than crashing the thread.
@@ -297,15 +341,22 @@ class BridgeWorker(QObject):
         self._is_busy = busy
         self.busy_changed.emit(busy)
 
-    # --- heartbeat (spec §8.2) -------------------------------------------
+    # --- worker-thread lifecycle (spec §8.1 + §8.2) ----------------------
 
-    def start_heartbeat(self) -> None:
-        """Begin firing :func:`heartbeat_tick` every ``HEARTBEAT_INTERVAL_SEC``.
+    @pyqtSlot()
+    def initialize(self) -> None:
+        """Worker-thread-local setup. Connect to ``QThread.started``.
 
-        Called once by the owning thread setup code (typically after
-        ``moveToThread`` + ``QThread.started`` fires). Requires PyQt5 to
-        actually run; tests drive the heartbeat manually via
-        :meth:`heartbeat_tick`.
+        Runs on the worker thread (because ``started`` is emitted from
+        within the worker thread, and AutoConnection on a same-thread
+        receiver becomes a direct call). Creates the heartbeat ``QTimer``
+        as a child of ``self`` so its thread affinity matches the worker
+        thread — required so that ``timer.stop()`` later runs on the
+        correct thread without raising the cross-thread ``killTimer``
+        warning.
+
+        Tests drive ``heartbeat_tick`` directly and don't go through this
+        method; PyQt5 is required to actually run it.
         """
         if not _QT_AVAILABLE:  # pragma: no cover — env-specific
             return
@@ -313,6 +364,22 @@ class BridgeWorker(QObject):
         self._heartbeat_timer.setInterval(int(HEARTBEAT_INTERVAL_SEC * 1000))
         self._heartbeat_timer.timeout.connect(self.heartbeat_tick)
         self._heartbeat_timer.start()
+
+    @pyqtSlot()
+    def _cleanup(self) -> None:
+        """Worker-thread-local teardown. Connected to ``_stop_requested``.
+
+        Runs on the worker thread; stops the heartbeat ``QTimer`` while
+        we still own its dispatcher, so a later destruction on the main
+        thread (Python GC of the worker after the QThread has joined)
+        no longer trips ``QObject::killTimer: Timers cannot be stopped
+        from another thread``. The QTimer object itself is still
+        destroyed later — but with no live timer ID registered, that
+        destruction is harmless from any thread.
+        """
+        if self._heartbeat_timer is not None:
+            self._heartbeat_timer.stop()
+            self._heartbeat_timer = None
 
     @pyqtSlot()
     def heartbeat_tick(self) -> None:
@@ -374,6 +441,11 @@ def build_bridge(
     thread = QThread()
     worker = BridgeWorker(bridge_module=bridge_module)
     worker.moveToThread(thread)
-    thread.started.connect(worker.run)
-    thread.started.connect(worker.start_heartbeat)
+    # No ``worker.run`` connection — QThread's default ``run()`` calls
+    # ``exec_()`` which spins the event loop on the worker thread, and
+    # that's exactly what we need (heartbeat timer fires, queued ops
+    # dispatch, queued stop_requested cleanup all happen on the right
+    # thread). Just wire ``initialize`` so the heartbeat QTimer is
+    # constructed inside the worker thread.
+    thread.started.connect(worker.initialize)
     return thread, worker

@@ -20,7 +20,6 @@ memory (which leaks real SKILL calls into tests) by mocking at the
 
 from __future__ import annotations
 
-import queue
 import sys
 import unittest
 from pathlib import Path
@@ -45,25 +44,38 @@ def _make_worker(bridge_module: Any, *, clock=None) -> BridgeWorker:
     """Build a ``BridgeWorker`` without invoking the (stub) QObject init.
 
     Bypasses ``__init__`` so the test runs whether or not PyQt5 is
-    installed. Replaces signal attributes with ``MagicMock`` so any
+    installed. Replaces signal attributes (public + the internal
+    ``_op_queued`` / ``_stop_requested``) with ``MagicMock`` so any
     ``.emit(...)`` call inside the worker's methods is recordable and
     side-effect-free.
+
+    Post-2026-05-19 refactor: there's no ``_queue`` / ``_stopped`` field
+    anymore — ops travel via the ``_op_queued`` signal (queued
+    connection to ``_dispatch`` on the worker thread), and shutdown
+    travels via the ``_stop_requested`` signal (queued connection to
+    ``_cleanup``).
     """
-    worker = object.__new__(BridgeWorker)
+    # ``object.__new__(BridgeWorker)`` fails when PyQt5 is present because
+    # ``QObject`` is a C-extension class with a non-trivial ``__new__``.
+    # ``BridgeWorker.__new__(BridgeWorker)`` defers to PyQt5's metaclass
+    # which handles the C-side allocation properly. Same call works under
+    # the PyQt5-missing stub (plain Python class), so this is the
+    # portable form.
+    worker = BridgeWorker.__new__(BridgeWorker)
     worker._bridge_module = bridge_module
     worker._clock = clock if clock is not None else (lambda: 0.0)
-    worker._queue = queue.Queue()
     worker._next_id = 1
     worker._is_busy = False
     worker._status = BridgeStatus.AMBER
     worker._consec_fails = 0
     worker._last_heartbeat_ok_at = None
-    worker._stopped = False
     worker._heartbeat_timer = None
     worker.op_complete = mock.MagicMock(name="op_complete")
     worker.op_failed = mock.MagicMock(name="op_failed")
     worker.busy_changed = mock.MagicMock(name="busy_changed")
     worker.status_changed = mock.MagicMock(name="status_changed")
+    worker._op_queued = mock.MagicMock(name="_op_queued")
+    worker._stop_requested = mock.MagicMock(name="_stop_requested")
     return worker
 
 
@@ -100,33 +112,37 @@ class BridgeOpTests(unittest.TestCase):
 
 
 class QueueOpTests(unittest.TestCase):
-    """``queue_op`` is thread-safe + returns monotonic request IDs."""
+    """``queue_op`` is thread-safe + returns monotonic request IDs.
 
-    def test_queue_op_assigns_monotonic_ids(self):
+    Post-refactor: ops are delivered via the ``_op_queued`` signal
+    (queued connection to ``_dispatch``), not a ``queue.Queue``. The
+    test verifies the signal was emitted with a ``BridgeOp`` carrying
+    the expected request_id + func_name + kwargs in submission order.
+    """
+
+    def test_queue_op_assigns_monotonic_ids_and_emits_in_order(self):
         worker = _make_worker(bridge_module=mock.MagicMock())
         a = worker.queue_op("evalstring", expr="t")
         b = worker.queue_op("pvt_corners_pull", out_path="/x")
         c = worker.queue_op("evalstring", expr="t")
         self.assertEqual([a, b, c], [1, 2, 3])
-        # Three ops sitting in the queue, in FIFO order.
-        self.assertEqual(worker._queue.qsize(), 3)
-        op1 = worker._queue.get_nowait()
-        op2 = worker._queue.get_nowait()
-        op3 = worker._queue.get_nowait()
+        # Three emits on _op_queued, in submission order.
+        self.assertEqual(worker._op_queued.emit.call_count, 3)
+        emitted_ops = [call.args[0] for call in worker._op_queued.emit.call_args_list]
         self.assertEqual(
-            (op1.request_id, op1.func_name), (1, "evalstring"),
+            [(op.request_id, op.func_name) for op in emitted_ops],
+            [(1, "evalstring"), (2, "pvt_corners_pull"), (3, "evalstring")],
         )
-        self.assertEqual(
-            (op2.request_id, op2.func_name), (2, "pvt_corners_pull"),
-        )
-        self.assertEqual(op3.request_id, 3)
+        # And kwargs are carried verbatim.
+        self.assertEqual(emitted_ops[0].kwargs, {"expr": "t"})
+        self.assertEqual(emitted_ops[1].kwargs, {"out_path": "/x"})
 
-    def test_stop_posts_sentinel_to_queue(self):
+    def test_stop_emits_stop_requested(self):
+        """``stop()`` is just a signal emit — the actual cleanup happens
+        on the worker thread when ``_cleanup`` runs as the queued slot."""
         worker = _make_worker(bridge_module=mock.MagicMock())
         worker.stop()
-        self.assertTrue(worker._stopped)
-        self.assertEqual(worker._queue.qsize(), 1)
-        self.assertIsNone(worker._queue.get_nowait())
+        worker._stop_requested.emit.assert_called_once_with()
 
 
 class DispatchTests(unittest.TestCase):
@@ -270,6 +286,49 @@ class HeartbeatTests(unittest.TestCase):
         worker.heartbeat_tick()
         # The probe must NOT have fired (single-stream socket rule).
         bridge.evalstring.assert_not_called()
+
+
+class CleanupTests(unittest.TestCase):
+    """``_cleanup`` runs on the worker thread (queued from main via
+    ``_stop_requested``) and must stop the heartbeat ``QTimer`` while we
+    still own its dispatcher — otherwise the later main-thread Python GC
+    of the worker trips ``QObject::killTimer: Timers cannot be stopped
+    from another thread``.
+    """
+
+    def test_cleanup_stops_and_clears_heartbeat_timer(self):
+        worker = _make_worker(bridge_module=mock.MagicMock())
+        # Pretend ``initialize`` had run earlier and installed a timer.
+        fake_timer = mock.MagicMock(name="heartbeat_timer")
+        worker._heartbeat_timer = fake_timer
+
+        worker._cleanup()
+
+        fake_timer.stop.assert_called_once_with()
+        # Reference dropped so later Python GC of the worker doesn't
+        # find an active timer to kill on the wrong thread.
+        self.assertIsNone(worker._heartbeat_timer)
+
+    def test_cleanup_is_idempotent_when_timer_never_initialized(self):
+        """Safe to call ``_cleanup`` even if PyQt5 was missing at
+        ``initialize`` time (or if the worker thread never started)."""
+        worker = _make_worker(bridge_module=mock.MagicMock())
+        worker._heartbeat_timer = None
+        # Should not raise.
+        worker._cleanup()
+        self.assertIsNone(worker._heartbeat_timer)
+
+    def test_cleanup_safe_to_call_twice(self):
+        """Defensive: queued events can in principle deliver twice on
+        weird shutdown sequences. Second call must be a no-op."""
+        worker = _make_worker(bridge_module=mock.MagicMock())
+        fake_timer = mock.MagicMock(name="heartbeat_timer")
+        worker._heartbeat_timer = fake_timer
+        worker._cleanup()
+        worker._cleanup()
+        # The timer was stopped exactly once (the second call short-
+        # circuited on the ``is None`` guard).
+        fake_timer.stop.assert_called_once_with()
 
 
 if __name__ == "__main__":  # pragma: no cover

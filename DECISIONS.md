@@ -2250,3 +2250,62 @@ Unchanged from #74. Today's late PM was orthogonal to Phase 4 GUI work:
 1. **BridgeWorker timer cross-thread bug** — still top priority for Stage 2 dispatch.
 2. **Delete `scripts/PHASE4_DEPS_HANDOFF.md`** — still pending.
 3. **Stage 2: §4 / §7 / §8 / §9a 4-parallel** — still queued.
+
+
+## #76 — BridgeWorker refactor: signal-based dispatch + worker-thread cleanup
+_Date: 2026-05-19 (PM late, immediately after #75)_
+
+**Context:** PROJECT_STATE flagged "BridgeWorker timer cross-thread shutdown warning" as the §3 leftover, scoped as ~30min. Investigation revealed the warning was the surface symptom of a deeper design bug: `worker.run` (blocking `Queue.get()` loop) and `worker.start_heartbeat` were BOTH connected to `thread.started`, but the first slot blocked the worker thread's event loop forever — so the heartbeat timer NEVER actually fired during runtime, and the QTimer was only ever created + destroyed during shutdown when `start_heartbeat` finally got a chance to run. This made spec §8.2 (the bridge status dot) silently broken: the AMBER → GREEN transition that should happen on the first heartbeat success never occurred during real use. Bug discovered via 5 incremental skillbridge-style probes on a local `.venv` with PyQt5 5.15.11 installed, instrumenting `run()` + `start_heartbeat` + `heartbeat_tick` with thread-id prints.
+
+### D1 — Replace `Queue.Queue` + `thread.started.connect(run)` with two-signal Qt-native dispatch
+
+**Decision:** `BridgeWorker` gains two internal `pyqtSignal`s:
+
+- `_op_queued = pyqtSignal(object)` — `queue_op` emits this; connected to `_dispatch` (QueuedConnection across threads → posts BridgeOp event to worker thread's event loop).
+- `_stop_requested = pyqtSignal()` — `stop` emits this; connected to `_cleanup` (QueuedConnection → posts cleanup event before the eventual `thread.quit()` event).
+
+The blocking `Queue.Queue` field is removed entirely. `worker.run` method is deleted. `build_bridge` no longer connects anything to `thread.started.connect(run)` — only `thread.started.connect(worker.initialize)` (creates the QTimer on the worker thread). `QThread`'s default `run()` body = `exec_()` is now the event loop, exactly as designed.
+
+**Why:** This is the Qt-native producer-consumer pattern; the original Queue-based design fought against Qt's event loop instead of using it. Side benefits beyond fixing the bug: (a) thread-affinity-correctness is automatic via AutoConnection resolution; (b) ops, heartbeat ticks, and shutdown all serialize through the same event queue → no thread-sync primitives needed; (c) the heartbeat timer actually fires.
+
+**Alternatives considered:**
+- **Minimum-impact patch** (queue `_stop_heartbeat` invokeMethod from main thread during shutdown, leave the rest alone): rejected. Would silence the warning but leave heartbeat broken — Stage 2's bridge-status UI work would land on a still-broken foundation, and the 4 parallel agents would each independently discover this.
+- **Use `Queue.get(timeout=X)` + `QApplication.processEvents()` pump**: rejected. Hack that couples op latency to event-pump cadence; fights Qt's design instead of using it.
+- **Subclass QThread, override `run()`**: rejected. Anti-pattern per Qt docs ("don't subclass QThread for worker objects"); current QObject-on-QThread pattern is correct, just needed signal-based dispatch.
+
+### D2 — `_cleanup` stops timer on worker thread, drops ref; later GC is safe
+
+**Decision:** `_cleanup` slot does `self._heartbeat_timer.stop()` + `self._heartbeat_timer = None`. No `deleteLater()`. The QTimer C++ object lives on (as a child of the worker QObject) until the worker is destroyed; that destruction may happen on the main thread when Python GC eventually drops the worker reference, but it's safe because the timer ID was already unregistered from the worker thread's event dispatcher.
+
+**Why:** The `Timers cannot be stopped from another thread` warning is specifically about `killTimer(id)` being called from a thread other than the timer's owning thread. After `timer.stop()` runs on the worker thread, there's no timer ID left to kill — so the eventual `~QObject` destructor (which checks pending timers + tries to kill them) finds none and is silent. `deleteLater()` would also work but adds a second event-loop hop and isn't needed for correctness.
+
+**Verified:** Live e2e on home Linux `.venv`. Patched `HEARTBEAT_INTERVAL_SEC=1.5` for visibility; instrumented `initialize`, `heartbeat_tick`, status transitions. Output: timer created on worker thread (tid different from main), ticks fire every 1.5s on worker thread, first tick → GREEN, clean shutdown with zero stderr warnings. Same script with original code produced two `QObject::killTimer: Timers cannot be stopped from another thread` lines.
+
+### D3 — Add module-level `simkit.skill_bridge.evalstring`
+
+**Decision:** Add a thin wrapper `def evalstring(expr: str) -> Any` that opens a workspace via `_open_workspace()` and calls `ws["evalstring"](expr)`. Module-level (not a Workspace method) so the bridge_worker's `_resolve(func_name)` lookup pattern finds it the same way it finds `pvt_corners_pull` etc.
+
+**Why:** Heartbeat probe is `evalstring("t")` per spec §8.2, but `simkit.skill_bridge` only had pvt_*-shaped wrappers; `evalstring` had to be accessed via the raw skillbridge `Workspace` object. The 6-line passthrough lets the heartbeat — and any future GUI-side ad-hoc SKILL eval — use the same `bridge_module.<name>` shape. Opens a fresh Workspace per call, which is cheap (Unix-socket connect to the running python_server) and matches what `pvt_corners_pull` already does.
+
+### D4 — `_make_worker` test fixture: `BridgeWorker.__new__` not `object.__new__`
+
+**Decision:** The fixture changed from `object.__new__(BridgeWorker)` to `BridgeWorker.__new__(BridgeWorker)`.
+
+**Why:** Real PyQt5 makes `QObject` a C-extension class; `object.__new__(BridgeWorker)` raises `TypeError: object.__new__(BridgeWorker) is not safe` because the metaclass requires its own allocator. `BridgeWorker.__new__(BridgeWorker)` defers to PyQt5's allocator and works. The original code worked when PyQt5 was stubbed (plain Python `QObject` stub class) but broke once we actually had PyQt5 installed locally. Fixture is now portable across "PyQt5 missing" and "PyQt5 present" test environments.
+
+### Test impact
+
+- 13 existing tests → 16 (3 new `CleanupTests`: stops + clears timer / safe when timer None / idempotent on second call).
+- 1 test rewritten: `test_stop_posts_sentinel_to_queue` → `test_stop_emits_stop_requested`. Asserts `_stop_requested.emit` was called; no `_queue` to inspect.
+- 1 test renamed + expanded: `test_queue_op_assigns_monotonic_ids` → `test_queue_op_assigns_monotonic_ids_and_emits_in_order`. Asserts `_op_queued.emit` call list carries BridgeOps with correct id + func_name + kwargs in submission order.
+- DispatchTests + HeartbeatTests untouched — they call `_dispatch` / `heartbeat_tick` directly, which work the same.
+
+Full Python suite: 1190 → 1193 green, 27s.
+
+### Outstanding (next session)
+
+Two of the three #74 outstanding items remain:
+
+1. ~~BridgeWorker timer cross-thread bug~~ — **DONE (this entry)**.
+2. **Delete `scripts/PHASE4_DEPS_HANDOFF.md`** — still pending.
+3. **Stage 2: §4 / §7 / §8 / §9a 4-parallel** — now unblocked; BridgeWorker is solid foundation.
