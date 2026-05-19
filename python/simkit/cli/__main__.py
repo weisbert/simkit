@@ -17,6 +17,7 @@ from typing import List, Optional
 from simkit.cli import attach as attach_cmd
 from simkit.cli import corners as corners_cmd
 from simkit.cli import diff as diff_cmd
+from simkit.cli import gui as gui_cmd
 from simkit.cli import ingest as ingest_cmd
 from simkit.cli import label as label_cmd
 from simkit.cli import list_runs as list_cmd
@@ -45,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     measure_cmd.add_subparser(sub)
     run_cmd.add_subparser(sub)
     star_cmd.add_subparser(sub)
+    gui_cmd.add_subparser(sub)
     return parser
 
 
