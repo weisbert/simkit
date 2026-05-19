@@ -568,8 +568,12 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             a_copy = menu.addAction(f"Copy run_id ({payload.short_id})")
             menu.addSeparator()
-            a_set_ms = menu.addAction("Set milestone… (Stage 4 — TODO)")
-            a_set_ms.setEnabled(False)
+            current_ms = (payload.milestone or "").strip()
+            a_set_ms = menu.addAction(
+                f"Set milestone…  ({current_ms or '—'})"
+            )
+            a_clear_ms = menu.addAction("Clear milestone")
+            a_clear_ms.setEnabled(bool(current_ms))
             chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
             if chosen is a_view:
                 self._show_history_run(payload)
@@ -581,6 +585,10 @@ class MainWindow(QMainWindow):
             elif chosen is a_copy:
                 QApplication.clipboard().setText(payload.run_id)
                 self.append_log(f"[clipboard] {payload.run_id}")
+            elif chosen is a_set_ms:
+                self._set_milestone_dialog(payload)
+            elif chosen is a_clear_ms:
+                self._apply_milestone(payload.run_id, None)
 
     def _new_review_dialog(self) -> None:
         """MVP 'New Review' creation flow (proper wizard is Stage 4 §14).
@@ -690,6 +698,97 @@ class MainWindow(QMainWindow):
             self._loaded_module = load_module(self._loaded_module.project_path)
             self._tree_model.populate(self._loaded_module)
             self.left_tree.expandAll()
+
+    # ----------------------------------------------------------------
+    # Milestone tagging (8-cap Tier-1 cap #6)
+    # ----------------------------------------------------------------
+
+    _MILESTONE_PRESETS = ("PDR", "CDR", "FDR")
+
+    def _set_milestone_dialog(self, run: LoadedHistoryRun) -> None:
+        """Prompt for a milestone tag (editable combo) and apply it.
+
+        Presets PDR/CDR/FDR cover the common design-review stages; the
+        combo is editable so the user can type anything (e.g.
+        ``tape-out check`` or ``CDR-rev2``). Empty input cancels.
+        """
+        current = (run.milestone or "").strip()
+        choices = list(self._MILESTONE_PRESETS)
+        # Surface the current value first so the user sees what they're
+        # overwriting.
+        initial_idx = 0
+        if current:
+            if current in choices:
+                initial_idx = choices.index(current)
+            else:
+                choices.insert(0, current)
+                initial_idx = 0
+        text, ok = QInputDialog.getItem(
+            self,
+            "Set milestone",
+            f"Milestone for {run.short_id}:",
+            choices,
+            initial_idx,
+            True,  # editable
+        )
+        if not ok:
+            return
+        text = (text or "").strip()
+        if not text:
+            return
+        self._apply_milestone(run.run_id, text)
+
+    def _apply_milestone(
+        self, run_id: str, milestone: Optional[str],
+    ) -> None:
+        """Persist ``runs.milestone`` and refresh the tree + log."""
+        if self._loaded_module is None:
+            return
+        from simkit.db import connect
+        from simkit.milestone import (
+            MilestoneConflictError,
+            set_run_milestone,
+        )
+
+        try:
+            con = connect(self._loaded_module.db_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[milestone] could not open DB: {exc}")
+            return
+        try:
+            try:
+                result = set_run_milestone(
+                    con, run_id=run_id, milestone=milestone, force=True,
+                )
+            except MilestoneConflictError as exc:
+                self.append_log(f"[milestone] {exc}")
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[milestone] update failed: {exc}")
+                return
+        finally:
+            con.close()
+
+        short = run_id[:8]
+        if result.action == "noop":
+            self.append_log(f"[milestone] {short}: unchanged ({milestone or '—'})")
+        elif result.action == "cleared":
+            self.append_log(f"[milestone] {short}: cleared (was {result.previous!r})")
+        elif result.action == "overwritten":
+            self.append_log(
+                f"[milestone] {short}: {result.previous!r} → {result.current!r}"
+            )
+        else:  # "set"
+            self.append_log(f"[milestone] {short}: set → {result.current!r}")
+
+        # Refresh tree so the new milestone group + counts appear.
+        try:
+            from simkit.gui.loaders import load_module
+            self._loaded_module = load_module(self._loaded_module.project_path)
+            self._tree_model.populate(self._loaded_module)
+            self.left_tree.expandAll()
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[milestone] tree refresh failed: {exc}")
 
     def _show_history_run(self, run: LoadedHistoryRun) -> None:
         if self._loaded_module is None:

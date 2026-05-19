@@ -99,6 +99,105 @@ def test_measures_apply_requested_logs_row_count(qtbot):
     assert "3 rendered rows" in text
 
 
+# --- Cap #6: milestone tagging right-click ----------------------------------
+
+def _build_module_with_run(tmp_path):
+    """Construct a project directory + DuckDB so MainWindow.load_module
+    finds a single history run we can tag."""
+    from simkit.db import connect
+    from datetime import datetime as _dt, timezone as _tz
+
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    db_root = tmp_path / "db"
+    db_root.mkdir()
+    pvtproject = project_root / ".pvtproject"
+    pvtproject.write_text(
+        '{"_doc": "test", "schema_version": 1, '
+        '"project": "milestonetest", '
+        f'"dbRoot": "{db_root.as_posix()}", '
+        '"author": "tester"}\n'
+    )
+    db = db_root / "simkit.duckdb"
+    con = connect(db)
+    try:
+        con.execute(
+            "CREATE TABLE runs ("
+            "  run_id VARCHAR PRIMARY KEY, project_id VARCHAR, "
+            "  testbench_id VARCHAR, testbench_alias VARCHAR, "
+            "  timestamp TIMESTAMPTZ, author VARCHAR, "
+            "  label VARCHAR, note VARCHAR, "
+            "  netlist_path VARCHAR, history_name VARCHAR, "
+            "  schema_version INT, "
+            "  ingested_at TIMESTAMPTZ, "
+            "  milestone VARCHAR DEFAULT NULL, starred BOOLEAN DEFAULT FALSE"
+            ")"
+        )
+        con.execute(
+            "INSERT INTO runs VALUES "
+            "('run-abc-1234', 'milestonetest', 'tb', NULL, ?, 'me', "
+            " NULL, NULL, NULL, 'history-1', 2, ?, NULL, FALSE)",
+            [_dt(2026, 5, 19, 8, 0, tzinfo=_tz.utc),
+             _dt(2026, 5, 19, 8, 1, tzinfo=_tz.utc)],
+        )
+    finally:
+        con.close()
+    return pvtproject
+
+
+def test_apply_milestone_writes_db_and_refreshes_tree(qtbot, tmp_path):
+    from simkit.db import connect
+    from simkit.gui.loaders import load_module
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.load_module(load_module(pvtproject))
+
+    w._apply_milestone("run-abc-1234", "PDR")
+
+    db_path = w._loaded_module.db_path
+    con = connect(db_path, read_only=True)
+    try:
+        row = con.execute(
+            "SELECT milestone FROM runs WHERE run_id = 'run-abc-1234'"
+        ).fetchone()
+    finally:
+        con.close()
+    assert row[0] == "PDR"
+    # Tree should now contain a "PDR" milestone group.
+    assert "PDR" in w._loaded_module.milestones
+
+
+def test_apply_milestone_clear_reverts_to_null(qtbot, tmp_path):
+    from simkit.db import connect
+    from simkit.gui.loaders import load_module
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.load_module(load_module(pvtproject))
+
+    w._apply_milestone("run-abc-1234", "CDR")
+    w._apply_milestone("run-abc-1234", None)
+
+    con = connect(w._loaded_module.db_path, read_only=True)
+    try:
+        row = con.execute(
+            "SELECT milestone FROM runs WHERE run_id = 'run-abc-1234'"
+        ).fetchone()
+    finally:
+        con.close()
+    assert row[0] is None
+
+
+def test_apply_milestone_without_module_is_safe(qtbot):
+    w = MainWindow()
+    qtbot.addWidget(w)
+    assert w._loaded_module is None
+    w._apply_milestone("anything", "PDR")  # must not raise
+
+
 # --- Spec A5: Restart bridge button ------------------------------------------
 
 def test_restart_bridge_button_hidden_when_green(qtbot):
