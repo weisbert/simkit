@@ -20,6 +20,11 @@ the spec:
   the user can mark a run as a permanent reference. The DB flag is also
   synced to Maestro's ``axlSetHistoryLock`` via ``pvt sync-stars`` so the
   GUI history entry is protected from deletion.
+- Phase 4 §9a / §15.2: added ``runs.milestone`` (VARCHAR DEFAULT NULL)
+  for free-string Design-Review tagging (``PDR`` / ``CDR`` / ``FDR`` /
+  ``ECO_1`` / …), and ``runs.partial_run`` (BOOLEAN DEFAULT FALSE) for
+  cancel-mid-run tagging (§9.3). Both additive; existing rows get the
+  DEFAULTs.
 """
 
 from __future__ import annotations
@@ -27,7 +32,10 @@ from __future__ import annotations
 
 # v1.8 #4 bump: schema_version 2 → 3. Migration in ``simkit.db.bootstrap``
 # adds the ``runs.starred`` column when an existing v2 DB is opened.
-DB_SCHEMA_VERSION = 3
+# Phase 4 §9a bump: schema_version 3 → 4. Migration adds
+# ``runs.milestone`` (VARCHAR, free-string DR tag; §15.2) and
+# ``runs.partial_run`` (BOOLEAN, cancel-mid-run flag; §9.3).
+DB_SCHEMA_VERSION = 4
 
 
 RUNS_DDL = """
@@ -44,7 +52,9 @@ CREATE TABLE IF NOT EXISTS runs (
   history_name    VARCHAR NOT NULL,
   schema_version  INTEGER NOT NULL,
   ingested_at     TIMESTAMPTZ NOT NULL,
-  starred         BOOLEAN DEFAULT FALSE
+  starred         BOOLEAN DEFAULT FALSE,
+  milestone       VARCHAR DEFAULT NULL,
+  partial_run     BOOLEAN DEFAULT FALSE
 )
 """.strip()
 
@@ -85,6 +95,16 @@ V2_MIGRATION_DDL = (
 # column also pick up the DEFAULT.
 V3_MIGRATION_DDL = (
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS starred BOOLEAN DEFAULT FALSE",
+)
+# Phase 4 §9a — migration steps for v3 → v4. Same DuckDB constraint as v3:
+# ``ALTER TABLE ADD COLUMN`` does not combine NOT NULL with DEFAULT, so the
+# new columns are nullable in DDL and we rely on the DEFAULT to backfill
+# existing rows plus Python-side coercion at read time. ``milestone`` is
+# semantically nullable anyway (NULL = no DR tag). ``partial_run`` is
+# coerced via ``bool()`` so a NULL read maps to ``False``.
+V4_MIGRATION_DDL = (
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS milestone VARCHAR DEFAULT NULL",
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS partial_run BOOLEAN DEFAULT FALSE",
 )
 # NOTE: spec writes ``run_id ... REFERENCES runs(run_id)`` but DuckDB
 # enforces FKs per-statement (no within-transaction relaxation), so a

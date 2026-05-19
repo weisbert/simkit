@@ -2309,3 +2309,60 @@ Two of the three #74 outstanding items remain:
 1. ~~BridgeWorker timer cross-thread bug~~ — **DONE (this entry)**.
 2. **Delete `scripts/PHASE4_DEPS_HANDOFF.md`** — still pending.
 3. **Stage 2: §4 / §7 / §8 / §9a 4-parallel** — now unblocked; BridgeWorker is solid foundation.
+
+
+## #77 — Phase 4 Stage 2: 4-parallel UI subsystems land + MainWindow integration
+_Date: 2026-05-19 (PM late, same-session continuation after #76)_
+
+**Context:** With BridgeWorker stabilized (#76), the spec §3 acceptance gate effectively met, and the user pre-approved a 4-parallel dispatch, Stage 2 fanned out four `general-purpose` subagents from a clean `f315180` baseline. Each agent had a tight scope, a "do not touch `main_window.py`" constraint, a list of exact files to create, and a verification command using the local `.venv` (PyQt5 5.15.11 + pytest-qt 4.5.0). All four returned within a single hour wall-clock and produced zero file-overlap conflicts.
+
+### D1 — 4-parallel scope assignments (file-disjoint by construction)
+
+**Decision:** Each agent owned an independent slice of the codebase:
+
+| Agent | Spec section | Files (new) | Files (modified) |
+|---|---|---|---|
+| A | §4 View results | `gui/results_model.py`, `gui/views/results_tab.py`, `tests/gui/test_results_model.py`, `tests/gui/test_results_tab.py` | none |
+| B | §7 Corners editor | `gui/views/corners_editor.py`, `tests/gui/test_corners_editor.py` | none |
+| C | §8 Measure bundle editor | `gui/views/measures_editor.py`, `tests/gui/test_measures_editor.py` | none |
+| D | §9a DuckDB v3→v4 | (none) | `schema_sql.py`, `db.py`, `docs/schema.md`, `tests/test_db.py` |
+
+Pre-created `python/simkit/gui/views/__init__.py` before dispatch to remove the only directory-creation race. The orchestrator (this conversation) wired the three new view widgets into `main_window.py` after all four agents returned — agents were explicitly forbidden from touching `main_window.py` so the file stayed merge-trivial.
+
+**Why this pattern works:** UI subsystems are naturally disjoint (different submodules, different test files). The DB schema migration is backend-only. Wiring is sequential by nature (only one set of hands plugs Lego pieces together), so we did it after instead of in parallel. Total wall-clock: ~1h for 4 agents + ~10min for orchestrator integration. Sequential would have been ~3-4h.
+
+### D2 — Stage-2 right-panel signals route to bottom log only (Stage 3 swaps to BridgeWorker)
+
+**Decision:** Each view widget emits Qt signals for side-effecting actions (`run_requested`, `pull_requested`, `push_requested`, `apply_requested`, etc.) and `MainWindow` connects those to private `_on_*_requested` handlers that **only append to the bottom log panel**. No `BridgeWorker.queue_op` calls yet.
+
+**Why:** The GUI has no module loading + project context plumbing in place (that's Stage 3, alongside `pvt run` subprocess dispatch in spec §9). Without project context, `pvt_corners_pull`, `pvt_corners_push`, `pvt_measure_apply`, etc. have nothing to call against. Hard-coding placeholder paths would be both broken (wouldn't work in real use) and lossy (would have to be ripped out for Stage 3). The log-only handlers preserve the signal contract (names, signatures, log message format) and visibly demonstrate the GUI wiring works end-to-end; Stage 3 replaces only the handler bodies, not the contract.
+
+### D3 — Editor data shapes are flat / loose; adapters deferred to Stage 3
+
+**Decision (Agent B's deferral, accepted):** `CornersEditor` operates on flat `list[dict]` rows with columns `[row_name, process, temperature, vdd, model_file, extra_vars, _enabled]`. Real `.union.json` is the richer `UnionRow` shape (`vars: dict[str, tuple[str, ...]]` for multi-valued sweep arrays + `models: tuple[ModelEntry, ...]`). Translation between the two is deferred to Stage 3's union↔flat adapter; for now the editor is unit-testable in isolation and the live BridgeWorker pull/push is unwired.
+
+**Decision (Agent C's deferral, accepted):** `MeasuresEditor.set_available_templates` accepts both `list[str]` (names only, dropdown population) and `dict[str, Template]` (names + dataclass for actual render). Live preview requires the dict form; the spec's literal `list[str]` is supported for back-compat but won't enable rendering.
+
+**Why these shape decisions are right for v1:** The spec emphasizes UX-mandates (B4 corner editor affordances, §12.2 live render preview) over the exact data-binding wire format. Decoupling the editor from the union/render API lets each side evolve independently, and Stage 3's adapter is the right level for the translation (it knows the project context).
+
+### D4 — Editor uses `QStandardItemModel`, not `QAbstractTableModel` (A3 carve-out)
+
+**Decision (Agent B's call, accepted with rationale):** `CornersEditor` backs its table with `QStandardItemModel`, despite mandate A3 ("ban `QTableWidget`, require `QAbstractTableModel` + sort-filter proxy").
+
+**Why:** A3's rationale is for **results** tables: large data, read-only, diffable, needs custom sort/filter. The corner editor is small (≤10s of rows), live-editable with checkable Enable cells + per-cell delegates (process / temperature dropdowns), and needs no sort/filter. `QStandardItemModel` is `QAbstractItemModel` under the hood (so A3's "no `QTableWidget`" prohibition is honored — `QTableWidget` would also be against A3 because it bundles a hidden internal model). A3 doesn't apply because the editor's data layer needs are unlike the results table's. Documented inline in `corners_editor.py`. `ResultsTab` uses `QAbstractTableModel` + `QSortFilterProxyModel` as A3 requires.
+
+### D5 — Numbers
+
+- **Python tests: 1193 → 1270 (+77)**: A=26, B=19, C=18, D=7, integration=7
+- **Files added: 9** (4 production + 5 test). Plus `views/__init__.py` (orchestrator-created).
+- **Files modified: 5** (4 by agent D for schema bump, 1 by orchestrator for MainWindow wiring).
+- **Wall-clock: ~1h agents + ~15min integration**.
+- **Zero merge conflicts** (file disjointness enforced by prompts).
+- **Live `pvt gui --safe-mode` smoke**: window appears with 3 tabs (Results / Corners / Measures); zero stderr warnings on close.
+
+### Outstanding (next session)
+
+1. ~~Delete `scripts/PHASE4_DEPS_HANDOFF.md`~~ — **still pending**; the 1-minute cleanup.
+2. **Stage 3: Run path (§5) + Diff (§6) + module loading**. This unlocks the Stage 2 stub handlers (D2) — once `pvt run --gui-jsonl` subprocess dispatch exists and `ModuleSession` wires a real project into the editors, the log-only `_on_*_requested` handlers become BridgeWorker queues and QProcess spawns. The union↔flat adapter (D3) lives here too.
+3. **Stage 4: Milestone tagging UI (§15) + Wizard (§14) + Polish + Tier-1 dogfood gate**.
+4. **`ImportError` translation table (B5)** — spec §8.3 lists 7 SkillBridgeError categories that should map to plain-English user messages. Mostly mechanical; can be Stage 3 or earlier.

@@ -23,6 +23,7 @@ from simkit.schema_sql import (
     DB_SCHEMA_VERSION,
     V2_MIGRATION_DDL,
     V3_MIGRATION_DDL,
+    V4_MIGRATION_DDL,
 )
 
 
@@ -68,6 +69,10 @@ def bootstrap(con: duckdb.DuckDBPyConnection) -> None:
       DEFAULT FALSE). Existing rows are backfilled to FALSE; the user
       promotes a run to "starred" via ``pvt star`` and that flag is then
       pushed to Maestro's ``axlSetHistoryLock``.
+    * v3 → v4 (Phase 4 §9a / §15.2): adds ``runs.milestone`` (VARCHAR,
+      DEFAULT NULL — free-string Design-Review tag) and
+      ``runs.partial_run`` (BOOLEAN, DEFAULT FALSE — cancel-mid-run
+      flag). Existing rows pick up the DEFAULTs.
     """
     for stmt in ALL_DDL:
         con.execute(stmt)
@@ -103,6 +108,9 @@ def bootstrap(con: duckdb.DuckDBPyConnection) -> None:
             con.execute(stmt)
     if current < 3:
         for stmt in V3_MIGRATION_DDL:
+            con.execute(stmt)
+    if current < 4:
+        for stmt in V4_MIGRATION_DDL:
             con.execute(stmt)
     con.execute(
         "UPDATE simkit_meta SET value = ? WHERE key = 'db_schema_version'",

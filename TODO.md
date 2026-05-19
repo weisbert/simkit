@@ -374,14 +374,14 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 
 - [x] **BridgeWorker timer cross-thread shutdown warning** — Root cause turned out deeper than the warning suggested: `worker.run` (blocking `Queue.get()` loop) and `worker.start_heartbeat` were BOTH connected to `thread.started`, but the first slot blocked the worker thread's event loop forever — so the heartbeat timer NEVER actually fired during runtime (spec §8.2 silently unfulfilled). The "timer destroyed on wrong thread" warning was just the visible symptom on shutdown, when `start_heartbeat` finally fired during the queue-drain. Refactored to Qt-native signal-based dispatch: `_op_queued` signal (queue_op → _dispatch via QueuedConnection) replaces `queue.Queue`; `_stop_requested` signal (stop → _cleanup via QueuedConnection) replaces sentinel + `_stopped` flag; `initialize` slot (connected to `thread.started`) creates the heartbeat QTimer on the worker thread; `_cleanup` slot stops the timer on the worker thread before destruction. Plus: added module-level `simkit.skill_bridge.evalstring()` helper so the heartbeat probe can actually call SKILL `t`. Live-verified on home Linux `.venv` with running Virtuoso: heartbeat ticks fire on the worker thread, status transitions to GREEN immediately on first successful tick, zero `QObject::killTimer` warnings on clean shutdown. Unit tests refactored: 13 → 16 (3 new `CleanupTests` cases). Full suite 1190 → 1193 green.
 
-### §4. View results path
+### §4. View results path — Stage 2 DONE 2026-05-19 PM late (agent A; DECISIONS #77)
 
-- [ ] Left tree: Reviews / Milestones / History groups with proper data binding.
-- [ ] Results tab: `ResultsModel(QAbstractTableModel)` + `QSortFilterProxyModel` per spec §10/A3.
-- [ ] Review header bar with "Run this review" button (B2) per spec §6.1.
-- [ ] Results table: corner × test × measure × pass/fail/spec/spec_status columns.
-- [ ] Failed-corner highlight via `BackgroundRole`.
-- [ ] Widget tests (pytest-qt) for table rendering.
+- [ ] Left tree: Reviews / Milestones / History groups with proper data binding. **— Stage 3 (needs module loading + project context)**
+- [x] Results tab: `ResultsModel(QAbstractTableModel)` + `QSortFilterProxyModel` per spec §10/A3 (`python/simkit/gui/results_model.py` + `gui/views/results_tab.py`).
+- [x] Review header bar with "Run this review" button (B2) per spec §6.1 (`run_requested = pyqtSignal(str)`; MainWindow handler is log-only stub for Stage 2, BridgeWorker wire happens in Stage 3 alongside §5).
+- [x] Results table: corner × test × measure × pass/fail/spec/spec_status columns (7-col model with `value` merging via `simkit.from_db._merge_value`).
+- [x] Failed-corner highlight via `BackgroundRole` (`QBrush(QColor(255,220,220))` when `status==fail` OR `spec_status in {fail, eval_err}`).
+- [x] Widget tests (pytest-qt) for table rendering (16 model tests + 10 tab tests; `:memory:` DuckDB fixtures).
 
 ### §5. Run path (subprocess + JSONL progress)
 
@@ -403,24 +403,27 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 - [ ] Color coding: pass→fail red, fail→pass green, value-change-only yellow, unchanged grey.
 - [ ] "Show only changed" filter via QSortFilterProxyModel.
 
-### §7. Corner editor
+### §7. Corner editor — Stage 2 DONE 2026-05-19 PM late (agent B; DECISIONS #77)
 
-- [ ] Corners tab content: table editor with add-row / duplicate-row / per-row enable checkbox / per-cell dropdown (B4).
-- [ ] "Sync from Maestro" / "Send to Maestro" buttons with last-sync timestamp.
-- [ ] Live-vs-sidecar divergence yellow strip on tab open.
-- [ ] Live validation (cell highlight on invalid).
-- [ ] Push via BridgeWorker → `pvt_corners_push --replace`.
+- [x] Corners tab content: table editor with add-row / duplicate-row / per-row enable checkbox / per-cell dropdown (B4) (`gui/views/corners_editor.py` + 19 pytest-qt tests).
+- [x] "Pull from Maestro" / "Send to Maestro" buttons with last-sync timestamp.
+- [x] Live-vs-sidecar divergence yellow strip (shown via `set_divergence(live_count, sidecar_count)`; 3 follow-up signals: `show_diff` / `pull_overrides_sidecar` / `keep_sidecar`).
+- [x] Live validation (cell highlight on invalid; `validation_errors()` returns list, gates Send-button).
+- [ ] Push via BridgeWorker → `pvt_corners_push --replace` **— Stage 3 (currently log-only stub)**.
+- [ ] union↔flat row-shape adapter **— Stage 3 (editor uses flat dicts; real `UnionRow` has `vars: dict[str, tuple]` + `models`)**.
+- [ ] model-file path existence validation **— Stage 3 (needs project root context)**.
 
-### §8. Measure bundle editor
+### §8. Measure bundle editor — Stage 2 DONE 2026-05-19 PM late (agent C; DECISIONS #77)
 
-- [ ] Measures tab content: split pane (edit / live render preview right sidebar).
-- [ ] Template picker + signal-group picker + param entry per spec §12.
-- [ ] Live render preview re-renders on edit; show render errors inline.
-- [ ] Apply to Maestro disabled while render shows errors.
+- [x] Measures tab content: split pane (edit / live render preview right sidebar) (`gui/views/measures_editor.py` + 18 pytest-qt tests).
+- [x] Template picker + signal-group picker + param entry per spec §12 (`set_available_templates(list[str] | dict[str, Template])` dual-form contract).
+- [x] Live render preview re-renders on edit; show render errors inline (in-memory `MeasureBundle` construction + `render_bundle()`; bypasses file round-trip for keystroke-speed feedback).
+- [x] Apply to Maestro disabled while render shows errors (`apply_requested = pyqtSignal(object)` carries `list[RenderedRow]`, fired only when render is clean).
+- [ ] Real BridgeWorker `pvt_measure_apply` dispatch **— Stage 3 (currently log-only stub)**.
 
 ### §9. Milestone + status strip
 
-- [ ] DuckDB schema migration: `runs.milestone VARCHAR DEFAULT NULL`. Schema v3 → v4.
+- [x] DuckDB schema migration: `runs.milestone VARCHAR DEFAULT NULL`. Schema v3 → v4. **— DONE 2026-05-19 PM late (agent D; DECISIONS #77; also adds `runs.partial_run BOOLEAN DEFAULT FALSE` for §5 cancel semantics)**.
 - [ ] Right-click run → "Set milestone…" with autocomplete from existing milestone strings.
 - [ ] Milestone-set triggers star+lock round-trip via BridgeWorker.
 - [ ] Left-tree Milestones group with counters + filter behavior.

@@ -1,6 +1,6 @@
 # Schema Spec
 
-**Schema version: 2** (v1.4, additive). v1 envelopes still ingest cleanly; new spec / `output_specs` fields are optional. See §2.4 and §3 for the v2 additions and DECISIONS #46 / #47 for the rationale.
+**Schema version: 4** (Phase 4 §9a / §15.2, additive). v1 envelopes still ingest cleanly. DB-side migrations chain v1 → v2 → v3 → v4 in a single bootstrap pass. See §2.4 and §3 for the per-version additions; DECISIONS #46 / #47 for v2 rationale; DECISIONS #65 for v3 (`runs.starred`); Phase 4 spec §9.3 + §15.2 for v4 (`runs.milestone`, `runs.partial_run`).
 
 This document defines five things, in dependency order:
 
@@ -163,7 +163,10 @@ runs(
   netlist_path    VARCHAR NOT NULL,
   history_name    VARCHAR NOT NULL,
   schema_version  INTEGER NOT NULL,
-  ingested_at     TIMESTAMPTZ NOT NULL
+  ingested_at     TIMESTAMPTZ NOT NULL,
+  starred         BOOLEAN DEFAULT FALSE,  -- v3 (DECISIONS #65)
+  milestone       VARCHAR DEFAULT NULL,   -- v4 (Phase 4 §15.2); free-string DR tag
+  partial_run     BOOLEAN DEFAULT FALSE   -- v4 (Phase 4 §9.3); cancel-mid-run flag
 )
 
 results(

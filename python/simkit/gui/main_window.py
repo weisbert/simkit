@@ -1,15 +1,18 @@
 """MainWindow scaffold (spec §13 layout, §6.1 zone descriptions).
 
-Pure placeholders in Phase 4 §3 — every zone is an empty ``QWidget`` with
-a clear ``objectName`` so later phases (§4 results, §5 corner editor,
-§6 measure editor, etc.) can locate + populate it. No business logic
-here; the wiring lives in ``app.py`` / ``BridgeWorker``.
+Phase 4 §3 shipped pure placeholders; Stage 2 (§4 / §7 / §8) fills the
+right panel with three live tabs (Results / Corners / Measures) backed
+by the views in ``simkit.gui.views``. The BridgeWorker routing for the
+tabs' outbound signals is **deferred** to Stage 3 — for now the signals
+are wired only to the bottom log panel for visibility, since the GUI
+has no module-loading / project-context plumbing yet (without that,
+``pvt_corners_pull`` etc. have nothing to call against).
 
 Zones (per spec §6 ASCII diagram):
   * ``topBar``        — module selector dropdown + recent-5 + bridge dot
   * ``statusStrip``   — narrow cross-module 24h summary (B1)
   * ``leftTree``      — Reviews / Milestones / History tree
-  * ``rightPanel``    — tabbed view (Results / Corners / Measures / ...)
+  * ``rightPanel``    — ``QTabWidget`` hosting Results / Corners / Measures
   * ``bottomLog``     — collapsible log panel (default expanded)
   * ``statusDot``     — bridge heartbeat indicator inside ``topBar``
 
@@ -27,6 +30,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QSplitter,
+    QTabWidget,
     QTextEdit,
     QTreeView,
     QVBoxLayout,
@@ -34,6 +38,9 @@ from PyQt5.QtWidgets import (
 )
 
 from simkit.gui.bridge_worker import BridgeStatus
+from simkit.gui.views.corners_editor import CornersEditor
+from simkit.gui.views.measures_editor import MeasuresEditor
+from simkit.gui.views.results_tab import ResultsTab
 
 
 # Status-dot colours per spec §8.2. Plain hex; the visual treatment will
@@ -89,16 +96,35 @@ class MainWindow(QMainWindow):
         self.left_tree.setMinimumWidth(180)
 
         # --- right panel ------------------------------------------------
-        # Pure placeholder — spec §9-§12 turn this into a QTabWidget with
-        # Results / Corners / Measures / Wizard tabs. Kept as a plain
-        # widget here so we don't pre-commit to tab order before review.
-        self.right_panel = QWidget(objectName="rightPanel")
-        right_layout = QVBoxLayout(self.right_panel)
-        right_layout.setContentsMargins(8, 8, 8, 8)
-        right_layout.addWidget(
-            QLabel("Right panel placeholder — populated by §4 (Results) onward.")
+        # Stage 2 (§4 / §7 / §8): QTabWidget with three live tabs. Tab
+        # order = Tier-1 capability order from spec §4 (view first, then
+        # edit corners, then edit measures). Diff / Wizard / Run-progress
+        # tabs are Stage 3+; their slots open here on-demand.
+        self.right_panel = QTabWidget(objectName="rightPanel")
+        self.right_panel.setDocumentMode(True)
+
+        self.results_tab = ResultsTab()
+        self.corners_editor = CornersEditor()
+        self.measures_editor = MeasuresEditor()
+
+        self.right_panel.addTab(self.results_tab, "Results")
+        self.right_panel.addTab(self.corners_editor, "Corners")
+        self.right_panel.addTab(self.measures_editor, "Measures")
+
+        # Stage 2 wiring: every outbound signal lands in the bottom log
+        # for visibility. Stage 3 will replace these log-only handlers
+        # with BridgeWorker.queue_op calls once module loading + project
+        # context are in place. The signal contracts (names, signatures)
+        # are pinned now so Stage 3 just swaps the slot bodies.
+        self.results_tab.run_requested.connect(self._on_run_requested)
+        self.corners_editor.pull_requested.connect(self._on_corners_pull_requested)
+        self.corners_editor.push_requested.connect(self._on_corners_push_requested)
+        self.corners_editor.show_diff.connect(self._on_corners_show_diff)
+        self.corners_editor.pull_overrides_sidecar.connect(
+            self._on_corners_pull_overrides_sidecar
         )
-        right_layout.addStretch(1)
+        self.corners_editor.keep_sidecar.connect(self._on_corners_keep_sidecar)
+        self.measures_editor.apply_requested.connect(self._on_measures_apply_requested)
 
         # --- bottom log -------------------------------------------------
         self.bottom_log = QTextEdit(objectName="bottomLog")
@@ -145,3 +171,37 @@ class MainWindow(QMainWindow):
     def set_status_strip(self, text: str) -> None:
         """Update the cross-module status strip text (spec B1)."""
         self.status_strip.setText(text)
+
+    # --- Stage 2 right-panel signal handlers (log-only stubs) -----------
+    # Stage 3 swaps these for real BridgeWorker.queue_op calls + QProcess
+    # subprocess dispatch. The signatures match the views' signal
+    # contracts so the swap is local to this file.
+
+    def _on_run_requested(self, review_path: str) -> None:
+        self.append_log(f"[run] review_path={review_path} (Stage 3 will dispatch QProcess pvt run)")
+
+    def _on_corners_pull_requested(self) -> None:
+        self.append_log("[corners] pull requested (Stage 3 will call BridgeWorker pvt_corners_pull)")
+
+    def _on_corners_push_requested(self, payload: object) -> None:
+        row_count = len(payload) if isinstance(payload, list) else "?"
+        self.append_log(
+            f"[corners] push requested ({row_count} rows) "
+            "(Stage 3 will call BridgeWorker pvt_corners_push --replace)"
+        )
+
+    def _on_corners_show_diff(self) -> None:
+        self.append_log("[corners] show-diff requested (Stage 3 will open diff dialog)")
+
+    def _on_corners_pull_overrides_sidecar(self) -> None:
+        self.append_log("[corners] pull-overrides-sidecar requested (Stage 3 will pull + replace local)")
+
+    def _on_corners_keep_sidecar(self) -> None:
+        self.append_log("[corners] keep-sidecar requested (Stage 3 will dismiss divergence strip)")
+
+    def _on_measures_apply_requested(self, rendered_rows: object) -> None:
+        row_count = len(rendered_rows) if isinstance(rendered_rows, list) else "?"
+        self.append_log(
+            f"[measures] apply requested ({row_count} rendered rows) "
+            "(Stage 3 will call BridgeWorker pvt_measure_apply)"
+        )
