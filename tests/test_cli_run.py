@@ -328,3 +328,17 @@ class CliRunLiveModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_run_parser_accepts_label_flag():
+    """`--label "X"` parses + threads into args.label without breaking other flags."""
+    import argparse
+    from simkit.cli.run import add_subparser
+
+    sub = argparse.ArgumentParser().add_subparsers()
+    add_subparser(sub)
+    parser = sub.choices["run"]
+    args = parser.parse_args(["my.review.json", "--label", "CDR-2026q2", "--dry-run"])
+    assert args.label == "CDR-2026q2"
+    assert args.review_path == "my.review.json"
+    assert args.dry_run is True

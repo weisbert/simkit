@@ -97,3 +97,14 @@ def test_measures_apply_requested_logs_row_count(qtbot):
     text = w.bottom_log.toPlainText()
     assert "apply" in text.lower()
     assert "3 rendered rows" in text
+
+
+def test_sanitize_history_prefix_drops_punctuation():
+    from simkit.gui.main_window import _sanitize_history_prefix
+
+    assert _sanitize_history_prefix("PN check CDR") == "PN_check_CDR"
+    assert _sanitize_history_prefix("v17/gmin-2") == "v17_gmin_2"
+    assert _sanitize_history_prefix("hello!?world") == "helloworld"
+    assert _sanitize_history_prefix("___") == "run"   # empty after strip
+    assert _sanitize_history_prefix("") == "run"
+    assert _sanitize_history_prefix("ok_name") == "ok_name"

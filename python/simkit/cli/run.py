@@ -162,6 +162,16 @@ def add_subparser(sub) -> None:
         ),
     )
     p.add_argument(
+        "--label",
+        default=None,
+        help=(
+            "Human-readable name applied to every run row this invocation "
+            "produces. Lands in the DuckDB runs.label column so the GUI "
+            "History tree shows it as the primary identifier. If omitted, "
+            "label stays unset (history_name takes the leading slot)."
+        ),
+    )
+    p.add_argument(
         "--gui-jsonl",
         action="store_true",
         help=(
@@ -350,6 +360,12 @@ def _cli_run(args: argparse.Namespace) -> int:
             for line in ir.notes.splitlines():
                 print(f"           ! {line}")
 
+    if args.label:
+        # Stamp the user-supplied label on every run row this invocation
+        # produced. Best-effort: failures don't change exit code (the run
+        # already happened — DB-side polish shouldn't fail it).
+        _apply_label(report, pvtproject_path, args.label, emitter)
+
     if _cancel_requested:
         # SIGTERM-cancelled: tag the LAST ingested run as partial_run so
         # the GUI's Results view can flag it. Best-effort — failure to
@@ -424,6 +440,47 @@ def _mark_partial_run(report, pvtproject_path: Path, emitter: GuiEventEmitter) -
         emitter.log("warn", f"cancel: failed to mark partial_run: {exc}")
         print(f"WARNING: failed to mark partial_run on {last_run_id}: {exc}",
               file=sys.stderr)
+
+
+def _apply_label(
+    report, pvtproject_path: Path, label: str, emitter: GuiEventEmitter,
+) -> None:
+    """Stamp ``label`` on every ingested run row this report produced.
+
+    Iterates each ItemResult's run_dirs, extracts run_id from run.json,
+    and runs ``simkit.label.set_run_label`` against the project DB.
+    Best-effort: per-run failures log but don't abort.
+    """
+    from simkit.db import connect
+    from simkit.label import set_run_label
+    from simkit.orchestrator import _load_run_id
+    from simkit.project import _parse_pvtproject
+
+    try:
+        proj = _parse_pvtproject(Path(pvtproject_path).expanduser().resolve())
+        db_path = proj.db_root / "simkit.duckdb"
+        con = connect(db_path)
+    except Exception as exc:
+        emitter.log("warn", f"label: cannot open project DB: {exc}")
+        return
+
+    try:
+        applied = 0
+        for ir in report.items:
+            for run_dir in ir.run_dirs:
+                try:
+                    rid = _load_run_id(run_dir)
+                    set_run_label(con, run_id=rid, label=label, force=True)
+                    applied += 1
+                except Exception as exc:
+                    emitter.log(
+                        "warn",
+                        f"label: failed to set {label!r} on {run_dir}: {exc}",
+                    )
+        if applied:
+            emitter.log("info", f"label: applied {label!r} to {applied} run(s)")
+    finally:
+        con.close()
 
 
 def _resolve_project_name(project_path: Optional[str]) -> str:

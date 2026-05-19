@@ -123,6 +123,7 @@ class ProjectTreeModel(QStandardItemModel):
         for run in history:
             child = QStandardItem(_history_label(run))
             child.setEditable(False)
+            child.setToolTip(_history_tooltip(run))
             child.setData(
                 (self.NODE_KIND_HISTORY, run), _NODE_DATA_ROLE
             )
@@ -133,12 +134,72 @@ class ProjectTreeModel(QStandardItemModel):
 def _group_item(label: str, n: int) -> QStandardItem:
     item = QStandardItem(f"{label} ({n})")
     item.setEditable(False)
-    # Bold-ish via Qt's font-weight signal is tempting but unneeded for
-    # Tier-1; the parens count carries the meaning.
     return item
 
 
 def _history_label(run: LoadedHistoryRun) -> str:
+    """Lead with the most-meaningful name; timestamp goes to the right.
+
+    Priority: label (user-set) → history_name (Maestro / pvt run) → short_id.
+    """
     star = "★ " if run.starred else ""
-    tail = run.label if run.label else (run.history_name or "")
-    return f"{star}{run.short_id}  {run.timestamp}  {tail}".rstrip()
+    primary = run.label or run.history_name or run.short_id
+    when = _relative_ts(run.timestamp)
+    return f"{star}{primary}  ·  {when}"
+
+
+def _history_tooltip(run: LoadedHistoryRun) -> str:
+    """Power-user disclosure: full timestamp + ids on hover."""
+    lines = [f"id: {run.short_id}"]
+    if run.history_name:
+        lines.append(f"history: {run.history_name}")
+    if run.label:
+        lines.append(f"label: {run.label}")
+    if run.milestone:
+        lines.append(f"milestone: {run.milestone}")
+    lines.append(f"timestamp: {run.timestamp}")
+    return "\n".join(lines)
+
+
+def _relative_ts(iso_ts: str | None, *, now=None) -> str:
+    """Format an ISO timestamp like '2026-05-18 14:36:42+08' as '3h ago' /
+    'yesterday' / 'May 18'. Falls back to the raw string on parse failure.
+
+    The ``now`` kwarg is for tests; production calls leave it None and let
+    the function read wall clock.
+    """
+    if not iso_ts:
+        return ""
+    from datetime import datetime, timezone
+
+    try:
+        # DuckDB renders TIMESTAMPTZ as 'YYYY-MM-DD HH:MM:SS+TZ'. Python's
+        # fromisoformat needs T separator and full ±HH:MM offset; massage
+        # the string before parsing.
+        s = iso_ts.strip().replace(" ", "T", 1)
+        # '+08' → '+08:00' (Python is strict about offset width)
+        if len(s) >= 3 and s[-3] in ("+", "-") and ":" not in s[-3:]:
+            s = s + ":00"
+        ts = datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return iso_ts  # fallback: better to show something than nothing
+
+    if now is None:
+        now = datetime.now(ts.tzinfo if ts.tzinfo else timezone.utc)
+    delta = now - ts
+    secs = int(delta.total_seconds())
+    if secs < 0:
+        return ts.strftime("%b %-d")
+    if secs < 60:
+        return "just now"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    if secs < 86400 * 2:
+        return "yesterday"
+    if secs < 86400 * 7:
+        return f"{secs // 86400}d ago"
+    if ts.year == now.year:
+        return ts.strftime("%b %-d")
+    return ts.strftime("%b %-d %Y")

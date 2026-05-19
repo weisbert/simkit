@@ -29,6 +29,7 @@ from typing import Any, Callable, Optional
 from PyQt5.QtCore import Qt, QModelIndex
 from PyQt5.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -311,19 +312,39 @@ class MainWindow(QMainWindow):
             return
         session = self.current_session_name()
         if not session:
-            self._warn("缺少 Maestro session", "请在顶部 Session 输入框填写 Maestro session 名 (e.g. fnxSession0).")
+            self._warn(
+                "缺少 Maestro session",
+                "请在顶部 Session 输入框填写 Maestro session 名 (e.g. fnxSession0).",
+            )
             return
-        # Show the progress widget as a transient tab.
+        default_name = Path(review_path).stem.replace(".review", "")
+        run_name, ok = QInputDialog.getText(
+            self,
+            "simkit — 命名本次运行",
+            "Run name (出现在 History 树 + Maestro history 名里):",
+            QLineEdit.Normal,
+            default_name,
+        )
+        if not ok:
+            self.append_log("[run] cancelled at name prompt")
+            return
+        run_name = run_name.strip() or default_name
+        sanitized = _sanitize_history_prefix(run_name)
+
         self._run_progress = RunProgressWidget()
         self._run_progress.cancel_requested.connect(self._on_run_cancel_clicked)
         progress_idx = self.right_panel.addTab(self._run_progress, "Run progress")
         self.right_panel.setCurrentIndex(progress_idx)
-        review_name = Path(review_path).stem.replace(".review", "")
         # total_items unknown until first item_started event; use 0 placeholder
-        self._run_progress.reset(review_name, total_items=0)
-        ok = self._run_controller.start_run(review_path, session=session)
-        if not ok:
+        self._run_progress.reset(run_name, total_items=0)
+        extra_args = ["--history-prefix", sanitized, "--label", run_name]
+        started = self._run_controller.start_run(
+            review_path, session=session, extra_args=extra_args,
+        )
+        if not started:
             self.append_log("[run] could not start — another run in flight or spawn failed")
+        else:
+            self.append_log(f"[run] launched as {run_name!r} (history-prefix={sanitized!r})")
 
     def _on_run_cancel_clicked(self) -> None:
         if self._run_controller is not None and self._run_controller.is_running:
@@ -669,6 +690,20 @@ class MainWindow(QMainWindow):
         self.measures_editor.set_available_signal_groups(signals)
         self.measures_editor.load_bundle(raw)
         self.append_log(f"[measures] loaded bundle {bundle_path.name}")
+
+
+def _sanitize_history_prefix(name: str) -> str:
+    """Strip a user-typed run name down to what Maestro accepts as a history-name
+    component: alphanumeric + underscore. Spaces and dashes become underscores;
+    everything else is dropped. Empty result falls back to 'run'."""
+    out_chars: list[str] = []
+    for ch in name:
+        if ch.isalnum() or ch == "_":
+            out_chars.append(ch)
+        elif ch in (" ", "-", ".", "/"):
+            out_chars.append("_")
+    cleaned = "".join(out_chars).strip("_")
+    return cleaned or "run"
 
 
 def _serialize_union(u: Any) -> str:
