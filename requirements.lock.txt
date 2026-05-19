@@ -3,8 +3,15 @@ iniconfig==2.3.0
 packaging==26.2
 pluggy==1.6.0
 Pygments==2.20.0
+PyQt5==5.15.9
+PyQt5-Qt5==5.15.18
+PyQt5_sip==12.18.0
 pytest==9.0.3
 pytest-mock==3.15.1
+pytest-qt==4.5.0
+QtAwesome==1.4.2
+QtPy==2.4.3
 setuptools==82.0.1
 skillbridge==1.8.0
+typing_extensions==4.15.0
 wheel==0.47.0
