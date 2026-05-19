@@ -81,6 +81,14 @@ class LoadedReview:
 
 
 @dataclass(frozen=True)
+class LoadedBundle:
+    bundle_path: Path
+    bundle_name: str
+    apply_count: int
+    parse_error: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class LoadedHistoryRun:
     run_id: str
     short_id: str
@@ -102,6 +110,7 @@ class LoadedModule:
     milestones: tuple[str, ...]
     union_default: Path | None
     bundle_default: Path | None
+    bundles: tuple[LoadedBundle, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +133,8 @@ def load_module(project_path: Path) -> LoadedModule:
         project_root / _BUNDLES_SUBDIR, MEASURE_FILE_SUFFIX
     )
 
+    bundles = _scan_bundles(project_root)
+
     return LoadedModule(
         project_path=project_path,
         project_root=project_root,
@@ -134,6 +145,7 @@ def load_module(project_path: Path) -> LoadedModule:
         milestones=milestones,
         union_default=union_default,
         bundle_default=bundle_default,
+        bundles=bundles,
     )
 
 
@@ -154,6 +166,100 @@ def _scan_reviews(project_root: Path) -> tuple[LoadedReview, ...]:
             )
         )
     return tuple(out)
+
+
+def _scan_bundles(project_root: Path) -> tuple[LoadedBundle, ...]:
+    """Walk bundles/ for *.measure.json files (mirror of _scan_reviews)."""
+    bundles_dir = project_root / _BUNDLES_SUBDIR
+    if not bundles_dir.is_dir():
+        return tuple()
+    out: list[LoadedBundle] = []
+    for path in sorted(bundles_dir.glob(f"*{MEASURE_FILE_SUFFIX}")):
+        name = path.name[: -len(MEASURE_FILE_SUFFIX)]
+        count, err = _count_apply_or_error(path)
+        out.append(
+            LoadedBundle(
+                bundle_path=path.resolve(),
+                bundle_name=name,
+                apply_count=count,
+                parse_error=err,
+            )
+        )
+    return tuple(out)
+
+
+def _count_apply_or_error(bundle_path: Path) -> tuple[int, Optional[str]]:
+    try:
+        with bundle_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except OSError as exc:
+        return 0, f"cannot read: {exc}"
+    except json.JSONDecodeError as exc:
+        return 0, f"invalid JSON: {exc.msg} (line {exc.lineno})"
+    if not isinstance(data, dict):
+        return 0, "top-level must be a JSON object"
+    apply_list = data.get("apply")
+    if not isinstance(apply_list, list):
+        return 0, "missing or invalid 'apply' array"
+    return len(apply_list), None
+
+
+def snapshot_to_bundle_dict(
+    snapshot: dict,
+    *,
+    name: str,
+    project: str,
+    testbench_id: str,
+) -> dict:
+    """Convert a ``pvt_measure_pull`` snapshot into a `.measure.json` bundle.
+
+    Each Outputs row becomes either:
+      * a ``raw_expression`` apply entry (Type=expr — named measurements)
+      * a signal-tap entry (Type=net — anonymous, save/plot flags only).
+        Currently encoded as raw_expression too so the round-trip stays
+        lossless; template-aware reverse engineering (P3B v2 deferred)
+        will eventually fold signal taps into a SignalGroup.
+
+    Result is ready for `simkit.measure_bundle.load_measure_bundle` and
+    `MeasuresEditor.load_bundle`.
+    """
+    rows = snapshot.get("rows") or []
+    test_name = snapshot.get("test") or "Test"
+    apply_list: list[dict] = []
+    anon_counter = 0
+    for row in rows:
+        expr = row.get("expression") or ""
+        if not expr:
+            continue
+        output_name = row.get("name") or ""
+        if not output_name:
+            anon_counter += 1
+            output_name = f"sigtap_{anon_counter}"
+        # Sanitize: output_name regex requires ^[A-Za-z_][A-Za-z0-9_]*$
+        cleaned = "".join(
+            (ch if ch.isalnum() or ch == "_" else "_") for ch in output_name
+        )
+        if not cleaned or not (cleaned[0].isalpha() or cleaned[0] == "_"):
+            cleaned = "_" + cleaned
+        entry: dict = {
+            "raw_expression": expr,
+            "output_name": cleaned,
+            "plot": bool(row.get("plot", False)),
+            "save": bool(row.get("save", False)),
+            "eval_type": "point",
+        }
+        spec = row.get("spec") or ""
+        if spec:
+            entry["spec"] = spec
+        apply_list.append(entry)
+    return {
+        "measure_schema_version": 1,
+        "name": name,
+        "project": project,
+        "testbench_id": testbench_id,
+        "test_name": test_name,
+        "apply": apply_list,
+    }
 
 
 def _count_items_or_error(review_path: Path) -> tuple[int, Optional[str]]:

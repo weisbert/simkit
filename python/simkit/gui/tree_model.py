@@ -14,6 +14,7 @@ from PyQt5.QtCore import QModelIndex, Qt
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 
 from simkit.gui.loaders import (
+    LoadedBundle,
     LoadedHistoryRun,
     LoadedModule,
     LoadedReview,
@@ -29,11 +30,13 @@ class ProjectTreeModel(QStandardItemModel):
     """Tree model for the left-panel module browser."""
 
     NODE_KIND_REVIEW = "review"
+    NODE_KIND_BUNDLE = "bundle"
     NODE_KIND_MILESTONE = "milestone"
     NODE_KIND_HISTORY = "history"
     NODE_KIND_GROUP = "group"
 
     GROUP_REVIEWS = "Reviews"
+    GROUP_BUNDLES = "Bundles"
     GROUP_MILESTONES = "Milestones"
     GROUP_HISTORY = "History"
 
@@ -46,6 +49,7 @@ class ProjectTreeModel(QStandardItemModel):
         self.removeRows(0, self.rowCount())
 
         self.appendRow(self._build_reviews_group(module.reviews))
+        self.appendRow(self._build_bundles_group(module.bundles))
         self.appendRow(
             self._build_milestones_group(module.milestones, module.history)
         )
@@ -91,6 +95,30 @@ class ProjectTreeModel(QStandardItemModel):
                 )
             child.setData(
                 (self.NODE_KIND_REVIEW, review), _NODE_DATA_ROLE
+            )
+            group.appendRow(child)
+        return group
+
+    def _build_bundles_group(
+        self, bundles: tuple[LoadedBundle, ...]
+    ) -> QStandardItem:
+        group = _group_item(self.GROUP_BUNDLES, len(bundles))
+        group.setData(
+            (self.NODE_KIND_GROUP, self.GROUP_BUNDLES), _NODE_DATA_ROLE
+        )
+        for bundle in bundles:
+            if bundle.parse_error:
+                label = f"⚠ {bundle.bundle_name}  (parse error)"
+            else:
+                label = f"{bundle.bundle_name}  ({bundle.apply_count} apply)"
+            child = QStandardItem(label)
+            child.setEditable(False)
+            if bundle.parse_error:
+                child.setToolTip(
+                    f"{bundle.bundle_path.name}\n{bundle.parse_error}"
+                )
+            child.setData(
+                (self.NODE_KIND_BUNDLE, bundle), _NODE_DATA_ROLE
             )
             group.appendRow(child)
         return group

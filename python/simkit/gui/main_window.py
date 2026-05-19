@@ -51,11 +51,13 @@ from simkit.gui.controllers.error_translator import ErrorTranslator
 from simkit.gui.controllers.run import RunController
 from simkit.gui.error_translation import TranslatedError
 from simkit.gui.loaders import (
+    LoadedBundle,
     LoadedHistoryRun,
     LoadedModule,
     LoadedReview,
     editor_rows_to_union_rows,
     load_bundle_for_editor,
+    snapshot_to_bundle_dict,
     union_to_editor_rows,
 )
 from simkit.gui.tree_model import ProjectTreeModel
@@ -174,6 +176,7 @@ class MainWindow(QMainWindow):
         )
         self.corners_editor.keep_sidecar.connect(self._on_corners_keep_sidecar)
         self.measures_editor.apply_requested.connect(self._on_measures_apply_requested)
+        self.measures_editor.pull_requested.connect(self._on_measures_pull_requested)
 
         # --- bottom log -------------------------------------------------
         self.bottom_log = QTextEdit(objectName="bottomLog")
@@ -365,6 +368,10 @@ class MainWindow(QMainWindow):
             payload, LoadedHistoryRun
         ):
             self._show_history_run(payload)
+        elif kind == ProjectTreeModel.NODE_KIND_BUNDLE and isinstance(payload, LoadedBundle):
+            self._load_bundle_from_disk(payload.bundle_path)
+            self.right_panel.setCurrentWidget(self.measures_editor)
+            self.append_log(f"[tree] loaded bundle {payload.bundle_name}")
 
     def _on_corners_table_context_menu(self, pos: QPoint) -> None:
         """Right-click on a corner row → Duplicate / Delete shortcuts."""
@@ -812,6 +819,75 @@ class MainWindow(QMainWindow):
     # ----------------------------------------------------------------
     # Measures (§8)
     # ----------------------------------------------------------------
+
+    def _on_measures_pull_requested(self) -> None:
+        if not self._can_dispatch_bridge("measures pull"):
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn_session_required()
+            return
+        test_name, ok = QInputDialog.getText(
+            self,
+            "simkit — Pull measures",
+            "Maestro test 名 (Outputs 表按 Test 列过滤):",
+            QLineEdit.Normal,
+            "Test",
+        )
+        if not ok or not test_name.strip():
+            return
+        test_name = test_name.strip()
+        snap_path = self._scratch_path("measures_pull", ".json")
+        self._queue_op(
+            "pvt_measure_pull",
+            on_ok=lambda result: self._on_measures_pulled(
+                snap_path, test_name=test_name,
+            ),
+            kwargs={
+                "out_path": str(snap_path),
+                "test_name": test_name,
+                "include_signals": True,
+                "session": session,
+                "pvtproject_path": self._loaded_module.project_path,
+            },
+        )
+        self.append_log(f"[measures] pull queued (test={test_name!r}) → {snap_path.name}")
+
+    def _on_measures_pulled(self, snap_path: Path, *, test_name: str) -> None:
+        import json as _json
+        try:
+            snap = _json.loads(snap_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[measures] snapshot parse failed: {exc}")
+            return
+        n_rows = len(snap.get("rows") or [])
+        if n_rows == 0:
+            self.append_log(f"[measures] pulled 0 rows (Test={test_name!r} has no outputs?)")
+            return
+        # Generate a bundle name + path; write to bundles/ so it shows in tree.
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bundle_name = f"live_pulled_{ts}"
+        out_path = (
+            self._loaded_module.project_root
+            / "bundles"
+            / f"{bundle_name}.measure.json"
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle_dict = snapshot_to_bundle_dict(
+            snap,
+            name=bundle_name,
+            project=self._loaded_module.project_name,
+            testbench_id=snap.get("testbench_id", ""),
+        )
+        out_path.write_text(_json.dumps(bundle_dict, indent=2), encoding="utf-8")
+        self.append_log(
+            f"[measures] pulled {n_rows} rows → {out_path.name} "
+            f"(every row as raw_expression — template-aware reverse is P3B v2)"
+        )
+        # Load it into the editor + switch focus
+        self._load_bundle_from_disk(out_path)
+        self.right_panel.setCurrentWidget(self.measures_editor)
 
     def _on_measures_apply_requested(self, rendered_rows: object) -> None:
         row_count = len(rendered_rows) if isinstance(rendered_rows, list) else "?"

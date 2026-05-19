@@ -70,15 +70,16 @@ def _sample_module() -> LoadedModule:
     )
 
 
-def test_populate_creates_three_groups():
+def test_populate_creates_four_groups():
     model = ProjectTreeModel()
     model.populate(_sample_module())
-    # Three top-level rows.
-    assert model.rowCount() == 3
-    # Group labels include the counts.
+    # Four top-level rows (Bundles added after the user requested
+    # bundle-level visibility — see DECISIONS #79 follow-up).
+    assert model.rowCount() == 4
     assert "Reviews" in model.item(0).text()
-    assert "Milestones" in model.item(1).text()
-    assert "History" in model.item(2).text()
+    assert "Bundles" in model.item(1).text()
+    assert "Milestones" in model.item(2).text()
+    assert "History" in model.item(3).text()
 
 
 def test_node_kind_group_for_top_level():
@@ -105,7 +106,7 @@ def test_reviews_group_has_review_children():
 def test_history_group_renders_label_first_falling_back_to_history_name():
     model = ProjectTreeModel()
     model.populate(_sample_module())
-    history_group = model.item(2)
+    history_group = model.item(3)
     assert history_group.rowCount() == 2
     first = history_group.child(0)
     text = first.text()
@@ -128,7 +129,7 @@ def test_history_group_renders_label_first_falling_back_to_history_name():
 def test_milestone_group_lists_milestones_with_counts():
     model = ProjectTreeModel()
     model.populate(_sample_module())
-    milestones_group = model.item(1)
+    milestones_group = model.item(2)
     assert milestones_group.rowCount() == 1
     child = milestones_group.child(0)
     assert "CDR" in child.text()
@@ -141,7 +142,7 @@ def test_milestone_group_lists_milestones_with_counts():
 def test_history_node_payload_is_loaded_history_run():
     model = ProjectTreeModel()
     model.populate(_sample_module())
-    history_group = model.item(2)
+    history_group = model.item(3)
     idx = model.indexFromItem(history_group.child(0))
     payload = model.node_payload(idx)
     assert isinstance(payload, LoadedHistoryRun)
@@ -152,7 +153,7 @@ def test_populate_is_idempotent_replaces_contents():
     model = ProjectTreeModel()
     model.populate(_sample_module())
     model.populate(_sample_module())
-    assert model.rowCount() == 3
+    assert model.rowCount() == 4
 
 
 def test_node_kind_returns_none_for_invalid_index():
@@ -163,7 +164,7 @@ def test_node_kind_returns_none_for_invalid_index():
     assert model.node_payload(QModelIndex()) is None
 
 
-def test_empty_module_still_has_three_groups():
+def test_empty_module_still_has_four_groups():
     model = ProjectTreeModel()
     module = LoadedModule(
         project_path=Path("/proj/.pvtproject"),
@@ -177,9 +178,9 @@ def test_empty_module_still_has_three_groups():
         bundle_default=None,
     )
     model.populate(module)
-    assert model.rowCount() == 3
+    assert model.rowCount() == 4
     # Each group reports 0.
-    for r in range(3):
+    for r in range(4):
         assert "(0)" in model.item(r).text()
 
 

@@ -322,6 +322,9 @@ class MeasuresEditor(QWidget):
 
     apply_requested = pyqtSignal(object)
     """Carries the rendered rows (list[RenderedRow]) when Apply is clicked."""
+    pull_requested = pyqtSignal()
+    """Emitted when 'Pull from Maestro' is clicked; MainWindow handles
+    the BridgeWorker dispatch + writes the resulting bundle to bundles/."""
 
     # Colours for the status label. Picked plain so the visual treatment
     # is obvious without a stylesheet dependency.
@@ -371,8 +374,12 @@ class MeasuresEditor(QWidget):
         v = QVBoxLayout(pane)
         v.setContentsMargins(6, 6, 6, 6)
 
-        # Top row: + Template / + Raw / + Sweep
+        # Top row: Pull from Maestro / + Template / + Raw / + Sweep
         top_row = QHBoxLayout()
+        self._pull_btn = QPushButton("Pull from Maestro")
+        self._pull_btn.setObjectName("pullFromMaestroBtn")
+        self._pull_btn.clicked.connect(self.pull_requested.emit)
+        top_row.addWidget(self._pull_btn)
         self._add_template_btn = QPushButton("+ Template")
         self._add_template_btn.setObjectName("addTemplateBtn")
         self._add_template_btn.clicked.connect(self._on_add_template)
