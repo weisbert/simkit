@@ -146,9 +146,45 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # --- bridge worker ------------------------------------------------
     thread, worker = build_bridge()
     worker.status_changed.connect(window.set_bridge_status)
+    # Spec B1: when the bridge recovers from RED to GREEN, refresh the
+    # 24h strip — any runs ingested while the bridge was down should
+    # now appear.
+    def _refresh_on_green(status):
+        if status == BridgeStatus.GREEN:
+            window.refresh_status_strip()
+    worker.status_changed.connect(_refresh_on_green)
     window.set_bridge_status(BridgeStatus.AMBER)
     window.set_bridge_worker(worker)
     thread.start()
+
+    # --- status strip paths provider (spec B1) ------------------------
+    # Cross-module: union of currently-loaded module DB + recent_modules.
+    # Each module DB is just ``<db_root>/simkit.duckdb`` per the
+    # ``.pvtproject``. Read-only opens are cheap; missing/corrupt files
+    # are skipped by ``last_24h_summary``.
+    from simkit.gui.loaders import _DB_FILENAME
+    from simkit.project import _parse_pvtproject
+
+    def _db_path_from_pvtproject(mp: Path) -> Optional[Path]:
+        try:
+            proj = _parse_pvtproject(mp)
+        except Exception:
+            return None
+        return (proj.db_root / _DB_FILENAME).resolve()
+
+    def _status_strip_db_paths():
+        paths: list[Path] = []
+        if module_path is not None:
+            p = _db_path_from_pvtproject(module_path)
+            if p is not None:
+                paths.append(p)
+        for mp in (app_state.recent_modules or [])[:5]:
+            p = _db_path_from_pvtproject(Path(mp))
+            if p is not None and p not in paths:
+                paths.append(p)
+        return paths
+
+    window.set_status_strip_paths_provider(_status_strip_db_paths)
 
     # --- restore per-module session bits (after worker is wired) ------
     if session is not None:

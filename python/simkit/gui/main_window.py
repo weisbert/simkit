@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PyQt5.QtCore import Qt, QModelIndex, QPoint, QFileSystemWatcher
+from PyQt5.QtCore import Qt, QModelIndex, QPoint, QFileSystemWatcher, QTimer
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -47,6 +47,11 @@ from PyQt5.QtWidgets import (
 )
 
 from simkit.gui.bridge_worker import BridgeError, BridgeStatus, BridgeWorker
+from simkit.gui.status_strip import (
+    StatusStripWidget,
+    Summary as StatusStripSummary,
+    last_24h_summary,
+)
 from simkit.gui.controllers.diff import DiffController
 from simkit.gui.controllers.error_translator import ErrorTranslator
 from simkit.gui.controllers.run import RunController
@@ -151,8 +156,20 @@ class MainWindow(QMainWindow):
         self.set_bridge_status(BridgeStatus.AMBER)
 
         # --- status strip (spec B1) -------------------------------------
-        self.status_strip = QLabel("Last 24h: -", objectName="statusStrip")
-        self.status_strip.setContentsMargins(8, 0, 8, 4)
+        # Cross-module 24h activity summary with clickable FAIL chips.
+        # Populated by ``refresh_status_strip()`` once a paths provider
+        # is wired by app.py; until then renders the placeholder text.
+        self.status_strip = StatusStripWidget()
+        self.status_strip.fail_clicked.connect(self._on_status_strip_fail_clicked)
+        # Caller (app.py) sets this so we can enumerate module DBs
+        # without pulling app_state into the window layer.
+        self._status_strip_paths_provider: Optional[Callable[[], list[Path]]] = None
+        # Periodic refresh: 30s is rare enough to not hammer DuckDB but
+        # frequent enough that the user sees a freshly-ingested run.
+        self._status_strip_timer = QTimer(self)
+        self._status_strip_timer.setInterval(30_000)
+        self._status_strip_timer.timeout.connect(self.refresh_status_strip)
+        self._status_strip_timer.start()
 
         # --- left tree --------------------------------------------------
         self.left_tree = QTreeView(objectName="leftTree")
@@ -271,8 +288,69 @@ class MainWindow(QMainWindow):
     def append_log(self, line: str) -> None:
         self.bottom_log.append(line)
 
-    def set_status_strip(self, text: str) -> None:
-        self.status_strip.setText(text)
+    def set_status_strip_paths_provider(
+        self, provider: Callable[[], list[Path]]
+    ) -> None:
+        """Inject the closure that returns the list of module DB paths.
+
+        Wired once by :mod:`simkit.gui.app` against ``app_state``'s
+        ``recent_modules`` so the strip can aggregate across modules the
+        user has visited recently (max ~5). MainWindow stays decoupled
+        from on-disk app-state storage.
+        """
+        self._status_strip_paths_provider = provider
+        # Repaint immediately so the user doesn't wait 30s for the
+        # first non-placeholder summary.
+        self.refresh_status_strip()
+
+    def refresh_status_strip(self) -> None:
+        """Re-run the 24h aggregation and update the widget.
+
+        Called by the 30s timer, on ``run_finished``, and on bridge
+        recovery (GREEN). Safe to call before a paths provider is wired
+        (no-ops with placeholder text)."""
+        provider = self._status_strip_paths_provider
+        if provider is None:
+            return
+        try:
+            db_paths = provider()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("status-strip paths provider raised: %s", exc)
+            return
+        running_count = 0
+        rc = getattr(self, "_run_controller", None)
+        if rc is not None and rc.is_running:
+            running_count = 1
+        try:
+            summary = last_24h_summary(
+                [Path(p) for p in db_paths],
+                running_count=running_count,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.debug("status-strip aggregate failed: %s", exc)
+            return
+        self.status_strip.set_summary(summary)
+
+    def _on_status_strip_fail_clicked(
+        self, run_id: str, project_id: str,
+    ) -> None:
+        """User clicked a FAIL chip — surface a hint in the log.
+
+        Full cross-module navigation (switch loaded module + open the
+        failing review) is a Phase-5 follow-up. For now we log enough
+        for the user to find the run themselves and, if the run is in
+        the currently-loaded module, attempt to locate it in the tree.
+        """
+        self.append_log(
+            f"[status-strip] FAIL chip clicked: run={run_id} "
+            f"project={project_id or '?'}"
+        )
+        # Best-effort: if the run is in the loaded module, switch focus
+        # to the Results tab so the user lands somewhere actionable.
+        if self._loaded_module is not None and (
+            not project_id or project_id == self._loaded_module.project_name
+        ):
+            self.right_panel.setCurrentWidget(self.results_tab)
 
     def set_bridge_worker(self, worker: BridgeWorker) -> None:
         """Inject the shared BridgeWorker + instantiate Stage-3 controllers.
@@ -709,6 +787,9 @@ class MainWindow(QMainWindow):
                 self.left_tree.expandAll()
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[run] history refresh failed: {exc}")
+        # Spec B1: the newly-ingested run should count toward "X done" and
+        # any spec FAILs should join the chip strip.
+        self.refresh_status_strip()
 
     def _on_run_cancelled(self) -> None:
         self.append_log("[run] cancelled (SIGKILL fired)")
