@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Unpack a simkit payload tarball on red zone Linux.
+# Unpack a simkit payload tarball.
 # Verifies SHA256 against the .manifest.txt sibling if present.
 #
 # Usage:
-#   bash scripts/unpack_payload.sh <payload.tar.gz> [target-dir]
+#   bash <deploys>/<deploy>/scripts/unpack_payload.sh <payload.tar.gz> [target-dir]
 #
-#   target-dir defaults to ~/simkit_deploys/
+# Target dir resolution (first match wins):
+#   1. Explicit 2nd arg
+#   2. $SIMKIT_DEPLOYS_DIR env var
+#   3. Auto-detect: 2 levels up from this script's own dir
+#      (assumes script lives at <deploys-dir>/<deploy>/scripts/)
+#   4. Current working directory (last resort)
 #
 # Exit codes:
 #   0  ok
@@ -21,7 +26,22 @@ usage() {
 Usage: $0 <payload.tar.gz> [target-dir]
 
   payload.tar.gz  Path to the simkit payload archive built by make_payload.py
-  target-dir      Directory to extract into (default: ~/simkit_deploys/)
+  target-dir      Where to extract into; if omitted, auto-detected:
+                  - \$SIMKIT_DEPLOYS_DIR env var if set
+                  - else, the dir containing this script's deploy
+                    (i.e. <deploys>/<deploy>/scripts/X.sh → <deploys>)
+                  - else, current working directory
+
+Examples:
+  # Iteration path — auto-detect from this script's location
+  bash <deploys>/current/scripts/unpack_payload.sh ~/new.tar.gz
+
+  # First deploy / one-off — explicit target
+  bash unpack_payload.sh ~/new.tar.gz /path/to/my/deploys/
+
+  # Or via env var (e.g. in .bashrc):
+  export SIMKIT_DEPLOYS_DIR=/home/me/workarea/simkit_deploys
+  bash unpack_payload.sh ~/new.tar.gz
 
 The script looks for a sibling <payload>.manifest.txt and verifies the
 SHA256 if found. Missing manifest = skipped verification with a warning.
@@ -35,7 +55,26 @@ EOF
 [[ $# -le 2 ]] || usage
 
 TARBALL="$1"
-TARGET="${2:-$HOME/simkit_deploys}"
+
+# Resolve target dir per the precedence chain documented in the header.
+if [[ $# -ge 2 ]]; then
+    TARGET="$2"
+elif [[ -n "${SIMKIT_DEPLOYS_DIR:-}" ]]; then
+    TARGET="$SIMKIT_DEPLOYS_DIR"
+else
+    # Script is at <deploys>/<deploy>/scripts/unpack_payload.sh — go up 2.
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    AUTO_DEPLOYS="$(dirname "$(dirname "$SCRIPT_DIR")")"
+    # Sanity check: if AUTO_DEPLOYS looks like a real deploys-dir
+    # (i.e. has a 'current' symlink OR a simkit_*/ sibling), use it.
+    # Otherwise fall back to cwd.
+    if [[ -L "$AUTO_DEPLOYS/current" ]] \
+            || compgen -G "$AUTO_DEPLOYS/simkit_*" > /dev/null 2>&1; then
+        TARGET="$AUTO_DEPLOYS"
+    else
+        TARGET="$(pwd)"
+    fi
+fi
 
 if [[ ! -f "$TARBALL" ]]; then
     echo "ERROR: tarball not found: $TARBALL" >&2

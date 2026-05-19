@@ -6,10 +6,17 @@
 # Usage:
 #   bash scripts/cleanup_deploys.sh [--keep N] [--dry-run] [--deploys-dir DIR]
 #
+# Deploys-dir resolution (first match wins):
+#   1. Explicit --deploys-dir DIR
+#   2. $SIMKIT_DEPLOYS_DIR env var
+#   3. Auto-detect: 2 levels up from this script's own dir
+#      (assumes script lives at <deploys-dir>/<deploy>/scripts/)
+#   4. Error out
+#
 # Flags:
 #   --keep N         Keep this many most-recent deploys (default: 3)
 #   --dry-run        Print what would be deleted, don't actually delete
-#   --deploys-dir D  Where deploys live (default: ~/simkit_deploys)
+#   --deploys-dir D  Where deploys live (overrides auto-detect / env)
 #   --help           Show this help
 #
 # Exit codes:
@@ -21,7 +28,7 @@ set -euo pipefail
 
 KEEP=3
 DRY_RUN=0
-DEPLOYS_DIR="${HOME}/simkit_deploys"
+DEPLOYS_DIR=""    # filled in by resolution chain below
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -56,6 +63,25 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Resolve DEPLOYS_DIR per the documented precedence chain.
+if [[ -z "$DEPLOYS_DIR" ]]; then
+    if [[ -n "${SIMKIT_DEPLOYS_DIR:-}" ]]; then
+        DEPLOYS_DIR="$SIMKIT_DEPLOYS_DIR"
+    else
+        # Script lives at <deploys>/<deploy>/scripts/cleanup_deploys.sh
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        AUTO_DEPLOYS="$(dirname "$(dirname "$SCRIPT_DIR")")"
+        if [[ -L "$AUTO_DEPLOYS/current" ]] \
+                || compgen -G "$AUTO_DEPLOYS/simkit_*" > /dev/null 2>&1; then
+            DEPLOYS_DIR="$AUTO_DEPLOYS"
+        else
+            echo "ERROR: could not auto-detect deploys dir." >&2
+            echo "       Pass --deploys-dir DIR or set \$SIMKIT_DEPLOYS_DIR." >&2
+            exit 1
+        fi
+    fi
+fi
 
 if ! [[ "$KEEP" =~ ^[0-9]+$ ]] || [[ "$KEEP" -lt 1 ]]; then
     echo "ERROR: --keep must be a positive integer, got '$KEEP'" >&2

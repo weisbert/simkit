@@ -61,103 +61,124 @@ DuckDB databases skillbridge logs `*.swp` etc.
 Prereq: tarball + manifest transferred (USB, internal share, whatever);
 Python 3.11 on PATH.
 
-```bash
-bash scripts/unpack_payload.sh simkit_20260519_214a6ec.tar.gz
-# → extracted to ~/simkit_deploys/simkit_20260519_214a6ec/
-```
+**Pick where your deploys live.** The scripts don't assume `$HOME` —
+common choices are `~/simkit_deploys/`, `<workarea>/simkit_deploys/`,
+or `/opt/simkit/`. Call this `<DEPLOYS>` from here on.
 
-Default target is `~/simkit_deploys/`; override with second arg:
+### First-ever deploy
 
-```bash
-bash scripts/unpack_payload.sh simkit_20260519_214a6ec.tar.gz /opt/simkit
-```
-
-Then create the venv from the unpacked dir:
+Before any deploy exists, the scripts are still inside the tarball —
+chicken-and-egg. Use bare `tar` for this one time:
 
 ```bash
-cd ~/simkit_deploys/simkit_20260519_214a6ec
+mkdir -p <DEPLOYS> && cd <DEPLOYS>
+tar -xzf /path/to/simkit_20260519_214a6ec.tar.gz
+cd simkit_20260519_214a6ec
 bash scripts/deploy_venv.sh
 ```
 
-This creates `.venv/` (fully isolated — **does NOT** inherit from the
-red-zone global Python), installs every package from `vendor/wheels/`,
-installs simkit in editable mode, runs 4 smoke tests, and **atomically
-points `~/simkit_deploys/current` → this deploy dir** so the "active"
-deploy has a stable, version-independent path.
-
-After it's done, use the stable `current` path:
+Worked example with `workarea/simkit_deploys/`:
 
 ```bash
-cd ~/simkit_deploys/current
+cd /home/me/workarea
+mkdir -p simkit_deploys && cd simkit_deploys
+tar -xzf ~/payload.tar.gz       # tarball wherever you parked it
+cd simkit_20260519_214a6ec
+bash scripts/deploy_venv.sh
+```
+
+`deploy_venv.sh` creates `.venv/` (fully isolated — **does NOT**
+inherit from the red-zone global Python), installs every package from
+`vendor/wheels/`, installs simkit editable, runs 4 smoke tests, and
+**atomically points `<DEPLOYS>/current` → this deploy** so the active
+deploy has a stable, version-independent path.
+
+After it's done:
+
+```bash
+cd <DEPLOYS>/current
 source .venv/bin/activate
 pvt --help
 ```
 
-**Re-deploying same SHA:**
+### Subsequent iterations
+
+The `current/scripts/` dir from the previous deploy is your bootstrap.
+`unpack_payload.sh` auto-detects `<DEPLOYS>` from its own location
+(2 levels up from itself), so you don't have to repeat the path.
 
 ```bash
-bash scripts/deploy_venv.sh --force    # wipe + recreate .venv
+bash <DEPLOYS>/current/scripts/unpack_payload.sh /path/to/new.tar.gz
+cd <DEPLOYS>/$(basename /path/to/new.tar.gz .tar.gz)
+bash scripts/deploy_venv.sh
 ```
 
-**Deploy without activating (don't touch the `current` symlink):**
+Worked example (tarball already inside the deploys dir):
 
 ```bash
-bash scripts/deploy_venv.sh --no-current   # leaves 'current' on previous deploy
+# tarball lives at <DEPLOYS>/new_payload.tar.gz
+bash <DEPLOYS>/current/scripts/unpack_payload.sh <DEPLOYS>/new_payload.tar.gz
+cd <DEPLOYS>/simkit_<newdate>_<newsha>
+bash scripts/deploy_venv.sh
 ```
 
----
+**Target dir resolution chain in `unpack_payload.sh`** (first match wins):
 
-## Iterating — multiple deployments over time
+1. Explicit 2nd arg (`bash unpack_payload.sh tarball.tar.gz /custom/path`)
+2. `$SIMKIT_DEPLOYS_DIR` env var
+3. Auto-detect 2 levels up from script's own location
+4. Current working directory (last resort)
 
-Every iteration produces a new `simkit_<date>_<sha>/` directory in
-`~/simkit_deploys/`. Old deploys are preserved for rollback. The
-`current` symlink always points at the most-recently-deployed one.
+If you put `export SIMKIT_DEPLOYS_DIR=/home/me/workarea/simkit_deploys`
+in your `.bashrc`, every invocation lands in the right place without
+remembering the absolute path.
 
-**One-line iteration from red zone:**
+### Useful flags
 
 ```bash
-bash scripts/unpack_payload.sh new_payload.tar.gz \
-  && cd ~/simkit_deploys/$(basename new_payload.tar.gz .tar.gz) \
-  && bash scripts/deploy_venv.sh
+bash scripts/deploy_venv.sh --force       # wipe + recreate existing .venv
+bash scripts/deploy_venv.sh --no-current  # don't touch the 'current' symlink
+bash scripts/deploy_venv.sh --no-smoke    # skip post-install smoke tests
 ```
 
-**Daily work** — your activation command **never changes**:
+### Daily activation (永远是这一行)
 
 ```bash
-cd ~/simkit_deploys/current
+cd <DEPLOYS>/current
 source .venv/bin/activate
 pvt run review.json
 ```
 
-**Rollback to an earlier deploy** (instant — just retarget the symlink):
+### Rollback to an earlier deploy
+
+Instant — just retarget the symlink, no rebuild:
 
 ```bash
-ln -sfn ~/simkit_deploys/simkit_<earlier-date>_<sha> ~/simkit_deploys/current
+ln -sfn <DEPLOYS>/simkit_<earlier-date>_<sha> <DEPLOYS>/current
 # next 'cd current && source .venv/bin/activate' uses the earlier env
 ```
 
-**Cleanup old deploys** to reclaim disk:
+### Cleanup old deploys
 
 ```bash
-bash scripts/cleanup_deploys.sh --keep 3 --dry-run   # preview
-bash scripts/cleanup_deploys.sh --keep 3             # actually delete
+bash <DEPLOYS>/current/scripts/cleanup_deploys.sh --keep 3 --dry-run
+bash <DEPLOYS>/current/scripts/cleanup_deploys.sh --keep 3
 ```
+
+`cleanup_deploys.sh` auto-detects `<DEPLOYS>` the same way
+`unpack_payload.sh` does. Override with `--deploys-dir`.
 
 Cleanup rules:
 - Keeps the N most-recently-modified deploys (default `--keep 3`).
 - **Always protects the deploy that `current` points to**, even if it
-  would otherwise be older than the keep cutoff.
-- Pure `rm -rf` on the rest. No tarball, no archive — gone.
-
-`--dry-run` lists what *would* be deleted, including each dir's size
-and the total disk that would be freed. Always preview before deleting
-in shared environments.
-
-Override deploys dir (e.g. for testing):
-
-```bash
-bash scripts/cleanup_deploys.sh --deploys-dir /opt/simkit --keep 5
-```
+  would otherwise fall outside the keep cutoff (rollback semantics).
+- `*.tar.gz` and `*.manifest.txt` files are **NOT** touched — only
+  `simkit_*/` directories. Clean tarballs by hand:
+  ```bash
+  rm <DEPLOYS>/*.tar.gz <DEPLOYS>/*.manifest.txt
+  ```
+- `--dry-run` lists what *would* be deleted with sizes + total freed.
+  Always preview before deleting in shared environments.
 
 ---
 
