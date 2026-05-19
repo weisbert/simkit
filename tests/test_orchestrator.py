@@ -842,5 +842,294 @@ class ExecuteBaselineCornerTests(unittest.TestCase):
         self.assertIn("baseline-corner setup failed", pss.notes)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3A v1.9 #3 — additionalArgs snap/restore (gap #1 closeout from DECISIONS #68)
+
+
+class ExecuteIcFromAdditionalArgsSnapRestoreTests(unittest.TestCase):
+    """Pin the v1.9 #3 fix: orchestrator captures each test's prior
+    ``additionalArgs`` via ``pvt_runner_get_sim_option_val`` before installing
+    the per-corner pre-run hook, and restores per-test in the finally
+    block instead of unconditionally clearing to "".
+
+    Edge cases:
+      * snapshot returns non-empty string → restore loop writes it back
+      * snapshot returns None (option unset) → restore loop clears to ""
+      * snapshot raises per-test → notes appended, run proceeds, restore = ""
+      * bridge lacks ``pvt_runner_get_sim_option_val`` attr → fallback
+        path is exactly v1.3 clear-to-"" (back-compat)
+      * clear_ic_source is called with the captured value (NOT hardcoded "")
+    """
+
+    UNION_DOC = {
+        "union_schema_version": 1,
+        "name": "u", "project": "myproj", "testbench_id": "tb",
+        "rows": [
+            {"row_name": "C1", "vars": {"VDD": "1.0"}, "models": []},
+        ],
+    }
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_v19gap1_"))
+        self.pvt_path = self.tmp / "myproj.pvtproject"
+        self.pvt_path.write_text('{"schema_version":1,"project":"myproj"}\n')
+        self.trans_hist = "fixed_trans_hist"
+        d = (self.tmp / "results" / "maestro" / self.trans_hist
+             / "1" / "sim_test" / "netlist")
+        d.mkdir(parents=True)
+        (d / "spectre.fc").write_text("# fake fc\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _make_review(self):
+        union_path = self.tmp / "unions" / "u.union.json"
+        union_path.parent.mkdir(exist_ok=True)
+        union_path.write_text(json.dumps(self.UNION_DOC))
+        doc = {
+            "review_schema_version": 2,
+            "name": "icfrom", "project": "myproj",
+            "items": [
+                {"name": "trans", "tests": ["sim_test"],
+                 "union": "unions/u.union.json"},
+                {"name": "pss", "tests": ["sim_test"],
+                 "union": "unions/u.union.json",
+                 "ic_from": {"item": "trans", "file": "fc", "mode": "readns"}},
+            ],
+        }
+        review_path = self.tmp / "icfrom.review.json"
+        review_path.write_text(json.dumps(doc))
+        return load_review(review_path)
+
+    def _make_bridge(self, *, probe_returns=None, probe_raises=False,
+                     include_probe=True):
+        """Bridge with v1.9 #2 probe surface. probe_returns: dict[test]->val
+        or single value (broadcast). probe_raises: True => probe raises."""
+        trans_hist = self.trans_hist
+
+        class MockBridge:
+            def __init__(self):
+                self.run_n = 0
+                self.run_histories = []
+                self.installs = []
+                self.disables = []
+                self.clear_ic_calls = []
+                self.probe_calls = []
+
+            def pvt_runner_snapshot_test_state(self, *, session):
+                return [("sim_test", True)]
+
+            def pvt_runner_restore_test_state(self, snap, *, session):
+                pass
+
+            def pvt_runner_enable_only(self, names, *, session):
+                pass
+
+            def pvt_runner_run(self, hist, *, session, **kwargs):
+                self.run_n += 1
+                self.run_histories.append(hist)
+                if self.run_n == 1:
+                    return (0, 0, trans_hist)
+                return (0, 0, hist)
+
+            def pvt_save(self, hist, *, pvtproject_path, session):
+                return str(Path("/tmp") / f"fake_dump_{hist}")
+
+            def pvt_corners_push(self, path, **kwargs):
+                pass
+
+            def pvt_runner_get_pre_run_script(self, test, *, session):
+                return ""
+
+            def pvt_runner_install_pre_run_script(self, test, path, *, session):
+                self.installs.append((test, path))
+                return path
+
+            def pvt_runner_disable_pre_run_script(self, test, *, session):
+                self.disables.append(test)
+
+            def pvt_runner_clear_ic_source(self, test, mode, prev, *, session):
+                self.clear_ic_calls.append((test, mode, prev))
+
+        b = MockBridge()
+        if include_probe:
+            def probe(test, key, *, session):
+                b.probe_calls.append((test, key))
+                if probe_raises:
+                    raise RuntimeError("probe wedge")
+                if isinstance(probe_returns, dict):
+                    return probe_returns.get(test)
+                return probe_returns
+            b.pvt_runner_get_sim_option_val = probe
+        return b
+
+    def _run(self, bridge):
+        review = self._make_review()
+        plan = plan_review(review)
+        return execute(
+            plan, bridge,
+            session="fake_session", pvtproject_path=self.pvt_path,
+            push_union=False, ingest_cb=lambda d: None,
+        )
+
+    def test_snapshot_captures_nonempty_prior_value_and_restores_it(self):
+        bridge = self._make_bridge(probe_returns="+ic /tmp/preexisting.ic")
+        self._run(bridge)
+        # probe called once per test in item.tests = ["sim_test"]
+        self.assertIn(("sim_test", "additionalArgs"), bridge.probe_calls)
+        # restore writes the captured value back, NOT ""
+        self.assertEqual(len(bridge.clear_ic_calls), 1)
+        self.assertEqual(
+            bridge.clear_ic_calls[0],
+            ("sim_test", "readns", "+ic /tmp/preexisting.ic"),
+        )
+
+    def test_snapshot_captures_none_translates_to_empty_clear(self):
+        # Option was unset (probe returns None). Restore writes "" so the
+        # SKILL helper normalises back to "unset" terminal state.
+        bridge = self._make_bridge(probe_returns=None)
+        self._run(bridge)
+        self.assertEqual(bridge.clear_ic_calls[0], ("sim_test", "readns", ""))
+
+    def test_snapshot_raises_records_note_and_falls_back_to_empty(self):
+        bridge = self._make_bridge(probe_raises=True)
+        report = self._run(bridge)
+        pss = next(r for r in report.items if r.item_name == "pss")
+        # Per-test note recorded; run not aborted
+        self.assertTrue(any("additionalArgs snapshot" in n
+                            for n in pss.notes.split("\n")) or
+                        "additionalArgs snapshot" in pss.notes)
+        self.assertTrue(pss.completed)
+        # Restore falls back to ""
+        self.assertEqual(bridge.clear_ic_calls[0], ("sim_test", "readns", ""))
+
+    def test_bridge_without_probe_method_uses_v13_fallback(self):
+        # Mock bridge without pvt_runner_get_sim_option_val attr — must
+        # restore to "" without crashing, and append a fallback note.
+        bridge = self._make_bridge(include_probe=False)
+        report = self._run(bridge)
+        pss = next(r for r in report.items if r.item_name == "pss")
+        self.assertEqual(bridge.clear_ic_calls[0], ("sim_test", "readns", ""))
+        self.assertIn("lacks pvt_runner_get_sim_option_val", pss.notes)
+
+    def test_clear_ic_source_called_per_test_with_captured_value(self):
+        # Pin contract: per-test loop, not hardcoded ""
+        bridge = self._make_bridge(probe_returns="readic=\"/old.ic\"")
+        self._run(bridge)
+        # Exactly one call (single-test item), value matches probe
+        self.assertEqual(len(bridge.clear_ic_calls), 1)
+        self.assertEqual(bridge.clear_ic_calls[0][2], 'readic="/old.ic"')
+
+
+class ExecuteIcFromMultiTestSnapRestoreTests(unittest.TestCase):
+    """Multi-test item: each test gets its own per-test snapshot + restore."""
+
+    UNION_DOC = {
+        "union_schema_version": 1,
+        "name": "u", "project": "myproj", "testbench_id": "tb",
+        "rows": [
+            {"row_name": "C1", "vars": {"VDD": "1.0"}, "models": []},
+        ],
+    }
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_v19gap1m_"))
+        self.pvt_path = self.tmp / "myproj.pvtproject"
+        self.pvt_path.write_text('{"schema_version":1,"project":"myproj"}\n')
+        self.trans_hist = "fixed_trans_hist"
+        # IC resolution uses item.tests[0] = "Test" → /1/Test/netlist/spectre.fc
+        d = (self.tmp / "results" / "maestro" / self.trans_hist
+             / "1" / "Test" / "netlist")
+        d.mkdir(parents=True)
+        (d / "spectre.fc").write_text("# fake\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_per_test_restore_with_divergent_prior_values(self):
+        union_path = self.tmp / "unions" / "u.union.json"
+        union_path.parent.mkdir(exist_ok=True)
+        union_path.write_text(json.dumps(self.UNION_DOC))
+        doc = {
+            "review_schema_version": 2,
+            "name": "icfrom", "project": "myproj",
+            "items": [
+                {"name": "trans", "tests": ["Test"],
+                 "union": "unions/u.union.json"},
+                {"name": "pss", "tests": ["Test", "Test_trans"],
+                 "union": "unions/u.union.json",
+                 "ic_from": {"item": "trans", "file": "fc", "mode": "readns"}},
+            ],
+        }
+        review_path = self.tmp / "icfrom.review.json"
+        review_path.write_text(json.dumps(doc))
+        review = load_review(review_path)
+        plan = plan_review(review)
+        trans_hist = self.trans_hist
+        prior_map = {
+            "Test": "+nodeset /tmp/fc",
+            "Test_trans": "+ic /tmp/ic",
+        }
+
+        class MockBridge:
+            def __init__(self):
+                self.run_n = 0
+                self.installs = []
+                self.disables = []
+                self.clear_ic_calls = []
+                self.probe_calls = []
+
+            def pvt_runner_snapshot_test_state(self, *, session):
+                return [("Test", True), ("Test_trans", True)]
+
+            def pvt_runner_restore_test_state(self, snap, *, session):
+                pass
+
+            def pvt_runner_enable_only(self, names, *, session):
+                pass
+
+            def pvt_runner_run(self, hist, *, session, **kwargs):
+                self.run_n += 1
+                if self.run_n == 1:
+                    return (0, 0, trans_hist)
+                return (0, 0, hist)
+
+            def pvt_save(self, hist, *, pvtproject_path, session):
+                return str(Path("/tmp") / f"fake_dump_{hist}")
+
+            def pvt_corners_push(self, path, **kwargs):
+                pass
+
+            def pvt_runner_get_pre_run_script(self, test, *, session):
+                return ""
+
+            def pvt_runner_install_pre_run_script(self, test, path, *, session):
+                self.installs.append((test, path))
+                return path
+
+            def pvt_runner_disable_pre_run_script(self, test, *, session):
+                self.disables.append(test)
+
+            def pvt_runner_clear_ic_source(self, test, mode, prev, *, session):
+                self.clear_ic_calls.append((test, mode, prev))
+
+            def pvt_runner_get_sim_option_val(self, test, key, *, session):
+                self.probe_calls.append((test, key))
+                return prior_map[test]
+
+        bridge = MockBridge()
+        execute(
+            plan, bridge,
+            session="fake_session", pvtproject_path=self.pvt_path,
+            push_union=False, ingest_cb=lambda d: None,
+        )
+        # Each test's prior value got captured and written back
+        self.assertEqual(len(bridge.probe_calls), 2)
+        self.assertEqual(len(bridge.clear_ic_calls), 2)
+        by_test = {c[0]: c[2] for c in bridge.clear_ic_calls}
+        self.assertEqual(by_test["Test"], "+nodeset /tmp/fc")
+        self.assertEqual(by_test["Test_trans"], "+ic /tmp/ic")
+
+
 if __name__ == "__main__":
     unittest.main()

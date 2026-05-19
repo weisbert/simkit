@@ -42,7 +42,7 @@ from simkit.strategies.base import (
     StrategyOutcome,
     StrategyResult,
 )
-from simkit.strategies.naive_retry import _map_sub_to_rows, _sanitize
+from simkit.strategies.naive_retry import _map_sub_to_rows, _sanitize, _trace
 
 
 DEFAULT_RAMP: tuple[float, ...] = (1e-11, 1e-10, 1e-9)
@@ -144,6 +144,7 @@ class GminBump(Strategy):
         history_name = _sanitize(
             f"{ctx.item_name}__gmin{ctx.attempt_number}"
         )
+        _trace("gmin_bump", ctx, kept, fail_names)
 
         ctx.bridge.pvt_runner_restore_corners_enable(
             target, session=ctx.session,

@@ -21,6 +21,7 @@ from simkit.pre_run_script import (  # noqa: E402
     PreRunSpec,
     build_corner_arg_map,
     render_pre_run_script,
+    write_per_test_pre_run_scripts,
     write_pre_run_script,
     _skill_quote,
 )
@@ -248,6 +249,206 @@ class WriteScriptTests(unittest.TestCase):
         # No spaces or slashes in basename
         self.assertNotIn(" ", p.name)
         self.assertNotIn("/", p.name)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3A v1.9 #3 gap #2 — per-test pre-run scripts
+
+
+class PreRunSpecPerTestFieldTests(unittest.TestCase):
+    """The new ``per_test_corner_to_arg`` optional field on PreRunSpec.
+
+    Default is None (preserves v1.3/v1.7 single-map shape). When set to a
+    Mapping[test_name, Mapping[corner, arg]], it acts as a per-test
+    override consumed by ``write_per_test_pre_run_scripts``.
+    """
+
+    def test_default_per_test_field_is_none(self):
+        spec = PreRunSpec(item_name="x", mode="readns",
+                          corner_to_arg={"TT": 'readns="/a"'})
+        self.assertIsNone(spec.per_test_corner_to_arg)
+
+    def test_per_test_field_accepts_mapping(self):
+        per_test = {
+            "Test": {"TT": 'readns="/a.fc"'},
+            "Test_trans": {"TT": 'readns="/b.fc"'},
+        }
+        spec = PreRunSpec(
+            item_name="x", mode="readns",
+            corner_to_arg={"TT": 'readns="/c.fc"'},
+            per_test_corner_to_arg=per_test,
+        )
+        self.assertEqual(
+            spec.per_test_corner_to_arg["Test"], {"TT": 'readns="/a.fc"'},
+        )
+
+    def test_render_pre_run_script_ignores_per_test_field(self):
+        # Single render path is unchanged — only write_per_test_*
+        # consumes the field. render_pre_run_script consults only the
+        # top-level corner_to_arg.
+        spec = PreRunSpec(
+            item_name="x", mode="readns",
+            corner_to_arg={"TT": 'readns="/top.fc"'},
+            per_test_corner_to_arg={"t1": {"TT": 'readns="/per_test.fc"'}},
+        )
+        src = render_pre_run_script(spec)
+        self.assertIn('"readns=\\"/top.fc\\""', src)
+        self.assertNotIn("/per_test.fc", src)
+
+
+class WritePerTestPreRunScriptsTests(unittest.TestCase):
+    """v1.9 #3 gap #2 helper: write_per_test_pre_run_scripts."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_prerun_pt_"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_returns_one_file_per_test_when_per_test_overrides_present(self):
+        spec = PreRunSpec(
+            item_name="pss",
+            mode="readns",
+            corner_to_arg={"TT": 'readns="/default.fc"'},
+            per_test_corner_to_arg={
+                "Test": {"TT": 'readns="/test_a.fc"'},
+                "Test_trans": {"TT": 'readns="/test_b.fc"'},
+            },
+        )
+        out = write_per_test_pre_run_scripts(
+            spec, ["Test", "Test_trans"], self.tmp,
+        )
+        self.assertEqual(set(out.keys()), {"Test", "Test_trans"})
+        # Two distinct files on disk (divergent content → divergent hash)
+        self.assertNotEqual(out["Test"], out["Test_trans"])
+        for p in out.values():
+            self.assertTrue(p.exists())
+        # Each contains its specific path
+        self.assertIn("/test_a.fc", out["Test"].read_text())
+        self.assertIn("/test_b.fc", out["Test_trans"].read_text())
+
+    def test_falls_back_to_top_level_when_test_absent_from_per_test(self):
+        # Per-test only has "Test"; "Test_trans" must inherit the top-level map.
+        spec = PreRunSpec(
+            item_name="pss", mode="readns",
+            corner_to_arg={"TT": 'readns="/default.fc"'},
+            per_test_corner_to_arg={
+                "Test": {"TT": 'readns="/special.fc"'},
+            },
+        )
+        out = write_per_test_pre_run_scripts(
+            spec, ["Test", "Test_trans"], self.tmp,
+        )
+        self.assertIn("/special.fc", out["Test"].read_text())
+        self.assertIn("/default.fc", out["Test_trans"].read_text())
+
+    def test_none_per_test_yields_same_file_for_all_tests(self):
+        # v1.3/v1.7 compatibility: per_test_corner_to_arg=None means every
+        # test gets the same content (identical hash → identical filename).
+        spec = PreRunSpec(
+            item_name="pss", mode="readns",
+            corner_to_arg={"TT": 'readns="/shared.fc"'},
+            per_test_corner_to_arg=None,
+        )
+        out = write_per_test_pre_run_scripts(
+            spec, ["Test", "Test_trans"], self.tmp,
+        )
+        self.assertEqual(out["Test"], out["Test_trans"])
+
+    def test_empty_tests_list_returns_empty_dict(self):
+        spec = PreRunSpec(item_name="x", mode="readns",
+                          corner_to_arg={"TT": 'readns="/a"'})
+        out = write_per_test_pre_run_scripts(spec, [], self.tmp)
+        self.assertEqual(out, {})
+
+    def test_per_test_scripts_carry_correct_corner_to_arg(self):
+        # Two tests, two distinct full maps with different keys
+        spec = PreRunSpec(
+            item_name="pss", mode="readns",
+            corner_to_arg={"DEFAULT": 'readns="/x.fc"'},
+            per_test_corner_to_arg={
+                "Test": {"C1": 'readns="/a1.fc"', "C2": 'readns="/a2.fc"'},
+                "Test_trans": {"C1": 'readns="/b1.fc"'},
+            },
+        )
+        out = write_per_test_pre_run_scripts(
+            spec, ["Test", "Test_trans"], self.tmp,
+        )
+        test_a = out["Test"].read_text()
+        test_b = out["Test_trans"].read_text()
+        # Test has 2 corner entries; Test_trans has 1
+        self.assertIn('(list "C1"', test_a)
+        self.assertIn('(list "C2"', test_a)
+        self.assertIn('(list "C1"', test_b)
+        self.assertNotIn('(list "C2"', test_b)
+
+    def test_top_level_corner_to_arg_unchanged_when_per_test_used(self):
+        # Pin: the per-test rendering must NOT mutate the parent spec's
+        # corner_to_arg in place. Build a frozen spec and verify.
+        original_top = {"TT": 'readns="/top.fc"'}
+        spec = PreRunSpec(
+            item_name="pss", mode="readns",
+            corner_to_arg=original_top,
+            per_test_corner_to_arg={
+                "Test": {"TT": 'readns="/override.fc"'},
+            },
+        )
+        write_per_test_pre_run_scripts(spec, ["Test", "Other"], self.tmp)
+        # spec.corner_to_arg points to the same dict we passed in
+        self.assertEqual(spec.corner_to_arg, original_top)
+
+    def test_baseline_value_propagates_to_per_test_scripts(self):
+        # gmin_bump-style spec — baseline_value must thread through per-test
+        # rendering so partial overrides still get the A6 safe-write shape.
+        spec = PreRunSpec(
+            item_name="g", mode="gmin_bump",
+            corner_to_arg={"TT": "1e-10"},
+            option_key="gmin",
+            baseline_value="1e-12",
+            per_test_corner_to_arg={
+                "Test": {"TT": "1e-10"},
+                "Test_trans": {"TT": "5e-11"},
+            },
+        )
+        out = write_per_test_pre_run_scripts(
+            spec, ["Test", "Test_trans"], self.tmp,
+        )
+        for p in out.values():
+            txt = p.read_text()
+            self.assertIn("STEP 1", txt)
+            self.assertIn('asiSetSimOptionVal asi "gmin" "1e-12"', txt)
+
+    def test_option_key_propagates_to_per_test_scripts(self):
+        spec = PreRunSpec(
+            item_name="g", mode="custom",
+            corner_to_arg={"TT": "v"},
+            option_key="reltol",
+            per_test_corner_to_arg={
+                "T": {"TT": "1e-4"},
+            },
+        )
+        out = write_per_test_pre_run_scripts(spec, ["T"], self.tmp)
+        self.assertIn('asiSetSimOptionVal asi "reltol"', out["T"].read_text())
+
+    def test_default_subdir_under_simkit_pre_run(self):
+        spec = PreRunSpec(item_name="x", mode="readns",
+                          corner_to_arg={"TT": 'readns="/a"'})
+        out = write_per_test_pre_run_scripts(spec, ["T"], self.tmp)
+        self.assertIn(".simkit/pre_run/", str(out["T"]))
+
+    def test_existing_single_render_path_uses_only_top_level(self):
+        # Regression: write_pre_run_script alone (the v1.3/v1.7 path)
+        # ignores per_test_corner_to_arg — only the new helper consumes it.
+        spec = PreRunSpec(
+            item_name="x", mode="readns",
+            corner_to_arg={"TT": 'readns="/top.fc"'},
+            per_test_corner_to_arg={
+                "T": {"TT": 'readns="/per_test.fc"'},
+            },
+        )
+        p = write_pre_run_script(spec, self.tmp)
+        self.assertIn("/top.fc", p.read_text())
+        self.assertNotIn("/per_test.fc", p.read_text())
 
 
 if __name__ == "__main__":

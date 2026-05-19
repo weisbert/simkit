@@ -16,19 +16,87 @@
 
 ;; --------------------------------------------------------------------------
 ;; Resolve the on-disk location of THIS script so we can find sibling files
-;; regardless of cwd. simplifyFilename(currentFilename()) is unavailable; we
-;; rely on the SKILL global `currentFilename`-style hint indirectly by using
-;; `which` — but the safest portable form is to require the user to invoke
-;; us with the cwd at the test directory or to supply PVT_TEST_ROOT.
+;; regardless of cwd. Classic SKILL exposes no in-flight "current loading
+;; file" primitive (getAllLoadedFiles only records the file after the load
+;; completes, so it cannot help during the in-flight load that needs the
+;; path NOW), so we layer four strategies, in priority order:
+;;   1. SKILL global `_PVT_FORCE_ROOT` set by the caller before `(load ...)`.
+;;      Useful for skillbridge / Python launchers that compute the path
+;;      from the script name they're about to load.
+;;   2. Env vars PVT_TEST_ROOT / PVT_SKILL_ROOT. Empty-string env values
+;;      are treated as unset because SKILL's (or "" X) returns "" — a
+;;      real-world stumble when callers export blank values "to clear them".
+;;   3. Upward walk from cwd looking for a marker `skill/tests/runTests.il`.
+;;      Handles cwd anywhere inside the simkit checkout, including the
+;;      `cd <simkit> && virtuoso -replay skill/tests/runTests.il` path.
+;;      Also scans `getSkillPath()` entries.
+;;   4. Last-resort: cwd + "/skill[/tests]" (preserves the original
+;;      pre-fix behavior). If layer 4 trips, the subsequent (load ...)
+;;      calls will fail loudly at line 168 with a clear "can't access
+;;      file" error pointing at the bad path printed below.
 ;; --------------------------------------------------------------------------
 
+(procedure (_pvtEnvOrNil name)
+  "(getShellEnvVar name) returns \"\" both when the var is unset AND when
+   it is exported as the empty string. SKILL's `or` treats \"\" as truthy,
+   so we coerce empty values to nil here."
+  (let ((v (getShellEnvVar name)))
+    (cond
+      ((null v) nil)
+      ((zerop (strlen v)) nil)
+      (t v))))
+
+(procedure (_pvtFindRepoRoot startDir)
+  "Walk up from startDir looking for the marker `skill/tests/runTests.il`.
+   Returns the directory containing `skill/...` or nil if nothing found
+   within 12 parent levels. simplifyFilename collapses `..` segments so
+   the loop terminates at filesystem root."
+  (let ((dir (simplifyFilename startDir)) (hit nil) (i 0))
+    (while (and (not hit) (lessp i 12) dir (nequal dir ""))
+      (when (isFile (strcat dir "/skill/tests/runTests.il"))
+        (setq hit dir))
+      (let ((parent (simplifyFilename (strcat dir "/.."))))
+        (cond
+          ((equal parent dir) (setq dir nil))   ;; hit filesystem root
+          (t (setq dir parent))))
+      (setq i (plus i 1)))
+    hit))
+
+(defvar _PVT_REPO_ROOT
+  (or
+    ;; (1) caller-set SKILL global override
+    (and (boundp '_PVT_FORCE_ROOT)
+         _PVT_FORCE_ROOT
+         (stringp _PVT_FORCE_ROOT)
+         (not (zerop (strlen _PVT_FORCE_ROOT)))
+         (simplifyFilename _PVT_FORCE_ROOT))
+    ;; (3a) upward walk from cwd
+    (_pvtFindRepoRoot (getWorkingDir))
+    ;; (3b) scan SKILL search path entries
+    (let ((found nil))
+      (foreach p (or (getSkillPath) (list "."))
+        (unless found
+          (let ((cand (_pvtFindRepoRoot p)))
+            (when cand (setq found cand)))))
+      found)))
+
 (defvar PVT_TEST_ROOT
-  (or (getShellEnvVar "PVT_TEST_ROOT")
+  (or (_pvtEnvOrNil "PVT_TEST_ROOT")
+      (and _PVT_REPO_ROOT (strcat _PVT_REPO_ROOT "/skill/tests"))
       (strcat (simplifyFilename (getWorkingDir)) "/skill/tests")))
 
 (defvar PVT_SKILL_ROOT
-  (or (getShellEnvVar "PVT_SKILL_ROOT")
+  (or (_pvtEnvOrNil "PVT_SKILL_ROOT")
+      (and _PVT_REPO_ROOT (strcat _PVT_REPO_ROOT "/skill"))
       (strcat (simplifyFilename (getWorkingDir)) "/skill")))
+
+(printf "[runTests] PVT_SKILL_ROOT=%s\n" PVT_SKILL_ROOT)
+(printf "[runTests] PVT_TEST_ROOT=%s\n"  PVT_TEST_ROOT)
+(unless (isFile (strcat PVT_SKILL_ROOT "/pvtError.il"))
+  (printf "[runTests] WARNING: %s/pvtError.il not found.\n" PVT_SKILL_ROOT)
+  (printf "[runTests]   To fix: (a) cd into the simkit repo root, OR\n")
+  (printf "[runTests]           (b) (setq _PVT_FORCE_ROOT \"/abs/path/to/simkit\") before (load ...), OR\n")
+  (printf "[runTests]           (c) export PVT_SKILL_ROOT / PVT_TEST_ROOT env vars.\n"))
 
 
 ;; --------------------------------------------------------------------------

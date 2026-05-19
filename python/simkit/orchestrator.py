@@ -694,6 +694,39 @@ def _execute_ic_chained_item(
         notes.append(f"ic_from: pre-run snapshot failed: {exc}")
         prior_scripts = {tname: "" for tname in item.tests}
 
+    # 3b. Snapshot each test's prior additionalArgs (Phase 3A v1.9 #3, gap #1
+    # closeout from DECISIONS #68). Use the v1.9 #2 primitive
+    # ``pvt_runner_get_sim_option_val`` to capture each test's current
+    # ``additionalArgs`` value so the finally block can restore it
+    # byte-identically instead of unconditionally clearing to "".
+    #
+    # Sentinel: ``_NO_SNAPSHOT`` means the bridge wrapper isn't available
+    # (mock bridges from pre-v1.9 #2 tests, or a SKILL surface that doesn't
+    # expose the getter). Falls back to the old clear-to-"" behaviour for
+    # those tests so partial bridge upgrades don't break existing pipelines.
+    _NO_SNAPSHOT = object()
+    prior_additional_args: dict[str, object] = {}
+    probe = getattr(bridge, "pvt_runner_get_sim_option_val", None)
+    if probe is None:
+        for tname in item.tests:
+            prior_additional_args[tname] = _NO_SNAPSHOT
+        notes.append(
+            "ic_from: bridge lacks pvt_runner_get_sim_option_val — "
+            "using v1.3 clear-to-empty additionalArgs cleanup"
+        )
+    else:
+        for tname in item.tests:
+            try:
+                prior_additional_args[tname] = probe(
+                    tname, "additionalArgs", session=session,
+                )
+            except Exception as exc:
+                prior_additional_args[tname] = _NO_SNAPSHOT
+                notes.append(
+                    f"ic_from: additionalArgs snapshot on {tname!r} "
+                    f"failed: {exc} (clear-to-empty fallback)"
+                )
+
     # 4. Install our pre-run script on every test in the item
     install_failures: list[str] = []
     for tname in item.tests:
@@ -841,17 +874,31 @@ def _execute_ic_chained_item(
                     notes.append(
                         f"reattach user's pre-run {prior!r} on {tname!r}: {exc}"
                     )
-        # additionalArgs cleanup: stage-1's ClearIcSource writes "" to
-        # additionalArgs, which is the safe default. We don't have a
-        # captured prev (the per-corner script wrote per-corner values)
-        # so reset to empty here. If the user had a manual additionalArgs
-        # entry pre-run, this is a known gap (v1.3.1 candidate).
-        try:
-            bridge.pvt_runner_clear_ic_source(
-                test_for_ic, ic_from.mode, "", session=session,
-            )
-        except Exception as exc:
-            notes.append(f"additionalArgs clear: {exc}")
+        # additionalArgs cleanup (Phase 3A v1.9 #3, gap #1 closeout from
+        # DECISIONS #68): restore each test's PRIOR additionalArgs from the
+        # snapshot taken in step 3b instead of unconditionally clearing to
+        # "". Pre-v1.9 behaviour (clear-to-"") is preserved for tests whose
+        # snapshot returned the ``_NO_SNAPSHOT`` sentinel (probe wrapper
+        # missing on bridge, or per-test snapshot raised).
+        for tname in item.tests:
+            prev = prior_additional_args.get(tname, _NO_SNAPSHOT)
+            if prev is _NO_SNAPSHOT:
+                restore_value = ""
+            elif prev is None:
+                # Option was unset before our pre-run write. Clear to "" so
+                # the asi returns to "no value set" terminal state (the
+                # SKILL helper normalises empty + nil to "unset").
+                restore_value = ""
+            else:
+                restore_value = str(prev)
+            try:
+                bridge.pvt_runner_clear_ic_source(
+                    tname, ic_from.mode, restore_value, session=session,
+                )
+            except Exception as exc:
+                notes.append(
+                    f"additionalArgs restore on {tname!r}: {exc}"
+                )
 
     return (histories, run_dirs, completed)
 

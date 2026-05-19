@@ -14,12 +14,25 @@ of every enabled corner; that wasted Spectre time on PASS corners.)
 
 from __future__ import annotations
 
+import os
+
 from simkit.strategies.base import (
     Strategy,
     StrategyContext,
     StrategyOutcome,
     StrategyResult,
 )
+
+
+def _trace(strategy_name: str, ctx: StrategyContext, targeted, remaining_before):
+    """Emit one trace line when SIMKIT_TRACE=1. Default off."""
+    if os.environ.get("SIMKIT_TRACE") != "1":
+        return
+    print(
+        f"[trace] {strategy_name} attempt #{ctx.attempt_number}: "
+        f"targeted={sorted(targeted)} "
+        f"remaining_before={sorted(remaining_before)}"
+    )
 
 
 class NaiveRetry(Strategy):
@@ -56,6 +69,7 @@ class NaiveRetry(Strategy):
         history_name = _sanitize(
             f"{ctx.item_name}__retry{ctx.attempt_number}"
         )
+        _trace("naive_retry", ctx, kept, fail_names)
 
         ctx.bridge.pvt_runner_restore_corners_enable(
             target, session=ctx.session,

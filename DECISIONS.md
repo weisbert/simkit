@@ -1826,3 +1826,82 @@ During the asi probe on fnxSession0, observed both `Test` and `Test_trans` carry
 - v1.3 gap #1: snapshot+restore prior `additionalArgs` (now cheap — the primitive is in place).
 - Probe-target widening (probe every failed test, refuse on divergence) — wait for real case.
 - Make trans_pss_ic also auto-probe via the same primitive (sidecar `baseline_value` for ic_from would default to `""`, but if user has a non-empty stale value, restore it instead — same shape).
+
+---
+
+## #69 — Phase 3A v1.9 #3: additionalArgs snap/restore + 4 closeout items
+_Date: 2026-05-19 (PM-mode batch)_
+
+**Decision:** Close the remaining v1.9 candidates in one PM-dispatched batch. Five Python deliverables + one SKILL tooling fix:
+
+1. **Gap #1 — additionalArgs snap/restore** (closes v1.3 known-gap #1, motivated by #68's side finding). Both `_execute_ic_chained_item` (orchestrator) and `TransPssIc.apply` (strategy) now snapshot each test's prior `additionalArgs` via the v1.9 #2 primitive `pvt_runner_get_sim_option_val(test, "additionalArgs", session=session)` BEFORE installing the pre-run script, and the `finally` block writes each captured value back per-test via `pvt_runner_clear_ic_source(test, mode, prev, session=session)` instead of the v1.3-era unconditional clear-to-`""` on a single `test_for_ic`. Sentinel `_NO_SNAPSHOT` distinguishes "bridge wrapper missing" / "probe raised" from "probe returned `None` (option genuinely unset)"; both sentinel and `None` branches fall back to clear-to-`""` for safety (the SKILL helper normalises empty + nil to "unset"). Back-compat preserved via `getattr(bridge, 'pvt_runner_get_sim_option_val', None)` — pre-v1.9 mock bridges and any production bridge missing the wrapper get the v1.3-era behaviour with a note in `notes`.
+
+2. **Gap #2 — per-test pre-run script support** (latent infra; orchestrator stays on shared-map for v1.9). New `PreRunSpec.per_test_corner_to_arg: Mapping[str, Mapping[str, str]] | None = None` field; new helper `write_per_test_pre_run_scripts(spec, tests, workdir) -> dict[str, Path]` renders one script per test using the effective map (per-test override > top-level fallback) and tags `item_name` as `<item>__<test>` when maps diverge so content-hashed filenames differ. When `per_test_corner_to_arg is None` (the v1.3/v1.7 shape), every test gets the same script — content hash collapses to one file on disk, byte-identical to the v1.7 output. Orchestrator is **NOT** rewired in v1.9 — the existing single-script branch stays; this lands the surface so future callers can opt in without re-touching `_execute_ic_chained_item`.
+
+3. **Gap #3 — 3-item chain offline pytest** (`tests/test_orchestrator_ic_chain_3item.py`, 322 LOC, 7 cases across 3 classes). Pure-Python mock-bridge + `tmp_path` filesystem fixture mimics `<dbRoot>/<history>/<idx>/<test>/netlist/spectre.ic` for the A → B (ic_from A) → C (ic_from B) chain. Validates `history_by_item` propagation, per-corner IC resolution at each link, batch fallback when an upstream history is missing.
+
+4. **Tracer log — `SIMKIT_TRACE=1`** env-gated. `_trace()` helper in `naive_retry.py` (imported by `gmin_bump.py` + `trans_pss_ic.py`) emits one stdout line per `.apply()`: `[trace] <strategy> attempt #N: targeted=[…] remaining_before=[…]`. Literal `"1"` only — `"true"` / `"yes"` treated as off (pinned). Default OFF, zero production noise. ~10 LOC across 3 files.
+
+5. **sys.modules-None mock audit closed clean.** Five greps over `tests/` (`mock.patch.dict`, `sys.modules[`, `patch.dict(sys.modules`, `monkeypatch.setitem(sys.modules`, `sys.modules`) all return zero hits. The v1.5 trap pattern from `[[feedback-pytest-sysmodules-mock-trap]]` is not present anywhere in the suite.
+
+6. **runTests.il atomic loader fix** (separate SKILL tooling deliverable; sibling to the above). Replaced single-fallback `defvar` block with a 4-layer resolution chain: (a) caller-set `_PVT_FORCE_ROOT` SKILL global, (b) `PVT_{TEST,SKILL}_ROOT` env vars with empty-string-safe coercion (fixed a latent `(or "" X)` bug where SKILL's `or` treats `""` as truthy), (c) upward walk from cwd looking for marker `skill/tests/runTests.il` + scan of `getSkillPath()`, (d) original cwd-based default. Plus 3 informational `printf` lines on load + actionable warning when `pvtError.il` not found.
+
+**Why:**
+- **Gap #1**: #68's side finding showed `fnxSession0` actually carries stale `additionalArgs` on `Test` and `Test_trans` (`"+nodeset /tmp/fc"` and `"+ic /tmp/ic"` from old probes). Any ic_from / trans_pss_ic run today silently clobbers them. The v1.9 #2 primitive made the fix mechanical — snapshot before, restore after, per-test rather than the single `test_for_ic` shortcut.
+- **Gap #2**: Today's orchestrator uses one `test_for_ic = item.tests[0]` and attaches the same script to every test — fine for current single-test consumer items but blocks future multi-test items with divergent ICs. Landing the dataclass field + the helper now is cheap; opting the orchestrator into per-test maps is a future PR when a real driver appears (so v1.9 doesn't add an unused code path).
+- **Gap #3**: The v1.3 chain logic has never been exercised at depth 3 in pytest. Synthetic fixture costs nothing and pins the contract.
+- **Tracer**: When a future user asks "why did naive_retry retry these 3 and not the 4th?", a one-line trace beats reading the orchestrator. Env-gated so default behaviour unchanged.
+- **Audit**: Closing the v1.5 sys.modules-trap memory's follow-up; confirms no recurrence.
+- **runTests.il**: User-visible tooling: `(load "skill/tests/runTests.il")` from `/tmp` or `~` now works (with a one-line `_PVT_FORCE_ROOT` hint when even the walk fails). Latent empty-string env-var bug also fixed.
+
+**Design picks (sub-points):**
+
+- **D1 (Gap #1): `_NO_SNAPSHOT` sentinel, not `None`.** `None` is a legitimate probe response — "option set in catalog but no value on this asi". Sentinel keeps these two cases distinguishable so a probe that genuinely returns `None` results in a clean clear-to-`""` (matching the asi's actual state) while a probe failure also goes to `""` but with a `notes` entry.
+- **D2 (Gap #1): per-test restore loop instead of single `test_for_ic`.** Multi-test items now get N restore calls, one per test — matches the install-side which already iterates `item.tests`. Symmetric, no orphan asi mutations.
+- **D3 (Gap #2): orchestrator stays on shared-map for v1.9.** Adding both the data shape AND the orchestrator branch in one PR would mean shipping an untested code path. Land the shape, defer the orchestrator switch.
+- **D4 (Tracer): `"1"` exactly, no truthy parsing.** Avoids the "what does TRACE=true do" footgun. The string-equality test is one line, the contract is one line; matches `git`-style env conventions.
+- **D5 (runTests.il): 4-layer fallback ordered by reliability.** `_PVT_FORCE_ROOT` is the most explicit; env vars are user-controlled; cwd upward-walk handles the most common case (`cd <simkit> && load`); cwd default preserves back-compat. Each layer is one boolean fall-through; readable in source order.
+
+**Alternatives considered (all rejected):**
+
+- *(Gap #1) Restore via `pvtRunnerSetIcSource` instead of `ClearIcSource`.* Asymmetric — `Set` writes mode-specific strings (`"+nodeset <path>"`), while `Clear` accepts arbitrary prev values verbatim. Use `Clear` for both write directions since it's already mode-agnostic.
+- *(Gap #1) Use the v1.7 `baseline_value` mechanism for additionalArgs too.* Would mean the pre-run script restores prev between sub-corners. But the bug we're fixing is the POST-run residue, not inter-corner leakage (additionalArgs doesn't suffer the v1.7 A5 worker-VM-asi-share issue because ic_from always writes per-corner; no inheritance). Orchestrator-side restore is the right layer.
+- *(Gap #2) Generate one big script with `(cond ((equal testName ...) ...))` branches.* Cute but harder to read in worker VM, and `axlImportPreRunScript` is already per-test so multiple files is the natural shape. Rejected.
+- *(Gap #3) Live 3-item dogfood on real Maestro.* No real 3-item review workflow exists yet; synthetic offline test is honest about its coverage and avoids dragging fnxSession0 state into pytest.
+- *(Tracer) Use Python `logging` framework.* Overkill for 3 print statements; would force users to configure handlers to see anything. Plain `print` is direct.
+- *(runTests.il) Wait for Cadence to add `getCurrentLoadingFile`.* Bridge probe confirmed it doesn't exist in IC6.1.8 and `getAllLoadedFiles` only records post-load. Workaround is the right surface.
+
+**Live-verified 2026-05-19** via `/tmp/probe_v19_gap1.py` against `fnxSession0`:
+
+| Step | Result |
+|---|---|
+| Pre-probe `Test.additionalArgs` = `'+nodeset /tmp/fc'` | ✓ |
+| Pre-probe `Test_trans.additionalArgs` = `'+ic /tmp/ic'` | ✓ |
+| Snapshot captured both via `pvt_runner_get_sim_option_val` | ✓ |
+| Wrote sentinel `'+nodeset /tmp/sentinel_probe_v19_gap1.fc'` via `set_ic_source` | ✓ (Test_trans visibly changed; Test bridge short-circuited — orthogonal to gap #1 contract) |
+| Restored from snapshot via per-test `clear_ic_source(tname, mode, prev_value)` | ✓ |
+| Post-probe `Test.additionalArgs` byte-identical to pre-probe | ✓ |
+| Post-probe `Test_trans.additionalArgs` byte-identical to pre-probe | ✓ |
+| Bridge survived 14 round-trips; no wedge, no `(pyKillServer)` recovery needed | ✓ |
+
+**Implementation notes:**
+
+- `python/simkit/orchestrator.py` (+58/-11): step 3b adds per-test additionalArgs snapshot loop with `_NO_SNAPSHOT` sentinel + `getattr` back-compat; `finally` block replaces single `clear_ic_source(test_for_ic, mode, "", …)` with per-test restore loop.
+- `python/simkit/strategies/trans_pss_ic.py` (+48/-4): same snapshot/restore pattern + `_trace` integration. Notes string gains `[additionalArgs: …]` suffix when snapshot fell back so the audit trail is visible in `StrategyAttempt.notes`.
+- `python/simkit/pre_run_script.py` (+51): `PreRunSpec.per_test_corner_to_arg` field + `write_per_test_pre_run_scripts` helper. Existing single-map path unchanged.
+- `python/simkit/strategies/naive_retry.py` (+14): `_trace` helper. `gmin_bump.py` (+2/-1) + `trans_pss_ic.py` import + call it.
+- `tests/test_orchestrator.py` (+289): 6 cases in 2 new classes (`ExecuteIcFromAdditionalArgsSnapRestoreTests`, `ExecuteIcFromMultiTestSnapRestoreTests`).
+- `tests/test_strategies_trans_pss_ic.py` (+142): 6 cases for strategy-side snap/restore.
+- `tests/test_pre_run_script.py` (+201): 13 cases for Gap #2 (per-test rendering + write helper + back-compat).
+- `tests/test_orchestrator_ic_chain_3item.py` (NEW, 322 LOC): 7 cases across 3 classes.
+- `tests/test_strategies_trace.py` (NEW, 190 LOC): 6 cases (off/on/non-`"1"`-as-off).
+- `skill/tests/runTests.il` (+80/-12): 4-layer resolution + `_pvtEnvOrNil` + `_pvtFindRepoRoot` helpers + load-time printf + warning.
+- Python suite: **1115 → 1153** (+38, all green via `pytest tests/ --tb=short` 9.96s).
+- SKILL Tier-1 (Agent B's run, both cwds): **460 / 2** — the 2 FAILs (`corners/collectRowNames/skips-missing-row_name`, dialog fixture cleanup race in `/tmp/dialog_…`) are pre-existing and orthogonal to this batch; my own re-verify wedged the bridge mid-call and needs `(pyKillServer)(pyStartServer)` in CIW to re-check. Flagged as v1.9 #4 follow-up.
+
+**Probe oddity (not a bug, recorded for future probes):** During the sentinel write phase of `/tmp/probe_v19_gap1.py`, `Test`'s sentinel write didn't visibly land on read-back while `Test_trans`'s did. Both restore round-trips were still byte-identical (the gap #1 contract). Suspected cause: `pvt_runner_set_ic_source` may short-circuit when the new value parses similarly to the existing one (`+nodeset` prefix match?), or asi caching on the main session interacts with the per-test setter. Out of scope for v1.9 #3; potential future probe target.
+
+**Out of scope (queued):**
+- v1.9 #4 candidates: investigate the 2 pre-existing SKILL Tier-1 FAILs (corners helper + dialog fixture race); the probe oddity above; orchestrator opt-in to per-test pre-run scripts when a real multi-test consumer appears.
+- v1.3 known-gap #2 (per-test pre-run) data shape now landed; orchestrator switch deferred until a real driver appears.
+- v1.3 known-gap #3 (live 3-item dogfood) — offline pinned, live deferred until a real review case surfaces.

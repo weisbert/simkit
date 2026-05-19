@@ -65,6 +65,13 @@ class PreRunSpec:
     # string (e.g. ``"1e-12"``) for gmin_bump / partial overrides.
     # Live-discovered 2026-05-18 on fnxSession0 (Phase 1 A5 verify).
     baseline_value: str | None = None
+    # Phase 3A v1.9 #3 gap #2: optional per-test override of corner_to_arg.
+    # When set, ``write_per_test_pre_run_scripts`` looks each test up in
+    # this dict and renders a per-test script with that test's specific
+    # map; tests absent from the dict fall back to the top-level
+    # ``corner_to_arg``. The top-level map remains required as the
+    # default. ``None`` (default) preserves v1.3/v1.7 single-map shape.
+    per_test_corner_to_arg: Mapping[str, Mapping[str, str]] | None = None
 
 
 def _skill_quote(s: str) -> str:
@@ -193,6 +200,50 @@ def write_pre_run_script(
     out_path = out_dir / f"pre_run_{safe_name}_{h}.il"
     out_path.write_text(source, encoding="utf-8")
     return out_path
+
+
+def write_per_test_pre_run_scripts(
+    spec: PreRunSpec,
+    tests: list[str] | tuple[str, ...],
+    workdir: Path | str,
+    *,
+    subdir: str = ".simkit/pre_run",
+) -> dict[str, Path]:
+    """Render one pre-run script per test and return ``{test: path}``.
+
+    Phase 3A v1.9 #3 gap #2. Each test gets its EFFECTIVE corner_to_arg
+    map — the per-test override from ``spec.per_test_corner_to_arg[test]``
+    when present, otherwise the top-level ``spec.corner_to_arg``. The
+    rest of the spec (mode, option_key, baseline_value, item_name) is
+    shared across all tests.
+
+    When ``spec.per_test_corner_to_arg`` is None (the v1.3/v1.7 single-
+    map shape), every test gets the same script and Python's content-hash
+    filename keeps the output count at one file on disk. Callers can opt
+    into divergent per-test maps when they need it without rewriting the
+    orchestrator's batch shape.
+    """
+    per_test_map = spec.per_test_corner_to_arg or {}
+    out: dict[str, Path] = {}
+    for test in tests:
+        effective = per_test_map.get(test, spec.corner_to_arg)
+        # Derive a child spec carrying the test-specific map (and a
+        # test-tagged item_name so different tests get distinct content
+        # hashes even when their effective maps differ).
+        tagged_item = (
+            spec.item_name if effective is spec.corner_to_arg
+            else f"{spec.item_name}__{test}"
+        )
+        child = PreRunSpec(
+            item_name=tagged_item,
+            mode=spec.mode,
+            corner_to_arg=effective,
+            option_key=spec.option_key,
+            baseline_value=spec.baseline_value,
+            per_test_corner_to_arg=None,
+        )
+        out[test] = write_pre_run_script(child, workdir, subdir=subdir)
+    return out
 
 
 def build_corner_arg_map(

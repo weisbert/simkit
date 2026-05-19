@@ -68,7 +68,7 @@ from simkit.strategies.base import (
     StrategyOutcome,
     StrategyResult,
 )
-from simkit.strategies.naive_retry import _map_sub_to_rows, _sanitize
+from simkit.strategies.naive_retry import _map_sub_to_rows, _sanitize, _trace
 
 
 DEFAULT_FILE_KIND = "ic"
@@ -255,6 +255,34 @@ class TransPssIc(Strategy):
             except Exception:
                 prior_scripts[tname] = ""
 
+        # Snapshot each test's prior additionalArgs value (Phase 3A v1.9 #3,
+        # gap #1 closeout). Sentinel = bridge lacks the v1.9 #2 getter or
+        # the per-test probe raised; in that case fall back to v1.3-era
+        # clear-to-empty cleanup. Otherwise the finally block will restore
+        # each test's pre-strategy value byte-identically.
+        _NO_SNAPSHOT = object()
+        prior_additional_args: dict[str, object] = {}
+        probe = getattr(ctx.bridge, "pvt_runner_get_sim_option_val", None)
+        added_args_snapshot_notes: list[str] = []
+        if probe is None:
+            for tname in tests:
+                prior_additional_args[tname] = _NO_SNAPSHOT
+            added_args_snapshot_notes.append(
+                "bridge lacks pvt_runner_get_sim_option_val "
+                "(clear-to-empty fallback)"
+            )
+        else:
+            for tname in tests:
+                try:
+                    prior_additional_args[tname] = probe(
+                        tname, "additionalArgs", session=ctx.session,
+                    )
+                except Exception as exc:
+                    prior_additional_args[tname] = _NO_SNAPSHOT
+                    added_args_snapshot_notes.append(
+                        f"additionalArgs snapshot on {tname!r} failed: {exc}"
+                    )
+
         installed: list[str] = []
         for tname in tests:
             ctx.bridge.pvt_runner_install_pre_run_script(
@@ -266,6 +294,7 @@ class TransPssIc(Strategy):
         history_name = _sanitize(
             f"{ctx.item_name}__transic{ctx.attempt_number}"
         )
+        _trace("trans_pss_ic", ctx, kept, fail_names)
 
         ctx.bridge.pvt_runner_restore_corners_enable(
             target, session=ctx.session,
@@ -295,12 +324,33 @@ class TransPssIc(Strategy):
                         )
                 except Exception:
                     pass
+            # additionalArgs restore (Phase 3A v1.9 #3, gap #1 closeout).
+            # Per-test write-back of the snapshot taken pre-install. Mode
+            # plumbed through to keep clear_ic_source's validation happy;
+            # the SKILL helper writes the provided value verbatim into
+            # additionalArgs regardless of mode tag.
+            for tname in installed:
+                prev = prior_additional_args.get(tname, _NO_SNAPSHOT)
+                if prev is _NO_SNAPSHOT or prev is None:
+                    restore_value = ""
+                else:
+                    restore_value = str(prev)
+                try:
+                    ctx.bridge.pvt_runner_clear_ic_source(
+                        tname, mode, restore_value, session=ctx.session,
+                    )
+                except Exception:
+                    pass
 
         mapped = sorted(corner_to_ic_path)
         notes = (
             f"trans_pss_ic attempt #{ctx.attempt_number} on {mapped} "
             f"via {mode} from {source_item!r}/{source_history!r}"
         )
+        if added_args_snapshot_notes:
+            notes += (
+                " [additionalArgs: " + "; ".join(added_args_snapshot_notes) + "]"
+            )
         if unresolved:
             notes += f" (no IC for: {unresolved})"
         if missing:

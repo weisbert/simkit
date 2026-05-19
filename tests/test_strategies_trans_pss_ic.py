@@ -650,5 +650,147 @@ class RegistrationTests(unittest.TestCase):
         self.assertIs(get_builtin("trans_pss_ic"), TransPssIc)
 
 
+# -----------------------------------------------------------------------------
+# Phase 3A v1.9 #3 — additionalArgs snap/restore (gap #1 closeout, DECISIONS #68)
+# -----------------------------------------------------------------------------
+
+
+class _MockBridgeWithProbe(_MockBridge):
+    """Extends the base mock with v1.9 #2 probe + clear_ic_source surface so
+    the trans_pss_ic snap/restore path can be exercised end-to-end."""
+
+    def __init__(self, snap, *, prior_scripts=None, sub_corners=None,
+                 raise_on_pull=None, probe_returns=None, probe_raises=False):
+        super().__init__(snap, prior_scripts=prior_scripts,
+                         sub_corners=sub_corners,
+                         raise_on_pull=raise_on_pull)
+        # probe_returns: dict[test]->value or single value (broadcast).
+        self._probe_returns = probe_returns
+        self._probe_raises = probe_raises
+
+    def pvt_runner_clear_ic_source(self, test_name, mode, prev, *, session):
+        self.calls.append(("clear_ic", session, test_name, mode, prev))
+
+    def pvt_runner_get_sim_option_val(self, test_name, option_key, *, session):
+        self.calls.append(("get_sim_opt", session, test_name, option_key))
+        if self._probe_raises:
+            raise RuntimeError("probe wedge")
+        if isinstance(self._probe_returns, dict):
+            return self._probe_returns.get(test_name)
+        return self._probe_returns
+
+
+class TransPssIcAdditionalArgsSnapRestoreTests(unittest.TestCase):
+    """v1.9 #3 gap #1: snapshot prior additionalArgs per failed test, restore
+    in finally instead of unconditionally clearing.
+
+    Covers:
+      * snapshot captures non-empty prior → restore writes it back
+      * snapshot returns None (option unset) → restore clears to ""
+      * snapshot raises → fallback path runs, note appended
+      * bridge lacks pvt_runner_get_sim_option_val → fallback to clear ""
+      * mode plumbed through to clear_ic_source from sidecar params
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="simkit_transic_gap1_"))
+        self.proj = _make_pvtproject(self.tmp)
+        self.ic_path = _seed_upstream_ic(
+            self.proj, "trans_h1", corner_idx=1, test_name="t1",
+            file_kind="ic",
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _ctx(self, *, failed, bridge, params=None):
+        merged = {"source_item": "trans_pvt", "workdir": str(self.tmp)}
+        merged.update(params or {})
+        return _ctx(
+            failed=failed, bridge=bridge,
+            params=merged,
+            history_by_item={"trans_pvt": "trans_h1"},
+            pvtproject_path=self.proj,
+        )
+
+    def test_snapshot_captures_nonempty_prior_and_restores_it(self):
+        bridge = _MockBridgeWithProbe(
+            [("TT", True)], sub_corners=["TT"],
+            probe_returns="+ic /tmp/old.ic",
+        )
+        TransPssIc().apply(self._ctx(failed=["TT"], bridge=bridge))
+        clears = [c for c in bridge.calls if c[0] == "clear_ic"]
+        self.assertEqual(len(clears), 1)
+        # (tag, session, test, mode, prev) — mode=readic (default), prev = probe value
+        self.assertEqual(clears[0][2], "t1")
+        self.assertEqual(clears[0][3], "readic")
+        self.assertEqual(clears[0][4], "+ic /tmp/old.ic")
+
+    def test_snapshot_returns_none_translates_to_empty_restore(self):
+        bridge = _MockBridgeWithProbe(
+            [("TT", True)], sub_corners=["TT"], probe_returns=None,
+        )
+        TransPssIc().apply(self._ctx(failed=["TT"], bridge=bridge))
+        clears = [c for c in bridge.calls if c[0] == "clear_ic"]
+        self.assertEqual(clears[0][4], "")
+
+    def test_snapshot_raises_falls_back_to_empty_and_records_note(self):
+        bridge = _MockBridgeWithProbe(
+            [("TT", True)], sub_corners=["TT"], probe_raises=True,
+        )
+        res = TransPssIc().apply(self._ctx(failed=["TT"], bridge=bridge))
+        clears = [c for c in bridge.calls if c[0] == "clear_ic"]
+        self.assertEqual(clears[0][4], "")
+        # Note threaded into the result string
+        self.assertIn("additionalArgs snapshot", res.notes)
+
+    def test_bridge_without_probe_method_uses_fallback(self):
+        # _MockBridge (base) has no pvt_runner_get_sim_option_val attr.
+        # We add only clear_ic_source so the restore can run.
+        class B(_MockBridge):
+            def pvt_runner_clear_ic_source(self, test, mode, prev, *, session):
+                self.calls.append(("clear_ic", session, test, mode, prev))
+        bridge = B([("TT", True)], sub_corners=["TT"])
+        res = TransPssIc().apply(self._ctx(failed=["TT"], bridge=bridge))
+        clears = [c for c in bridge.calls if c[0] == "clear_ic"]
+        self.assertEqual(len(clears), 1)
+        self.assertEqual(clears[0][4], "")
+        self.assertIn(
+            "bridge lacks pvt_runner_get_sim_option_val", res.notes,
+        )
+
+    def test_restore_mode_matches_sidecar_mode(self):
+        # readns mode → clear_ic_source called with mode="readns"
+        bridge = _MockBridgeWithProbe(
+            [("TT", True)], sub_corners=["TT"],
+            probe_returns="prior_value",
+        )
+        _seed_upstream_ic(self.proj, "trans_h1", corner_idx=1,
+                          test_name="t1", file_kind="fc")
+        TransPssIc().apply(self._ctx(
+            failed=["TT"], bridge=bridge,
+            params={"file": "fc", "mode": "readns"},
+        ))
+        clears = [c for c in bridge.calls if c[0] == "clear_ic"]
+        self.assertEqual(clears[0][3], "readns")
+
+    def test_restore_called_per_test_in_multi_test_failed(self):
+        # Two failed tests with different probe values; restore per-test.
+        bridge = _MockBridgeWithProbe(
+            [("TT", True)], sub_corners=["TT"],
+            probe_returns={"t1": "+ic /a.ic", "t2": "+nodeset /b.fc"},
+        )
+        # seed IC for the override test_for_ic
+        TransPssIc().apply(self._ctx(
+            failed=[("TT", "t1"), ("TT", "t2")], bridge=bridge,
+            params={"test_for_ic": "t1"},
+        ))
+        clears = [c for c in bridge.calls if c[0] == "clear_ic"]
+        self.assertEqual(len(clears), 2)
+        by_test = {c[2]: c[4] for c in clears}
+        self.assertEqual(by_test["t1"], "+ic /a.ic")
+        self.assertEqual(by_test["t2"], "+nodeset /b.fc")
+
+
 if __name__ == "__main__":
     unittest.main()
