@@ -2021,3 +2021,66 @@ _Date: 2026-05-19 (same-day closeout)_
 | v1.9 #4 closeout | 05-19 | runTests.il `get_filename(piport)` simplification + **Phase 3A DONE** |
 
 19-day execution arc, 22 DECISIONS entries (#50-#71), Python 835→1153 (+318), SKILL Tier-1 407→462 (+55), 0 regressions at close.
+
+---
+
+## #72 — Phase 4 prep: 3-zone offline deployment pipeline
+_Date: 2026-05-19 (post Phase 3A closeout)_
+
+**Decision:** Build the deployment plumbing **before** starting Phase 4 GUI work, because:
+1. User's daily workflow now requires moving simkit between 3 environments (home Linux dev / yellow Windows transit / red Linux deploy)
+2. simkit so far has only run on the home machine — first red-zone deploy needs to succeed before GUI dogfood can begin there
+3. Adding GUI deps (PyQt5, pytest-qt) later is a clean diff on top of a working pipeline; doing both at once would conflate failures
+
+Six concrete deliverables:
+
+1. **`pyproject.toml`** with setuptools backend, `pvt = simkit.cli.__main__:main` console script, packages auto-discovered under `python/`, optional `[dev]` + `[gui]` extras for future use. Replaces the implicit "PYTHONPATH = python/" convention that's been in use since Phase 1.
+2. **`requirements.txt`** (top-level intent, human-readable) — just `duckdb==1.5.2` + `skillbridge==1.8.0`.
+3. **`requirements-dev.txt`** (`-r requirements.txt` + pytest + pytest-mock).
+4. **`requirements.lock.txt`** (full freeze via `pip freeze --all | grep -v ^pip==`) — 10 packages total including build backend (`setuptools==82.0.1`, `wheel==0.47.0`).
+5. **4 scripts in `scripts/`** matching the user's 3-zone workflow exactly:
+   - `download_wheels.py` (yellow Windows): `pip download` with `--platform manylinux2014_x86_64 + manylinux_2_28_x86_64 + manylinux_2_17_x86_64`, `--abi cp311`, `--implementation cp`, `--only-binary=:all:` to force Linux wheels even when run from Windows. Incremental via pip's HTTP cache.
+   - `make_payload.py` (yellow Windows): Python `tarfile`-based bundler (cross-platform, no `tar.exe` dependency), output `dist/simkit_<YYYYMMDD>_<sha7>.tar.gz` + `.manifest.txt` with SHA256. Excludes `.git/` `.venv/` `__pycache__/` `*.pyc` IDE files DuckDB databases skillbridge logs.
+   - `unpack_payload.sh` (red Linux): SHA256 verification against the manifest, then `tar -xzf`. Defaults to `~/simkit_deploys/`.
+   - `deploy_venv.sh` (red Linux): `python3 -m venv .venv` (no `--system-site-packages` for full isolation), `pip install --no-index --find-links=vendor/wheels/` from lock, `pip install -e . --no-build-isolation --no-deps`, 4 smoke tests.
+6. **`scripts/README.md`** documenting the workflow + troubleshooting + lock regeneration recipe.
+
+**Why each non-obvious choice:**
+
+- **D1: Full venv isolation (no `--system-site-packages`).** User confirmed: reproducibility wins over disk savings. 150MB venv vs 20MB venv is irrelevant; "global Python upgrade breaks me silently" is the real risk. Multi-user adoption later also needs this.
+- **D2: Full freeze (`pip freeze --all`) including `setuptools` + `wheel` in the lock.** Bundled setuptools+wheel from `ensurepip` is too old for modern packaging (`pyproject.toml` Beta config, `bdist_wheel` missing). Pinning them in the lock ensures every zone gets a known-working build backend. Excluded only `pip` itself because that's bootstrapped by `python -m venv`.
+- **D3: `--no-build-isolation` on the editable install.** PEP 517 by default spawns a fresh build env and `pip install setuptools wheel` into it — fails offline. With isolation off, pip uses the venv's already-installed setuptools+wheel directly.
+- **D4: 3 `--platform` flags in download.** Some packages have only `manylinux_2_28` wheels (newer libc requirement); others have only `manylinux2014` (older). Passing all three lets pip pick the first match per package; pure-Python wheels (`py3-none-any`) match all platforms automatically.
+- **D5: Manifest is a sibling `.txt` not embedded in tarball.** Lets you verify integrity BEFORE extracting (safer than verifying after). Two files travel together; if only one arrives, the user gets a clear "missing manifest" warning.
+- **D6: Skip `.git/` from the tarball.** User explicit: "红区没有 git" — no benefit to shipping git history. Saves ~50MB and avoids `.git/objects/pack/` confusing the unpacker.
+- **D7: `pyproject.toml` console_script entry vs. wrapper script.** The console_script `pvt = simkit.cli.__main__:main` is what `pip install -e .` consumes to create `.venv/bin/pvt`. Cleaner than a separate `scripts/pvt` shell wrapper.
+
+**Alternatives considered (all rejected):**
+
+- *`uv` instead of pip + venv.* Faster, modern, but requires bootstrapping the uv binary onto red zone. venv is built into Python 3.11 → zero extra install. Reconsider when uv is mature enough to be available via standard package channels.
+- *Bundle `.git/` (depth-1 clone).* Saves the user from needing git on red zone to see SHA/blame; but user explicitly opted out, and the manifest already records the SHA at build time.
+- *Wheels committed to git (no `vendor/wheels` in `.gitignore`).* Would let yellow Windows skip the download step. But adds ~22MB to git (more once GUI adds PyQt5 wheel at ~50MB single file). Decided: keep wheels out of git, yellow re-downloads as part of its workflow.
+- *Conda environment.* Heavier; red zone IT may not have conda channels approved. venv + pip is the lowest-common-denominator path.
+- *Single combined script `pipeline.sh` covering all 4 steps.* Crosses the zone boundary (Windows vs Linux); separating into 4 scripts with `.py` for Windows-runnable and `.sh` for Linux-runnable matches the actual user-facing surface.
+
+**Live-verified 2026-05-19** end-to-end on home Linux as a synthetic red zone (`/tmp/simkit_test_deploy/`):
+
+| Step | Result |
+|---|---|
+| `download_wheels.py` → 10 wheels in `vendor/wheels/` | ✓ 22.1 MB total |
+| `make_payload.py` → `dist/simkit_20260519_214a6ec.tar.gz` + manifest | ✓ 22.45 MB, 250 members, SHA256 in manifest |
+| `unpack_payload.sh` to `/tmp/simkit_test_deploy/` | ✓ SHA256 verified, extracted cleanly |
+| `deploy_venv.sh` from unpacked dir | ✓ venv created, 10 wheels installed offline, simkit -e installed |
+| 4 smoke tests (duckdb / skillbridge / simkit / `pvt` CLI on PATH) | ✓ all green |
+| `pvt --help` in deployed venv | ✓ shows 12 subcommands as expected |
+
+**Two bugs caught during the test run (both fixed before commit):**
+
+- **Bug 1**: `set -o pipefail` + `tar -tzf | head -1` made `tar` see SIGPIPE → non-zero exit → script silently aborted (no error message thanks to `-e`). Fixed by replacing pipe with `while read; break; done < <(...)` process substitution.
+- **Bug 2**: First lock attempt excluded `setuptools` + `wheel` via grep filter; editable install then failed with `setuptools>=61` not found (PEP 517) AND `bdist_wheel` not found (no wheel package). Fixed by including both in the lock and adding `--no-build-isolation` to the editable install command.
+
+**Open follow-ups for Phase 4 GUI:**
+
+- Add `PyQt5`, `pytest-qt`, `QtAwesome` to `requirements.txt` once Phase 4 §1 spec is written. Re-freeze lock, re-download wheels, re-bundle.
+- Consider adding `pyinstaller` step to scripts/ if standalone binary becomes desirable for non-developer engineers.
+- Document the regen-lock recipe as a `scripts/regen_lock.sh` for one-command bumping. (Currently inline in `scripts/README.md` troubleshooting section.)

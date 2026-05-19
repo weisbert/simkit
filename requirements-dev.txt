@@ -1,0 +1,7 @@
+# Dev / test extras — included in the locked env on all zones since
+# you want to run pytest on the red zone too.
+
+-r requirements.txt
+
+pytest>=8.0,<10.0
+pytest-mock>=3.15,<4.0

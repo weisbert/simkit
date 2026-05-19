@@ -1,0 +1,11 @@
+# Top-level production dependencies (human-readable "intent" file).
+# Edit this when you want a different version; then regenerate
+# requirements.lock.txt via:
+#   bash scripts/regen_lock.sh
+#
+# The lock file is the single source of truth for what gets actually
+# installed across home / yellow / red zones. This file is just where
+# we declare intent.
+
+duckdb==1.5.2
+skillbridge==1.8.0

@@ -15,6 +15,13 @@ build/
 .mypy_cache/
 .ruff_cache/
 
+# 3-zone deployment cache — wheels are downloaded fresh on yellow,
+# bundled into tarball, restored on red. No need in git.
+vendor/wheels/
+
+# skillbridge runtime logs (created by Virtuoso when bridge starts)
+skillbridge_*.log
+
 # DuckDB / databases (runtime data, not source)
 *.duckdb
 *.duckdb.wal

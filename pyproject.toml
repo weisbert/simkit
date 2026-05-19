@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simkit"
+version = "0.1.0"
+description = "PVT corner / measurement / sim-run automation for Cadence Maestro workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "weisbert"}]
+license = {text = "Proprietary"}
+dependencies = [
+    "duckdb>=1.5.2",
+    "skillbridge>=1.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.15",
+]
+gui = [
+    "PyQt5>=5.15.9",
+    "pytest-qt>=4.5.0",
+    "QtAwesome>=1.4.2",
+]
+
+[project.scripts]
+pvt = "simkit.cli.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["simkit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["python"]
