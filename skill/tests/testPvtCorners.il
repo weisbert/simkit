@@ -187,6 +187,10 @@
 
 
 ;; ---------- _pvtCornersCollectRowNames (Phase 3A v1.9 #1, DECISIONS #67) ----
+;; Note: table-default `PVT_JSON_ABSENT` mirrors what real pvtJson parse output
+;; carries. Earlier `'unbound` collided with SKILL's literal "variable unbound"
+;; sentinel — arrayref returning `'unbound` made the helper's let-binding
+;; throw `unbound variable: v` (DECISIONS #69 followup, 2026-05-19).
 
 (pvtTestRegister "corners/collectRowNames/empty"
   (lambda () (pvtAssert (_pvtCornersCollectRowNames nil) nil
@@ -194,7 +198,7 @@
 
 (pvtTestRegister "corners/collectRowNames/single"
   (lambda ()
-    (let ((tab (makeTable 'r1 'unbound)))
+    (let ((tab (makeTable 'r1 PVT_JSON_ABSENT)))
       (setarray tab "row_name" "TT")
       (pvtAssert (_pvtCornersCollectRowNames (list tab))
                  '("TT")
@@ -202,9 +206,9 @@
 
 (pvtTestRegister "corners/collectRowNames/preserves-order"
   (lambda ()
-    (let ((t1 (makeTable 'r1 'unbound))
-          (t2 (makeTable 'r2 'unbound))
-          (t3 (makeTable 'r3 'unbound)))
+    (let ((t1 (makeTable 'r1 PVT_JSON_ABSENT))
+          (t2 (makeTable 'r2 PVT_JSON_ABSENT))
+          (t3 (makeTable 'r3 PVT_JSON_ABSENT)))
       (setarray t1 "row_name" "TT")
       (setarray t2 "row_name" "TT_pvt")
       (setarray t3 "row_name" "TT_2p5G")
@@ -214,9 +218,9 @@
 
 (pvtTestRegister "corners/collectRowNames/skips-missing-row_name"
   (lambda ()
-    (let ((t1 (makeTable 'r1 'unbound))
-          (t2 (makeTable 'r2 'unbound))
-          (t3 (makeTable 'r3 'unbound)))
+    (let ((t1 (makeTable 'r1 PVT_JSON_ABSENT))
+          (t2 (makeTable 'r2 PVT_JSON_ABSENT))
+          (t3 (makeTable 'r3 PVT_JSON_ABSENT)))
       (setarray t1 "row_name" "good_a")
       ;; t2 has no row_name field at all
       (setarray t3 "row_name" "good_b")
@@ -226,8 +230,8 @@
 
 (pvtTestRegister "corners/collectRowNames/skips-non-string-row_name"
   (lambda ()
-    (let ((t1 (makeTable 'r1 'unbound))
-          (t2 (makeTable 'r2 'unbound)))
+    (let ((t1 (makeTable 'r1 PVT_JSON_ABSENT))
+          (t2 (makeTable 'r2 PVT_JSON_ABSENT)))
       (setarray t1 "row_name" "ok")
       (setarray t2 "row_name" 42)
       (pvtAssert (_pvtCornersCollectRowNames (list t1 t2))
@@ -236,7 +240,7 @@
 
 (pvtTestRegister "corners/collectRowNames/skips-non-table-entries"
   (lambda ()
-    (let ((t1 (makeTable 'r1 'unbound)))
+    (let ((t1 (makeTable 'r1 PVT_JSON_ABSENT)))
       (setarray t1 "row_name" "TT")
       (pvtAssert (_pvtCornersCollectRowNames (list t1 "not_a_table" 42))
                  '("TT")

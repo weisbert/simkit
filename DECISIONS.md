@@ -1905,3 +1905,44 @@ _Date: 2026-05-19 (PM-mode batch)_
 - v1.9 #4 candidates: investigate the 2 pre-existing SKILL Tier-1 FAILs (corners helper + dialog fixture race); the probe oddity above; orchestrator opt-in to per-test pre-run scripts when a real multi-test consumer appears.
 - v1.3 known-gap #2 (per-test pre-run) data shape now landed; orchestrator switch deferred until a real driver appears.
 - v1.3 known-gap #3 (live 3-item dogfood) — offline pinned, live deferred until a real review case surfaces.
+
+---
+
+## #70 — Phase 3A v1.9 #3 followup: corrected Tier-1 baseline + `'unbound` sentinel trap + skillbridge readback discovery
+_Date: 2026-05-19 (same day as #69)_
+
+**Decision:** Three corrections + one 1-line fixture fix landed as a small follow-up to #69:
+
+1. **Fixed `corners/collectRowNames/skips-missing-row_name`** SKILL test — fixture's `(makeTable 'rN 'unbound)` default value collided with SKILL's literal "variable unbound" sentinel. When the test created `t2` (no `row_name` set) and the helper's `(let ((v (arrayref tab key))) ...)` ran, `arrayref` returned `'unbound` and the let-binding then read `v` triggering `*Error* eval: unbound variable: v`. Replaced all 7 occurrences in `skill/tests/testPvtCorners.il` with `PVT_JSON_ABSENT` (the symbol `pvt_absent`) — which more accurately mirrors the sentinel real pvtJson parse output carries. Bridge-verified: helper now returns `("good_a" "good_b")` correctly; full Tier-1 461/1 → 462/0.
+
+2. **Discovered skillbridge readback trap** — `ws['_pvtTestPass']` returns a `LiteralRemoteFunction` proxy object (skillbridge treats every name as a deferred callable), NOT the variable's value. The trap is silent: an f-string renders the proxy as empty, so probe output looks like `PASS=  FAIL=  SKIP=`. Correct readback is `ws['evalstring']('_pvtTestPass')`. Same trap on writes — `setq` needs a SYMBOL literal, so `ws['setq']('_pvtTestPass', 0)` raises; correct is `ws['evalstring']('(setq _pvtTestPass 0)')`. Saved as memory `[[skillbridge-readback-via-evalstring]]`.
+
+3. **Diagnosed dialog fixture race** — `dialog/fresh path under existing dir accepted` fails when `/tmp/dialog_*` has leftover dirs from prior test runs (the test refuses to overwrite). Not a code bug; pre-run cleanup `rm -rf /tmp/dialog_*` resolves. Documented in updated `[[reference-tier1-baseline]]` so future verifiers don't mis-diagnose as a regression.
+
+4. **Corrected the Tier-1 baseline** — `[[reference-tier1-baseline]]` now records:
+   - Clean baseline: **462 / 0 / 0** (Maestro closed, `/tmp/dialog_*` clean)
+   - +1 FAIL when Maestro open (the standing no-session test, unchanged)
+   - +1 FAIL when `/tmp/dialog_*` polluted (fixture race)
+   - Plus the correct skillbridge readback recipe inline.
+
+**Why:** The Agent B run during #69 verification reported `460/2 pre-existing FAILs` and #69's commit docs propagated that as "orthogonal to this batch, queued as v1.9 #4." That claim was wrong twice over: (a) the count itself was mis-read due to the LiteralRemoteFunction trap, (b) the corners FAIL was a real (small) v1.9 #1 regression, not pre-existing — it was introduced by #67's new test using a misleading SKILL fixture default. Catching this now (same day) keeps the project state honest before the misdiagnosis hardens into folklore.
+
+**The `'unbound` SKILL trap (worth a new DECISIONS #14 idiom-trap line):** Using `'unbound` as a `makeTable` default is **not safe** when the value will be read into a `let`-binding before `stringp`/`null` testing. SKILL's `'unbound` is the literal symbol used internally to mean "variable has no value," so `(let ((v <value-that-is-'unbound>)) v)` triggers `unbound variable: v` even though the let was syntactically valid. Use any other sentinel (`PVT_JSON_ABSENT` = `pvt_absent`, or just `nil`) for table defaults you intend to later inspect.
+
+**Alternatives considered (all rejected):**
+
+- *Fix `_pvtCornersExtractJsonField` to be robust to `'unbound`.* Defensive but addresses the symptom not the root cause. Real pvtJson never produces `'unbound` defaults; the test fixture was the wrong-shaped input.
+- *Add a Python wrapper around `ws[...]` that auto-routes to `evalstring`.* Bigger surface, would mask the underlying skillbridge contract. Cheaper to just memorize "always use `evalstring`" via memory.
+- *Auto-`rm -rf /tmp/dialog_*` in `runTests.il`.* Possible but adds destructive cleanup to a test runner — better as a documented pre-step in `[[reference-tier1-baseline]]` so the user knows what's happening.
+
+**Files touched:**
+
+- `skill/tests/testPvtCorners.il` (+5/-7) — 7× `'unbound` → `PVT_JSON_ABSENT` + a 5-line section comment.
+- `~/.claude/projects/…/memory/feedback_skillbridge_readback_evalstring.md` (NEW)
+- `~/.claude/projects/…/memory/reference_tier1_baseline.md` — added current baseline section + readback recipe + historical count growth list.
+- `~/.claude/projects/…/memory/MEMORY.md` — index entry for the new memory + amended the recovery entry to include the `?python` arg.
+
+**Out of scope (queued):**
+
+- The v1.9 #4 backlog from #69 narrows: the "2 pre-existing FAILs" item drops entirely (one fixed here, one explained as fixture race + documented). Probe-oddity + per-test orchestrator opt-in still queued.
+- Consider adding `dialog/*` test cleanup to its setUp/tearDown to make the fixture race-proof. Wait for a real second occurrence first.
