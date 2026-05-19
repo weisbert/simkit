@@ -30,6 +30,7 @@ deliberately deferred. The hook to add it is :meth:`validation_errors`.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
@@ -127,6 +128,11 @@ class CornersEditor(QWidget):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setObjectName("cornersEditor")
+
+        # Optional project-root context for model_file existence checks
+        # (Phase 4 Stage 3 §11.3). None unbinds — validation falls back to
+        # the row_name / duplicate checks only.
+        self._project_root: Optional[Path] = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -325,15 +331,12 @@ class CornersEditor(QWidget):
         Empty list means "ready to push" — used to gate the "Send to
         Maestro" button per spec §11.3.
 
-        Current checks (minimal v1):
+        Checks:
           * Missing ``row_name`` on any row.
           * Duplicate ``row_name`` across rows.
-
-        DEFERRED (spec §11.3 explicitly mentions but requires project
-        context this view doesn't have yet):
-          * ``model_file`` filesystem existence check — needs the
-            project root path so relative model file references can be
-            resolved. Will be added when MainWindow can supply it.
+          * When :meth:`set_project_root` is bound: every non-empty
+            ``model_file`` cell is resolved relative to project_root and
+            checked for existence.
         """
         errors: list[str] = []
         names: dict[str, int] = {}
@@ -341,9 +344,21 @@ class CornersEditor(QWidget):
             name = self._cell_text(r, COL_ROW_NAME).strip()
             if not name:
                 errors.append(f"row {r + 1}: missing row_name")
-                continue
-            names.setdefault(name, 0)
-            names[name] += 1
+            else:
+                names.setdefault(name, 0)
+                names[name] += 1
+            if self._project_root is not None:
+                model_file = self._cell_text(r, COL_MODEL_FILE).strip()
+                if model_file:
+                    candidate = Path(model_file)
+                    if not candidate.is_absolute():
+                        candidate = self._project_root / candidate
+                    abs_path = candidate
+                    if not abs_path.exists():
+                        errors.append(
+                            f"row {r + 1}: model_file {model_file!r} not "
+                            f"found at {abs_path}"
+                        )
         for name, count in names.items():
             if count > 1:
                 errors.append(f"duplicate row_name: {name!r} ({count} rows)")
@@ -360,6 +375,18 @@ class CornersEditor(QWidget):
         """
         text = datetime_str if datetime_str else "—"
         self.last_sync_label.setText(f"Last sync: {text}")
+
+    def set_project_root(self, project_root: Path | None) -> None:
+        """Bind the editor to a project root so model_file existence checks fire.
+
+        ``None`` unbinds; validation reverts to row_name / duplicate checks
+        only.
+        """
+        if project_root is None:
+            self._project_root = None
+        else:
+            self._project_root = Path(project_root).expanduser().resolve()
+        self._refresh_push_enabled()
 
     def set_divergence(self, live_count: int, sidecar_count: int) -> None:
         """Show / hide the live-vs-sidecar divergence strip (spec §11.2).

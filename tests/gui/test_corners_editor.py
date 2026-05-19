@@ -280,3 +280,142 @@ def test_set_last_sync_updates_label(editor):
 
     editor.set_last_sync("")
     assert editor.last_sync_label.text() == "Last sync: —"
+
+
+# --- set_project_root + model_file existence (Phase 4 Stage 3) -----------
+
+
+def test_set_project_root_no_root_no_existence_check(editor):
+    editor.load_union(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": "definitely_missing.scs",
+                "extra_vars": "",
+            }
+        ]
+    )
+    # No project root bound -> only minimal validation -> no errors.
+    assert editor.validation_errors() == []
+
+
+def test_set_project_root_flags_missing_model_file(editor, tmp_path):
+    editor.set_project_root(tmp_path)
+    editor.load_union(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": "nope.scs",
+                "extra_vars": "",
+            }
+        ]
+    )
+    errors = editor.validation_errors()
+    assert any(
+        "nope.scs" in e and "not found" in e for e in errors
+    )
+
+
+def test_set_project_root_accepts_existing_model_file(editor, tmp_path):
+    model_file = tmp_path / "rf018.scs"
+    model_file.write_text("* dummy\n", encoding="utf-8")
+
+    editor.set_project_root(tmp_path)
+    editor.load_union(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": "rf018.scs",
+                "extra_vars": "",
+            }
+        ]
+    )
+    assert editor.validation_errors() == []
+
+
+def test_set_project_root_empty_model_file_is_ignored(editor, tmp_path):
+    editor.set_project_root(tmp_path)
+    editor.load_union(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": "",
+                "extra_vars": "",
+            }
+        ]
+    )
+    # Empty model_file string should NOT be flagged — the check only fires
+    # on non-empty cells.
+    assert editor.validation_errors() == []
+
+
+def test_set_project_root_absolute_path_passes_when_present(
+    editor, tmp_path
+):
+    model_file = tmp_path / "abs_model.scs"
+    model_file.write_text("* dummy\n", encoding="utf-8")
+    editor.set_project_root(tmp_path)
+    editor.load_union(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": str(model_file),
+                "extra_vars": "",
+            }
+        ]
+    )
+    assert editor.validation_errors() == []
+
+
+def test_set_project_root_none_unbinds(editor, tmp_path):
+    editor.set_project_root(tmp_path)
+    editor.set_project_root(None)
+    editor.load_union(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": "still_missing.scs",
+                "extra_vars": "",
+            }
+        ]
+    )
+    # Unbound -> no existence check -> no errors.
+    assert editor.validation_errors() == []
+
+
+def test_set_project_root_disables_push_when_model_missing(
+    editor, tmp_path
+):
+    editor.set_project_root(tmp_path)
+    editor.load_union(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": "nope.scs",
+                "extra_vars": "",
+            }
+        ]
+    )
+    # Push must be disabled because validation_errors() is non-empty.
+    assert editor.push_button.isEnabled() is False
