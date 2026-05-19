@@ -207,7 +207,11 @@ class RunController(QObject):
             self.cancelled.emit()
         self.run_finished.emit(int(exit_code), summary)
 
-    @pyqtSlot(object)
+    # NOTE: no @pyqtSlot decorator here. errorOccurred carries a
+    # QProcess.ProcessError enum value; the decorator's signature must match
+    # the signal exactly or PyQt aborts (TypeError → core dump on connect).
+    # Plain Python method bound via connect() lets PyQt5 introspect the
+    # actual signature at runtime, which is what we want.
     def _on_error_occurred(self, err: Any) -> None:
         # FailedToStart / Crashed / Timedout / etc. The textual variant is
         # what the user sees in the log; the enum is too Qt-specific.

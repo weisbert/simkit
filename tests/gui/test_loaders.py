@@ -303,6 +303,9 @@ def test_union_to_editor_rows_respects_enabled_flag(tmp_path):
 
 
 def test_editor_rows_to_union_rows_single_axis_round_trip(tmp_path):
+    # 1AXX dogfood follow-up: process now round-trips through model.section,
+    # NOT vars["process"]. Real Maestro setups encode process variation via
+    # model.section (tt/ss/ff); vars.process was a synthetic-fixture artefact.
     union = _make_union(tmp_path)
     rows = union_to_editor_rows(union)
     rebuilt = editor_rows_to_union_rows(
@@ -315,12 +318,36 @@ def test_editor_rows_to_union_rows_single_axis_round_trip(tmp_path):
     assert len(rebuilt.rows) == 1
     rebuilt_row = rebuilt.rows[0]
     assert rebuilt_row.row_name == "TT_pvt"
-    assert rebuilt_row.vars["process"] == ("tt",)
+    assert "process" not in rebuilt_row.vars
     assert rebuilt_row.vars["temp"] == ("27",)
     assert rebuilt_row.vars["vdd"] == ("1.8",)
     assert rebuilt_row.enabled is True
     assert len(rebuilt_row.models) == 1
     assert rebuilt_row.models[0].file == "rf018.scs"
+    assert rebuilt_row.models[0].section == ("tt",)
+
+
+def test_editor_rows_to_union_rows_multi_process_sweep():
+    """Comma-separated process column → multi-section sweep."""
+    rebuilt = editor_rows_to_union_rows(
+        [
+            {
+                "row_name": "TT_pvt",
+                "process": "tt,ss,ff",
+                "temperature": "27",
+                "vdd": "1.8",
+                "model_file": "rf018.scs",
+                "extra_vars": "",
+                "_enabled": True,
+            }
+        ],
+        name="multi_process",
+        project="demo",
+        testbench_id="LIB/cell/schematic",
+    )
+    row = rebuilt.rows[0]
+    assert row.models[0].section == ("tt", "ss", "ff")
+    assert "process" not in row.vars
 
 
 def test_editor_rows_to_union_rows_rejects_empty():

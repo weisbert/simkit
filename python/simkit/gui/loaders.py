@@ -451,9 +451,15 @@ def editor_rows_to_union_rows(
                 f"editor_rows_to_union_rows: row {i + 1} missing row_name"
             )
         vars_dict: dict[str, tuple[str, ...]] = {}
-        process = (raw.get("process") or "").strip()
-        if process:
-            vars_dict["process"] = (process,)
+        # Process column maps to model.section, not to a `process` var —
+        # this is how Maestro actually encodes process variation. Comma-
+        # separated input (e.g. "tt,ss,ff") becomes a multi-section sweep.
+        process_raw = (raw.get("process") or "").strip()
+        process_sections: tuple[str, ...] = ()
+        if process_raw:
+            process_sections = tuple(
+                p.strip() for p in process_raw.split(",") if p.strip()
+            )
         temperature = (raw.get("temperature") or "").strip()
         if temperature:
             vars_dict["temp"] = (temperature,)
@@ -472,12 +478,17 @@ def editor_rows_to_union_rows(
         model_file = (raw.get("model_file") or "").strip()
         models: tuple[ModelEntry, ...] = ()
         if model_file:
+            # If the editor put a section in the process column, carry it
+            # into the model entry. Otherwise leave section as a single empty
+            # string (legacy behavior — Maestro will use whatever default the
+            # model file ships with).
+            section = process_sections if process_sections else ("",)
             models = (
                 ModelEntry(
                     file=model_file,
                     block="Global",
                     test="All",
-                    section=("",),
+                    section=section,
                 ),
             )
 

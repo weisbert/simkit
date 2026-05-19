@@ -232,8 +232,12 @@ class CornersEditor(QWidget):
         vh.setSectionResizeMode(QHeaderView.Fixed)
 
         # Per-cell dropdowns for the known-value columns (spec §11.1).
+        # editable=True so the user can type comma-separated values for
+        # process sweeps (e.g. "tt,ss,ff" — a single-row 3-process sweep,
+        # which is how Maestro encodes process variation via model.section).
+        # The dropdown still offers the 5 canonical single-process picks.
         self._process_delegate = _ComboBoxDelegate(
-            PROCESS_VALUES, editable=False, parent=self.table
+            PROCESS_VALUES, editable=True, parent=self.table
         )
         self.table.setItemDelegateForColumn(COL_PROCESS, self._process_delegate)
 
