@@ -52,18 +52,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
       * ``--module <path>``   — open the given ``.pvtproject`` first
       * ``--safe-mode``       — skip state restore (fresh launch)
 
-    A missing PyQt5 is reported on stderr with install hints + returns 4
-    (chosen distinct from the existing 0/1/2/3/7 exit codes documented
-    on other ``pvt`` subcommands).
+    Exit codes (distinct from the 0/1/2/3/7 used by other ``pvt`` subcommands):
+      * 4 — PyQt5 is not installed (ModuleNotFoundError)
+      * 5 — PyQt5 installed but fails to load (e.g. Cadence Qt5 shadowing
+            wheel's bundled Qt5 via LD_LIBRARY_PATH on EDA hosts)
     """
     args = _parse_args(list(argv) if argv is not None else None)
 
     try:
         from PyQt5.QtCore import QByteArray  # type: ignore[import-not-found]
         from PyQt5.QtWidgets import QApplication  # type: ignore[import-not-found]
-    except ImportError:
+    except ModuleNotFoundError:
         sys.stderr.write(_PYQT_MISSING_MSG)
         return 4
+    except ImportError as exc:
+        sys.stderr.write(
+            "pvt gui: PyQt5 is installed but failed to load:\n"
+            f"  {exc}\n"
+            "\n"
+            "Most often: an older Qt5 on LD_LIBRARY_PATH (e.g. Cadence's\n"
+            "/software/public/qt/5.15.x_xcb/lib) is shadowing the venv's\n"
+            "bundled Qt5. deploy_venv.sh should prepend the wheel's Qt5 lib\n"
+            "dir to LD_LIBRARY_PATH at activation — try a fresh:\n"
+            "  bash:  source .venv/bin/activate\n"
+            "  csh:   source .venv/bin/activate.csh\n"
+        )
+        return 5
 
     # PyQt5 is here; safe to import the widget + worker modules.
     from simkit.gui.bridge_worker import (

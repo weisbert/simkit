@@ -128,6 +128,42 @@ if ! pip install --no-index --find-links="$WHEELS_DIR" --no-deps \
     exit 3
 fi
 
+# --- Patch activate scripts: prepend bundled PyQt5 Qt5 lib path ---
+#
+# Why: red-zone EDA farms expose Cadence's own Qt5 via LD_LIBRARY_PATH
+# (e.g. /software/public/qt/5.15.3_xcb/lib). At PyQt5 import time the
+# Linux loader picks up Cadence's older Qt5 instead of the wheel's
+# bundled 5.15.18, and dies with:
+#   "symbol _ZdlPvm, version Qt_5 not defined in file libQt5Core.so.5"
+# Prepending the wheel's lib dir to LD_LIBRARY_PATH at activation time
+# forces the loader to find the correct Qt5 first.
+
+QT5_LIB_REL="$VENV_DIR/lib/python3.11/site-packages/PyQt5/Qt5/lib"
+if [[ -d "$REPO_DIR/$QT5_LIB_REL" ]]; then
+    echo "[deploy_venv] Patching activate scripts: prepend PyQt5 Qt5 lib to LD_LIBRARY_PATH"
+
+    cat >> "$VENV_DIR/bin/activate" <<'EOF'
+
+# Added by simkit deploy_venv.sh: prepend bundled PyQt5 Qt5 libs so
+# Cadence's older Qt5 (in LD_LIBRARY_PATH) doesn't shadow them.
+export LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.11/site-packages/PyQt5/Qt5/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+EOF
+
+    cat >> "$VENV_DIR/bin/activate.csh" <<'EOF'
+
+# Added by simkit deploy_venv.sh: prepend bundled PyQt5 Qt5 libs so
+# Cadence's older Qt5 (in LD_LIBRARY_PATH) doesn't shadow them.
+if ($?LD_LIBRARY_PATH) then
+    setenv LD_LIBRARY_PATH "$VIRTUAL_ENV/lib/python3.11/site-packages/PyQt5/Qt5/lib:$LD_LIBRARY_PATH"
+else
+    setenv LD_LIBRARY_PATH "$VIRTUAL_ENV/lib/python3.11/site-packages/PyQt5/Qt5/lib"
+endif
+EOF
+
+    # Also export in our own shell so the smoke test below sees the right libs.
+    export LD_LIBRARY_PATH="$REPO_DIR/$QT5_LIB_REL${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 # --- Smoke tests ---
 
 if [[ "$NO_SMOKE" == "0" ]]; then
@@ -162,6 +198,18 @@ if [[ "$NO_SMOKE" == "0" ]]; then
     else
         echo "  pvt CLI      FAIL — not on PATH"
         smoke_fail=1
+    fi
+
+    # PyQt5 import test — exercises the LD_LIBRARY_PATH patch above.
+    # Only present if the gui extras are installed (i.e. wheels were
+    # bundled). Skip silently otherwise.
+    if [[ -d "$REPO_DIR/$QT5_LIB_REL" ]]; then
+        if python -c "from PyQt5.QtWidgets import QApplication" 2>/dev/null; then
+            echo "  PyQt5        OK"
+        else
+            echo "  PyQt5        FAIL — run \`python -c 'from PyQt5.QtWidgets import QApplication'\` for the real error"
+            smoke_fail=1
+        fi
     fi
 
     if [[ "$smoke_fail" == "1" ]]; then
@@ -199,11 +247,13 @@ echo "  venv: $REPO_DIR/$VENV_DIR"
 if [[ -n "$CURRENT_LINK" ]]; then
     echo ""
     echo "Activate via the stable 'current' path (recommended):"
-    echo "  cd $CURRENT_LINK && source $VENV_DIR/bin/activate"
+    echo "  bash:  cd $CURRENT_LINK && source $VENV_DIR/bin/activate"
+    echo "  csh:   cd $CURRENT_LINK && source $VENV_DIR/bin/activate.csh"
 else
     echo ""
     echo "Activate via the absolute deploy path:"
-    echo "  cd $REPO_DIR && source $VENV_DIR/bin/activate"
+    echo "  bash:  cd $REPO_DIR && source $VENV_DIR/bin/activate"
+    echo "  csh:   cd $REPO_DIR && source $VENV_DIR/bin/activate.csh"
 fi
 
 echo ""
