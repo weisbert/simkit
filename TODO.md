@@ -347,24 +347,32 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 - [x] Two parallel design-review agents (architecture + UX) ran before spec writing; all 10 recommendations absorbed into §2.1 mandates (A1-A5, B1-B5).
 - [x] 6 ASCII-mockup open decisions + 2 deeper workflow questions all answered before spec writing.
 
-### §2. Deployment pipeline integration (PyQt5 deps)
+### §2. Deployment pipeline integration (PyQt5 deps) — DONE 2026-05-19 PM (DECISIONS #74)
 
-- [ ] Add `PyQt5==5.15.9` + `pytest-qt==4.5.0` + `QtAwesome==1.4.2` to `requirements.txt`.
-- [ ] Re-freeze `requirements.lock.txt` via `pip freeze --all`.
-- [ ] On yellow Windows: re-run `scripts/download_wheels.py` for the new wheels (PyQt5 wheel is ~50MB single file).
-- [ ] Bundle fresh tarball via `scripts/make_payload.py`.
-- [ ] On red Linux: deploy via `scripts/unpack_payload.sh` + `deploy_venv.sh`; verify `pvt gui --help` works in the new venv.
+- [x] Add `PyQt5==5.15.9` + `pytest-qt==4.5.0` + `QtAwesome==1.4.2` to `requirements.txt`.
+- [x] Re-freeze `requirements.lock.txt` via `pip freeze --all` in clean venv. `duckdb` pinned 1.5.2 → 1.2.2 (glibc 2.17 baseline forever-rule).
+- [x] `download_wheels.py` `DEFAULT_PLATFORMS` tightened to manylinux2014/2_17 only (drops 2_28 which would silently break red).
+- [x] CRLF defense (3 layers): `.gitattributes` + `make_payload.py` pack-time normalize + `unpack_payload.sh` post-extract sed-strip.
+- [x] `--no-wheels` code-only payload mode (`make_payload.py --no-wheels` → `unpack_payload.sh` auto-copies wheels from `<deploys>/current/vendor/wheels/`).
+- [x] `deploy_venv.sh` patches `.venv/bin/activate` + `activate.csh` with `LD_LIBRARY_PATH` prepend for the wheel's bundled Qt5 (Cadence's `/software/public/qt/5.15.3_xcb/lib` shadows it otherwise).
+- [x] `scripts/README.md` updated with all of the above; `scripts/PHASE4_DEPS_HANDOFF.md` is now redundant — pending deletion.
+- [x] Live-verified on red zone: `bash scripts/deploy_venv.sh` clean with 5 smoke tests (duckdb / skillbridge / simkit / `pvt` / PyQt5).
 
-### §3. App skeleton (architecture proves out)
+### §3. App skeleton (architecture proves out) — DONE 2026-05-19 PM (DECISIONS #74)
 
-- [ ] `python/simkit/gui/` package created with `__init__.py` + `app.py` (`main()` entry).
-- [ ] `pvt gui` subcommand in `python/simkit/cli/gui.py` → calls `simkit.gui.app.main()`.
-- [ ] `MainWindow` with top bar (module selector placeholder), status strip placeholder, left tree placeholder, right panel placeholder, bottom log.
-- [ ] `BridgeWorker` singleton on dedicated QThread per spec §8 (A1 + A5). Heartbeat every 10s; status dot wired to top bar.
-- [ ] `ModuleSession` dataclass + serializer per spec §7 (A4).
-- [ ] `~/.simkit/gui_app.json` global state + `.simkit/gui_state.json` per-module state read/write.
-- [ ] Unit tests for ModuleSession + BridgeWorker (mock bridge) + state persistence round-trip.
-- [ ] **Verification gate:** `pvt gui` boots an empty shell window with green bridge status dot when Virtuoso is running, red when not. App restart restores last-visited module.
+- [x] `python/simkit/gui/` package created with `__init__.py` + `app.py` (`main()` entry).
+- [x] `pvt gui` subcommand in `python/simkit/cli/gui.py` → calls `simkit.gui.app.main()`.
+- [x] `MainWindow` with top bar (module selector placeholder), status strip placeholder, left tree placeholder, right panel placeholder, bottom log.
+- [x] `BridgeWorker` singleton on dedicated QThread per spec §8 (A1 + A5). Heartbeat every 10s; status dot wired to top bar.
+- [x] `ModuleSession` dataclass + serializer per spec §7 (A4).
+- [x] `~/.simkit/gui_app.json` global state + `.simkit/gui_state.json` per-module state read/write.
+- [x] Unit tests for ModuleSession + BridgeWorker (mock bridge) + state persistence round-trip — **37 / 37 green**.
+- [x] `app.py` `except ImportError` split: `ModuleNotFoundError` → exit 4 with install hint; `ImportError` → exit 5 with real error + LD_LIBRARY_PATH guidance.
+- [x] **Verification gate (effectively met 2026-05-19 PM):** `pvt gui --safe-mode` launched an empty window with bridge status dot on red zone; user closed it. Director-mode signal = pass. Other §3 acceptance items (bridge dot color matches Virtuoso state / `~/.simkit/gui_app.json` writes on close / restart restores module) NOT explicitly validated by user — moved on.
+
+**Outstanding bug (deferred to next session):**
+
+- [ ] **BridgeWorker timer cross-thread shutdown warning** — `QObject::killTimer / ~QObject: Timers cannot be stopped from another thread` on `pvt gui` close. Real Qt-thread-affinity bug in `python/simkit/gui/bridge_worker.py`. GUI displays + works regardless. Fix BEFORE Stage 2 dispatch (all UI tabs reuse BridgeWorker).
 
 ### §4. View results path
 

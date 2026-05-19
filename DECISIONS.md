@@ -2136,3 +2136,71 @@ _Date: 2026-05-19 (post Phase 3A closeout, same day as #72)_
 **Suggested impl order (spec §21):** deps → app skeleton + bridge + heartbeat → view results → run path → diff → corner editor → measure editor → milestone + status strip → wizard → polish + dogfood gate.
 
 **Acceptance gate:** Phase 4 is "done" when user has completed one real signoff cycle entirely inside the GUI (not "all tests pass" — running tool must satisfy real workflow).
+
+---
+
+ ## #74 — Phase 4 §2 + §3 bring-up: deps + GUI skeleton + 4 red-zone environmental fixes
+
+**Date:** 2026-05-19 PM (commits `d546bba` → `203bf75` → `3bcfba5` → `a50b4b2` → `5e8538c` → `62489e5` → `d4e2662`).
+
+**Context:** Morning closed at `5dcb5a7` (Phase 4 §1 spec frozen). PM dispatched 2-parallel agents for §2 deployment-pipeline integration + §3 GUI app skeleton. Implementation landed clean on first dispatch (Python 1153 → 1190, +37 GUI tests, all green). Then 4 separate red-zone environmental issues surfaced during real dogfood by user — each fixed before the §3 GUI-launch verification gate could clear. All 6 fixes captured here as one entry because they form a single "first real red-zone bring-up" narrative.
+
+### D1 — 2-parallel agent dispatch for §2 + §3 (foundation stage)
+
+**Decision:** Run Agent A (§2 deps + 3-zone pipeline integration) and Agent B (§3 GUI app skeleton with mock-PyQt5 tests) in parallel. NOT 4-parallel (Stage 2 plan); foundation must precede UI subsystems because §4-§11 all depend on `BridgeWorker` + `MainWindow` + `ModuleSession` from §3.
+
+**Why:** File overlap analysis — §2 touches `requirements*.txt` + `scripts/`, §3 touches `python/simkit/gui/` + `python/simkit/cli/gui.py` + `tests/gui/`. Zero overlap. Verification gates serialize (Agent A unblocks Agent B's runtime), but code-write parallelizes safely. Going 3+ at this stage would dispatch agents against a not-yet-existing parent class (`MainWindow` tab framework) — guaranteed merge pain.
+
+### D2 — CRLF defense: 3 layers (preventive + producer + consumer), root-cause-kill at producer
+
+**Decision:** Defense-in-depth, NOT single-point fix. After first attempt (`.gitattributes` + post-extract sed-strip in `unpack_payload.sh`, commit `3bcfba5`) failed because yellow Windows' already-CRLF working tree survived `git pull` (no re-checkout), added pack-time normalization in `make_payload.py` (commit `a50b4b2`) as the canonical kill.
+
+**Three layers (top = producer side, bottom = consumer):**
+
+1. `.gitattributes` — `text=auto eol=lf` + explicit `*.sh text eol=lf` etc. **Preventive.** Stops git from re-introducing CRLF on checkout. Doesn't fix already-CRLF files in stale working trees.
+2. `make_payload.py` `add_recursive_normalized()` — replaces `tar.add()` with manual walk + `tar.addfile(ti, BytesIO(content.replace(b"\r\n", b"\n")))` for `.sh`/`.py`/`.il`/`.ils`. **Producer-side bulletproof.** Counter prints `[normalize] N text file(s) had CRLF` so yellow operators see when their working tree was dirty (informational — the tarball is clean either way).
+3. `unpack_payload.sh` post-extract `find ... -exec sed -i 's/\r$//' {} +` on `scripts/*.{sh,py}`. **Consumer-side last-resort.** Catches anything the first two layers missed.
+
+**Why not just .gitattributes?** Tested it on red zone — failed twice. Yellow's pre-`.gitattributes` working tree carried CRLF; `git pull` is fast-forward (doesn't re-checkout); `make_payload` packed CRLF as-is. Only producer-side normalization actually breaks the dependency on yellow's local state.
+
+### D3 — duckdb 1.5.2 → 1.2.2 (glibc 2.17 forever-rule)
+
+**Decision:** Pin `duckdb==1.2.2` (was 1.5.2). Tighten `download_wheels.py DEFAULT_PLATFORMS` to `["manylinux2014_x86_64", "manylinux_2_17_x86_64"]` only — both name the same baseline; never bring back newer ones.
+
+**Why:** Red zone is RHEL7-era glibc 2.17. duckdb 1.3+ ships only manylinux_2_26+/2_28 cp311 wheels — pip rejects on red. 1.2.2 is the last version with manylinux2014 cp311. simkit's duckdb API surface is `duckdb.connect()` + plain SQL (stable since duckdb 0.8) — safe to downgrade.
+
+**Forever-rule:** glibc 2.17 (manylinux2014 / manylinux_2_17) is the lowest common denominator across green (Rocky 8.10 glibc 2.28) and red (RHEL7 glibc 2.17). NEVER add `manylinux_2_28` (or newer) back to `DEFAULT_PLATFORMS` — pip would silently accept wheels that break red. If a package drops manylinux2014 support in a new release, **pin its version DOWN** to the last release that still ships 2014 wheels, or custom-build from source on a glibc-2.17 host. Documented in `download_wheels.py` comment + `scripts/README.md` troubleshooting.
+
+**Alternative rejected:** `auditwheel repair` or in-tree duckdb build. Both heavy; downgrade is one-line.
+
+### D4 — Cadence Qt5 shadows wheel's Qt5; `deploy_venv.sh` patches activate scripts
+
+**Decision:** `deploy_venv.sh` post-`pip install` appends `LD_LIBRARY_PATH` prepend to BOTH `.venv/bin/activate` (bash, `${LD_LIBRARY_PATH:+:...}` empty-guard) AND `.venv/bin/activate.csh` (csh, `if ($?LD_LIBRARY_PATH)`/`else`/`endif` block). Prepend value = `$VIRTUAL_ENV/lib/python3.11/site-packages/PyQt5/Qt5/lib`. Also export same in `deploy_venv.sh`'s own shell so the new PyQt5 smoke test sees the right libs.
+
+**Why:** Red-zone EDA hosts source Cadence Virtuoso which appends `/software/public/qt/5.15.3_xcb/lib` to `LD_LIBRARY_PATH`. Linux loader finds Cadence's Qt 5.15.3 before the wheel's bundled Qt 5.15.18 — `import PyQt5.QtWidgets` raises `ImportError: symbol _ZdlPvm, version Qt_5 not defined in file libQt5Core.so.5`. Prepending the wheel's lib dir forces the loader to find the correct Qt5 first. Persistent across sessions (lives in activate script, regenerated each deploy).
+
+**Alternatives rejected:**
+
+- Wrapper script around `pvt gui` that re-execs with adjusted env → adds an entry-point divergence; doesn't help users who import PyQt5 directly via `python3`.
+- Patch `app.py` to detect + re-exec with prepended env → can't modify `LD_LIBRARY_PATH` after Python is running (already-loaded libs).
+- Unset `LD_LIBRARY_PATH` entirely → breaks Cadence Virtuoso, which simkit drives via skillbridge.
+
+### D5 — `app.py` splits `ModuleNotFoundError` (exit 4) vs `ImportError` (exit 5)
+
+**Decision:** Distinguish "PyQt5 not installed" from "PyQt5 installed but fails to load". Different exit codes (4 vs 5). The latter prints the underlying exception + LD_LIBRARY_PATH guidance.
+
+**Why:** The original blanket `except ImportError` printed "PyQt5 is not installed" even when `pip list` clearly showed PyQt5 5.15.9 — misleading users into reinstall loops that don't help. `ModuleNotFoundError` is the specific subclass for "module not found"; `ImportError` proper is "found but failed to load" (DLL/symbol mismatch, etc.). Splitting them costs 8 lines of code + 1 docstring update; saves any future EDA user 30+ minutes of debug.
+
+### D6 — Documentation: `scripts/README.md` is canonical; PHASE4_DEPS_HANDOFF.md is redundant
+
+**Decision:** All operational knowledge folded into `scripts/README.md` (canonical reference): `--no-wheels` workflow with decision table, CRLF defense layers, LD_LIBRARY_PATH troubleshooting, glibc 2.17 baseline rule, corrected `DEFAULT_PLATFORMS` description. `scripts/PHASE4_DEPS_HANDOFF.md` (Agent A's one-shot bring-up doc) is now redundant — flagged for deletion in next session.
+
+**Why:** Two overlapping deployment docs drift apart. README has structure (zone-by-zone sections, troubleshooting table) that scales for ongoing reference; the handoff doc was scoped to one event (PyQt5 deps landing) and that event is over.
+
+### Outstanding (next session)
+
+1. **BridgeWorker timer cross-thread bug** — `QObject::killTimer / ~QObject: Timers cannot be stopped from another thread` on `pvt gui` close. Real Qt-thread-affinity bug in `python/simkit/gui/bridge_worker.py`. Non-blocking but all Stage 2 UI tabs will hit BridgeWorker so worth fixing before 4-parallel dispatch.
+
+2. **Delete `scripts/PHASE4_DEPS_HANDOFF.md`** — user OK'd in principle; 1-commit cleanup.
+
+3. **Stage 2: §4 / §7 / §8 / §9a 4-parallel** — view results / corner editor / measure editor / milestone DuckDB schema migration. All independent file-wise after §3 skeleton landed.
