@@ -23,6 +23,7 @@ import argparse
 import datetime as dt
 import fnmatch
 import hashlib
+import io
 import os
 import subprocess
 import sys
@@ -131,6 +132,57 @@ def make_filter(verbose: bool = False):
     return _filter
 
 
+# Text extensions we force to LF endings inside the tarball, regardless
+# of what the local working tree happens to have. Why: yellow Windows
+# can re-introduce CRLF after .gitattributes lands (stale working tree,
+# core.autocrlf overrides, etc.) — packing-time normalization is the
+# only layer that ALWAYS works, since make_payload.py runs on the
+# producer side and controls every byte going into the tarball.
+NORMALIZE_LF_EXTENSIONS = {".sh", ".py", ".il", ".ils"}
+
+
+def add_recursive_normalized(
+    tar: tarfile.TarFile,
+    src: Path,
+    arcname: str,
+    filt,
+    crlf_normalized_counter: list,
+):
+    """Recursively add src to tar, rewriting CRLF→LF for text extensions.
+
+    Equivalent to tar.add(src, arcname, filter=filt) but with the extra
+    pass over file content for members whose suffix is in NORMALIZE_LF_EXTENSIONS.
+    """
+    ti = tar.gettarinfo(str(src), arcname=arcname)
+    if ti is None:
+        return  # broken symlink etc.
+    rv = filt(ti)
+    if rv is None:
+        return
+    ti = rv
+
+    if ti.isdir():
+        tar.addfile(ti)
+        for child in sorted(src.iterdir()):
+            add_recursive_normalized(
+                tar, child, f"{arcname}/{child.name}", filt, crlf_normalized_counter
+            )
+    elif ti.isreg():
+        if src.suffix in NORMALIZE_LF_EXTENSIONS:
+            with open(src, "rb") as f:
+                content = f.read()
+            normalized = content.replace(b"\r\n", b"\n")
+            if normalized != content:
+                crlf_normalized_counter[0] += 1
+            ti.size = len(normalized)
+            tar.addfile(ti, io.BytesIO(normalized))
+        else:
+            with open(src, "rb") as f:
+                tar.addfile(ti, f)
+    else:
+        tar.addfile(ti)
+
+
 def sha256_of_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -208,6 +260,7 @@ def main() -> int:
     # half-written tarball on disk if the build is interrupted.
     tmp_path = archive_path.with_suffix(".tar.gz.tmp")
     members_count = 0
+    crlf_normalized = [0]  # mutable container so the recursive helper can bump it
 
     filt = make_filter(verbose=args.verbose)
     with tarfile.open(tmp_path, "w:gz") as tar:
@@ -225,10 +278,13 @@ def main() -> int:
                     members_count += 1
                 return rv
 
-            tar.add(src, arcname=arcname, filter=counting_filter)
+            add_recursive_normalized(tar, src, arcname, counting_filter, crlf_normalized)
             print(f"  included: {path_str}")
 
     tmp_path.rename(archive_path)
+
+    if crlf_normalized[0] > 0:
+        print(f"  [normalize] {crlf_normalized[0]} text file(s) had CRLF, rewritten as LF")
 
     size_bytes = archive_path.stat().st_size
     size_mb = size_bytes / 1024 / 1024
