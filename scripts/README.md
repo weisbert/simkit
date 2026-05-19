@@ -54,6 +54,59 @@ python scripts/make_payload.py --verbose                      # log every exclud
 Excluded by default: `.git/` `.venv/` `__pycache__/` `*.pyc` IDE files
 DuckDB databases skillbridge logs `*.swp` etc.
 
+### Code-only iteration — skip the wheel bundle
+
+When you only changed code (no `requirements*.txt` diff), skip the 70 MB
+wheel bundle. The tarball drops from ~80 MB to a few MB; red zone reuses
+wheels from the previous deploy automatically.
+
+```bash
+python scripts/make_payload.py --no-wheels
+# → dist/simkit_<date>_<sha>_code.tar.gz   (the '_code' suffix marks it)
+```
+
+On red, the same `unpack_payload.sh` handles both modes:
+
+```bash
+bash <DEPLOYS>/current/scripts/unpack_payload.sh /path/to/simkit_<...>_code.tar.gz
+# auto-copies wheels from <DEPLOYS>/current/vendor/wheels/ into the new deploy.
+cd <DEPLOYS>/simkit_<...>_code
+bash scripts/deploy_venv.sh
+```
+
+Hard requirement: a prior **full-payload** deploy must already exist at
+`<DEPLOYS>/current/`. If not, `unpack_payload.sh` exits with code 5 and
+tells you to do a full deploy first to seed wheels.
+
+When to use which:
+
+| Diff type | Use |
+|---|---|
+| Code / SKILL / docs only | `--no-wheels` (fast, light)|
+| `requirements.txt` or `requirements.lock.txt` changed | Full bundle (default) |
+| First-ever deploy to a host | Full bundle (no `current/` to reuse from) |
+
+### CRLF guard (yellow Windows + bash `.sh` files)
+
+Yellow Windows' default `core.autocrlf=true` rewrites `.sh` files as
+CRLF on checkout. `set -euo pipefail\r` then chokes red-zone bash.
+Three layers of defense are now in place; you don't need to do anything
+extra:
+
+1. `.gitattributes` — git won't introduce CRLF on checkout (preventive)
+2. `make_payload.py` — normalizes CRLF→LF for `.sh`/`.py`/`.il`/`.ils`
+   members AT PACK TIME; prints `[normalize] N text file(s) had CRLF`
+   if your working tree was dirty (informational — the tarball is clean)
+3. `unpack_payload.sh` — `sed`-strips any residual CRLF from
+   `scripts/*.sh` post-extract (last-resort)
+
+If you've been pulling from yellow before `.gitattributes` landed, your
+working tree may still have CRLF in `.sh` files. One-time renormalize:
+```bash
+git pull
+git add --renormalize . && git checkout -- .
+```
+
 ---
 
 ## Red Linux — unpack + venv
@@ -211,10 +264,29 @@ When you want to bump a version:
 ## Troubleshooting
 
 **`pip download` on Windows fetches the wrong wheel.** The script forces
-`--platform manylinux2014_x86_64 --abi cp311 --implementation cp
---only-binary=:all:`. If a package has no manylinux wheel (rare), pip
-falls back through `manylinux_2_28_x86_64` and `manylinux_2_17_x86_64`
-in order.
+`--platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 --abi cp311
+--implementation cp --only-binary=:all:`. Both platform tags name the SAME
+baseline (glibc 2.17); newer baselines (e.g. `manylinux_2_28`) are
+deliberately NOT in `DEFAULT_PLATFORMS` because red zone is RHEL7-era
+glibc 2.17 — accepting newer wheels would silently break the deploy.
+
+**`pvt gui` says "PyQt5 is not installed" but `pip list` shows it.**
+On EDA hosts, `LD_LIBRARY_PATH` often includes Cadence's own Qt5
+(e.g. `/software/public/qt/5.15.3_xcb/lib`), which shadows the wheel's
+bundled Qt 5.15.18 at import time. `deploy_venv.sh` automatically
+prepends the wheel's Qt5 lib dir to `LD_LIBRARY_PATH` inside the
+generated `.venv/bin/activate` and `activate.csh` — re-source the
+activate script. If the issue persists, run
+`python -c "from PyQt5.QtWidgets import QApplication"` to see the real
+error; since Phase 4, `pvt gui` itself distinguishes "missing" (exit 4)
+from "fails to load" (exit 5) and prints the underlying error.
+
+**`pip install` reports `Could not find a version that satisfies
+duckdb==X` on red zone.** Wheel platform mismatch. duckdb dropped
+manylinux_2_17 wheels at v1.3 — the lock pins duckdb to the last
+glibc-2.17-compatible version. If a future bump needs a newer duckdb,
+either find another version that still ships manylinux2014 wheels, or
+build duckdb from source on a glibc-2.17 host.
 
 **`deploy_venv.sh` reports SHA256 mismatch.** The tarball was corrupted
 in transit. Re-transfer.
