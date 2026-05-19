@@ -79,10 +79,16 @@ class ProjectTreeModel(QStandardItemModel):
             (self.NODE_KIND_GROUP, self.GROUP_REVIEWS), _NODE_DATA_ROLE
         )
         for review in reviews:
-            child = QStandardItem(
-                f"{review.review_name}  ({review.item_count} items)"
-            )
+            if review.parse_error:
+                label = f"⚠ {review.review_name}  (parse error)"
+            else:
+                label = f"{review.review_name}  ({review.item_count} items)"
+            child = QStandardItem(label)
             child.setEditable(False)
+            if review.parse_error:
+                child.setToolTip(
+                    f"{review.review_path.name}\n{review.parse_error}"
+                )
             child.setData(
                 (self.NODE_KIND_REVIEW, review), _NODE_DATA_ROLE
             )

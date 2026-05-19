@@ -26,7 +26,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from PyQt5.QtCore import Qt, QModelIndex, QPoint
+from PyQt5.QtCore import Qt, QModelIndex, QPoint, QFileSystemWatcher
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
@@ -95,6 +95,10 @@ class MainWindow(QMainWindow):
         self._error_translator: Optional[ErrorTranslator] = None
         self._run_progress: Optional[RunProgressWidget] = None
         self._pending_ops: dict[int, dict[str, Any]] = {}
+        # Filesystem watcher for the loaded project's reviews/unions/bundles
+        # dirs. When the user edits a sidecar in their $EDITOR (or via the
+        # right-click "Open .review.json"), the tree refreshes automatically.
+        self._fs_watcher: Optional[QFileSystemWatcher] = None
 
         # --- top bar ----------------------------------------------------
         self.top_bar = QWidget(objectName="topBar")
@@ -269,6 +273,44 @@ class MainWindow(QMainWindow):
         if module.bundle_default is not None:
             self._load_bundle_from_disk(module.bundle_default)
 
+        self._rewire_fs_watcher()
+
+    def _rewire_fs_watcher(self) -> None:
+        """(Re-)install QFileSystemWatcher on the project's sidecar dirs.
+
+        Watches reviews/, unions/, bundles/. Any add/remove/edit triggers a
+        debounced reload of the current module so the left tree + editors
+        stay in sync with on-disk edits. Survives the user opening a file in
+        $EDITOR and saving it back.
+        """
+        if self._loaded_module is None:
+            return
+        if self._fs_watcher is not None:
+            self._fs_watcher.deleteLater()
+        self._fs_watcher = QFileSystemWatcher(self)
+        for sub in ("reviews", "unions", "bundles"):
+            d = self._loaded_module.project_root / sub
+            if d.is_dir():
+                self._fs_watcher.addPath(str(d))
+        self._fs_watcher.directoryChanged.connect(self._on_project_dir_changed)
+
+    def _on_project_dir_changed(self, dir_path: str) -> None:
+        if self._loaded_module is None:
+            return
+        from simkit.gui.loaders import load_module
+        try:
+            self._loaded_module = load_module(self._loaded_module.project_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[watch] reload failed: {exc}")
+            return
+        self._tree_model.populate(self._loaded_module)
+        self.left_tree.expandAll()
+        self.append_log(f"[watch] {Path(dir_path).name}/ changed → tree refreshed")
+        # Some editors (vim) replace-via-rename, which silently drops the
+        # watch on the original inode. Re-add the directory to be safe.
+        if self._fs_watcher and dir_path not in self._fs_watcher.directories():
+            self._fs_watcher.addPath(dir_path)
+
     def restore_session(self, session_name: Optional[str], baseline: Optional[str]) -> None:
         """Apply persisted ModuleSession bits to the live UI."""
         if session_name:
@@ -355,9 +397,16 @@ class MainWindow(QMainWindow):
             and payload == ProjectTreeModel.GROUP_REVIEWS
         ):
             a_new = menu.addAction("+ New Review…")
+            menu.addSeparator()
+            a_refresh = menu.addAction("Refresh tree (rescan reviews/)")
             chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
             if chosen is a_new:
                 self._new_review_dialog()
+            elif chosen is a_refresh:
+                self._on_project_dir_changed(
+                    str(self._loaded_module.project_root / "reviews")
+                    if self._loaded_module else ""
+                )
             return
         if kind == ProjectTreeModel.NODE_KIND_REVIEW and isinstance(payload, LoadedReview):
             a_run = menu.addAction("Run this review…")

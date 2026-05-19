@@ -74,6 +74,10 @@ class LoadedReview:
     review_path: Path
     review_name: str
     item_count: int
+    # When the .review.json fails to parse (invalid JSON, missing schema, etc),
+    # parse_error carries the human-readable cause + the tree label flags it
+    # visibly so the user knows their on-disk edit is broken.
+    parse_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -140,30 +144,37 @@ def _scan_reviews(project_root: Path) -> tuple[LoadedReview, ...]:
     out: list[LoadedReview] = []
     for path in sorted(reviews_dir.glob("*.review.json")):
         name = path.name[: -len(".review.json")]
-        item_count = _count_items(path)
+        count, err = _count_items_or_error(path)
         out.append(
             LoadedReview(
                 review_path=path.resolve(),
                 review_name=name,
-                item_count=item_count,
+                item_count=count,
+                parse_error=err,
             )
         )
     return tuple(out)
 
 
-def _count_items(review_path: Path) -> int:
-    # The full review loader cross-resolves union/bundle paths which we do
-    # NOT want to do here — the tree only needs the item count for the
-    # display label. Plain JSON parse is enough.
+def _count_items_or_error(review_path: Path) -> tuple[int, Optional[str]]:
+    """Plain JSON parse → (item_count, None) on success, (0, error_msg) on
+    failure. The full review loader cross-resolves union/bundle paths which
+    we do NOT want to do here — the tree only needs the item count for the
+    display label.
+    """
     try:
         with review_path.open("r", encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return 0
-    items = data.get("items") if isinstance(data, dict) else None
+    except OSError as exc:
+        return 0, f"cannot read: {exc}"
+    except json.JSONDecodeError as exc:
+        return 0, f"invalid JSON: {exc.msg} (line {exc.lineno})"
+    if not isinstance(data, dict):
+        return 0, "top-level must be a JSON object"
+    items = data.get("items")
     if not isinstance(items, list):
-        return 0
-    return len(items)
+        return 0, "missing or invalid 'items' array"
+    return len(items), None
 
 
 def _read_history(
