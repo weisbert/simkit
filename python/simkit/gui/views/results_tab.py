@@ -71,14 +71,24 @@ class ResultsTab(QWidget):
         clicks the "Run this review" button. ``review_path`` is the
         absolute path on disk; ``MainWindow`` is responsible for the
         actual ``pvt run`` ``QProcess`` invocation.
+      * ``compare_requested()`` — user clicked the "Compare to…" button.
+        MainWindow already knows the current run (via the prior
+        :meth:`set_run` call) so no payload is needed.
+      * ``baseline_pinned(run_id_or_none)`` — user toggled the baseline
+        pin. ``None`` means "unpin"; otherwise the str run_id that was
+        pinned. Emitted from :meth:`set_baseline`.
     """
 
     run_requested = pyqtSignal(str)
+    compare_requested = pyqtSignal()
+    baseline_pinned = pyqtSignal(object)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self._review_path: Optional[str] = None
         self._model: Optional[ResultsModel] = None
+        self._current_run_id: Optional[str] = None
+        self._baseline_run_id: Optional[str] = None
 
         # --- header (spec §11 / B2) -------------------------------------
         self.header = QFrame(self)
@@ -91,6 +101,27 @@ class ResultsTab(QWidget):
         self.header_label.setObjectName("resultsHeaderLabel")
         self.header_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         header_layout.addWidget(self.header_label, stretch=1)
+
+        # Baseline pin label — clickable to toggle off. Defaults to
+        # "Baseline: —" (em dash, no pin) per spec §10.
+        self.baseline_label = QLabel("Baseline: —", self.header)
+        self.baseline_label.setObjectName("resultsBaselineLabel")
+        self.baseline_label.setCursor(Qt.PointingHandCursor)
+        self.baseline_label.setToolTip(
+            "Click to unpin the baseline run (when one is pinned).",
+        )
+        # QLabel has no clicked signal; we intercept mousePressEvent on
+        # the instance via a closure so the label stays a plain QLabel
+        # and the cursor still flips to a hand.
+        self.baseline_label.mousePressEvent = self._on_baseline_clicked  # type: ignore[assignment]
+        header_layout.addWidget(self.baseline_label, stretch=0)
+
+        # "Compare to…" — disabled until set_run() establishes a current run.
+        self.compare_button = QPushButton("Compare to…", self.header)
+        self.compare_button.setObjectName("compareToButton")
+        self.compare_button.setEnabled(False)
+        self.compare_button.clicked.connect(self.compare_requested.emit)
+        header_layout.addWidget(self.compare_button, stretch=0)
 
         self.run_button = QPushButton("Run this review", self.header)
         self.run_button.setObjectName("runReviewButton")
@@ -144,6 +175,10 @@ class ResultsTab(QWidget):
         self._model = ResultsModel(rows, parent=self)
         self._proxy.setSourceModel(self._model)
         self._apply_column_widths()
+        # Track the current run + enable Compare; MainWindow reads
+        # ``current_run_id()`` when it handles compare_requested.
+        self._current_run_id = run_id
+        self.compare_button.setEnabled(True)
 
     def set_header(
         self,
@@ -182,6 +217,32 @@ class ResultsTab(QWidget):
         self._review_path = path or None
         self.run_button.setEnabled(self._review_path is not None)
 
+    def set_baseline(self, run_id: Optional[str]) -> None:
+        """Pin (or unpin, with ``None``) a baseline run for diff workflows.
+
+        Updates the header label text and emits
+        :pyattr:`baseline_pinned`. Idempotent — emitting on every call is
+        intentional so MainWindow can re-sync state without a separate
+        "is this a change?" check.
+        """
+        self._baseline_run_id = run_id
+        if run_id is None:
+            self.baseline_label.setText("Baseline: —")
+        else:
+            # First 8 chars matches the short_id convention used in the
+            # picker + diff tab title.
+            short = run_id[:8] if len(run_id) > 8 else run_id
+            self.baseline_label.setText(f"Baseline: ★ {short}")
+        self.baseline_pinned.emit(run_id)
+
+    def current_run_id(self) -> Optional[str]:
+        """Return the run_id last passed to :meth:`set_run`, or None."""
+        return self._current_run_id
+
+    def baseline_run_id(self) -> Optional[str]:
+        """Return the currently pinned baseline run_id (or None)."""
+        return self._baseline_run_id
+
     # --- internals -------------------------------------------------------
 
     def _apply_column_widths(self) -> None:
@@ -200,3 +261,8 @@ class ResultsTab(QWidget):
             # rather than a bogus empty string if something races.
             return
         self.run_requested.emit(self._review_path)
+
+    def _on_baseline_clicked(self, _event) -> None:
+        """Slot: clicking the baseline label unpins (only when pinned)."""
+        if self._baseline_run_id is not None:
+            self.set_baseline(None)

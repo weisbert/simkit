@@ -163,5 +163,107 @@ class ResultsTabRunWiringTests(unittest.TestCase):
         self.assertIn("CDR-2026q2", text)
 
 
+class ResultsTabBaselinePinTests(unittest.TestCase):
+    """Phase 4 Stage 3 additions: Baseline pin label + signal."""
+
+    def test_baseline_label_default_text(self):
+        tab = ResultsTab()
+        self.assertEqual(tab.baseline_label.text(), "Baseline: —")
+
+    def test_baseline_pinned_signal_exists_with_object_signature(self):
+        tab = ResultsTab()
+        sig = tab.baseline_pinned
+        self.assertIsInstance(sig, pyqtBoundSignal)
+        received: list[object] = []
+        sig.connect(received.append)
+        sig.emit("some-run-id")
+        self.assertEqual(received, ["some-run-id"])
+
+    def test_set_baseline_with_id_updates_label_and_emits(self):
+        tab = ResultsTab()
+        received: list[object] = []
+        tab.baseline_pinned.connect(received.append)
+        tab.set_baseline("aaaaaaaa-1234-abcd")
+        self.assertIn("aaaaaaaa", tab.baseline_label.text())
+        self.assertIn("★", tab.baseline_label.text())
+        self.assertEqual(received, ["aaaaaaaa-1234-abcd"])
+
+    def test_set_baseline_none_unpins_and_emits_none(self):
+        tab = ResultsTab()
+        tab.set_baseline("aaaaaaaa-1234-abcd")
+        received: list[object] = []
+        tab.baseline_pinned.connect(received.append)
+        tab.set_baseline(None)
+        self.assertEqual(tab.baseline_label.text(), "Baseline: —")
+        self.assertEqual(received, [None])
+
+    def test_baseline_run_id_round_trip(self):
+        tab = ResultsTab()
+        self.assertIsNone(tab.baseline_run_id())
+        tab.set_baseline("xyz")
+        self.assertEqual(tab.baseline_run_id(), "xyz")
+        tab.set_baseline(None)
+        self.assertIsNone(tab.baseline_run_id())
+
+    def test_set_baseline_short_id_when_long(self):
+        tab = ResultsTab()
+        tab.set_baseline("aaaaaaaaXXXXX")
+        # Should display first 8 chars after the star.
+        self.assertIn("aaaaaaaa", tab.baseline_label.text())
+        self.assertNotIn("XXXXX", tab.baseline_label.text())
+
+
+class ResultsTabCompareButtonTests(unittest.TestCase):
+    """Compare-to button: signal, enable rules, current_run_id tracking."""
+
+    def test_compare_requested_signal_exists(self):
+        tab = ResultsTab()
+        self.assertIsInstance(tab.compare_requested, pyqtBoundSignal)
+
+    def test_compare_button_disabled_until_set_run(self):
+        tab = ResultsTab()
+        self.assertFalse(tab.compare_button.isEnabled())
+
+    def test_compare_button_emits_no_payload_on_click(self):
+        tab = ResultsTab()
+        # Manually enable; in production set_run() does it.
+        tab.compare_button.setEnabled(True)
+        received: list[None] = []
+        tab.compare_requested.connect(lambda: received.append(None))
+        tab.compare_button.click()
+        self.assertEqual(received, [None])
+
+    def test_set_run_enables_compare_and_remembers_id(self):
+        tab = ResultsTab()
+        con = _con_with_two_rows()
+        try:
+            tab.set_run("R1", con)
+        finally:
+            con.close()
+        self.assertTrue(tab.compare_button.isEnabled())
+        self.assertEqual(tab.current_run_id(), "R1")
+
+    def test_current_run_id_default_none(self):
+        tab = ResultsTab()
+        self.assertIsNone(tab.current_run_id())
+
+    def test_baseline_label_click_when_pinned_unpins(self):
+        tab = ResultsTab()
+        tab.set_baseline("aaa-bbb")
+        received: list[object] = []
+        tab.baseline_pinned.connect(received.append)
+        # Simulate a click via the closure.
+        tab._on_baseline_clicked(None)  # pylint: disable=protected-access
+        self.assertIsNone(tab.baseline_run_id())
+        self.assertEqual(received, [None])
+
+    def test_baseline_label_click_when_unpinned_no_op(self):
+        tab = ResultsTab()
+        received: list[object] = []
+        tab.baseline_pinned.connect(received.append)
+        tab._on_baseline_clicked(None)  # pylint: disable=protected-access
+        self.assertEqual(received, [])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
