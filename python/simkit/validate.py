@@ -69,7 +69,7 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
-_PROJECT_ID_RE = re.compile(r"^[a-z0-9_-]+$")
+_PROJECT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _TIMESTAMP_RE = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$"
 )
@@ -264,13 +264,13 @@ def _check_run_meta(run: dict, violations: List[Violation]) -> None:
                 f"run_id must match UUIDv4 hex/dash pattern, got {rid!r}",
             ))
 
-    # I3: project_id matches ^[a-z0-9_-]+$.
+    # I3: project_id matches ^[A-Za-z0-9_-]+$.
     pid = run.get("project_id")
     if pid is not None:
         if not isinstance(pid, str) or not _PROJECT_ID_RE.match(pid):
             violations.append(Violation(
                 "I3", "error", "run.project_id",
-                f"project_id must match ^[a-z0-9_-]+$, got {pid!r}",
+                f"project_id must match ^[A-Za-z0-9_-]+$, got {pid!r}",
             ))
 
     # I4: testbench_id == lib/cell/view (three slash-separated non-empty tokens).

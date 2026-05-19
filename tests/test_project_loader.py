@@ -157,13 +157,20 @@ class ValidationTests(TempDirMixin, unittest.TestCase):
         self.assertIn("dbRoot", str(cm.exception))
 
     def test_project_regex(self):
+        # Spaces / punctuation still rejected.
         with self.assertRaises(PvtProjectValidationError):
             self._load({**MIN_VALID, "project": "Has Spaces"})
         with self.assertRaises(PvtProjectValidationError):
-            self._load({**MIN_VALID, "project": "UpperCase"})
+            self._load({**MIN_VALID, "project": "with.dots"})
         with self.assertRaises(PvtProjectValidationError):
             self._load({**MIN_VALID, "project": ""})
-        # Valid edge cases
+        # Uppercase IS allowed (Phase 4 production names like "1AXX",
+        # "NDIV_pre_FDR" — engineers should not be forced to lowercase).
+        self.assertEqual(self._load({**MIN_VALID, "project": "1AXX"}).project, "1AXX")
+        self.assertEqual(
+            self._load({**MIN_VALID, "project": "UpperCase"}).project, "UpperCase"
+        )
+        # Other valid edge cases
         self.assertEqual(self._load({**MIN_VALID, "project": "a"}).project, "a")
         self.assertEqual(
             self._load({**MIN_VALID, "project": "my-proj_01"}).project,

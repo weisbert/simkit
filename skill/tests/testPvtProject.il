@@ -73,10 +73,12 @@
     (let ((r (_pvtTestParseFixture "missing_dbroot.pvtproject")))
       (pvtAssertErrCategory r 'pvt_validation "missing dbRoot"))))
 
-(pvtTestRegister "project/regex-uppercase-rejected"
+(pvtTestRegister "project/regex-uppercase-accepted"
+  ;; Phase 4 dogfood (1AXX project): production names need uppercase.
+  ;; Regex loosened to [A-Za-z0-9_-]+. See DECISIONS #79.
   (lambda ()
     (let ((r (_pvtTestParseFixture "project_uppercase.pvtproject")))
-      (pvtAssertErrCategory r 'pvt_validation "uppercase project name rejected"))))
+      (pvtAssertOk r "uppercase project name accepted"))))
 
 (pvtTestRegister "project/regex-spaces-rejected"
   (lambda ()

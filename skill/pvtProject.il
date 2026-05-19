@@ -32,12 +32,19 @@
 
 (defvar _PVT_SUPPORTED_SCHEMA_VERSIONS '(1))
 
+;; Mirrors Python project.py:_KNOWN_FIELDS. Phase 2 added unionsDir;
+;; Phase 3A added reviewsDir; Phase 3B added templatesDir / signalGroupsDir /
+;; measurementsDir. Unknown keys emit a warning + are ignored (forward-compat).
 (defvar _PVT_KNOWN_FIELDS
-  '("project" "dbRoot" "author" "testbench_aliases" "schema_version"))
+  '("project" "dbRoot" "author" "testbench_aliases" "schema_version"
+    "unionsDir" "reviewsDir"
+    "templatesDir" "signalGroupsDir" "measurementsDir"))
 
 ;; project name regex per docs/schema.md §1, identical to Python
-;; project.py:_PROJECT_NAME_RE.
-(defvar _PVT_PROJECT_NAME_RE "^[a-z0-9_-]+$")
+;; project.py:_PROJECT_NAME_RE. Loosened to allow uppercase (Phase 4 production
+;; names like "1AXX", "NDIV_pre_FDR" — engineers should not be forced into
+;; lowercase). See DECISIONS #79.
+(defvar _PVT_PROJECT_NAME_RE "^[A-Za-z0-9_-]+$")
 
 
 ;; --- defstruct --------------------------------------------------------------

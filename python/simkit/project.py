@@ -18,7 +18,7 @@ from typing import Mapping, Optional
 PVTPROJECT_FILENAME = ".pvtproject"
 ENV_VAR = "PVT_PROJECT"
 
-_PROJECT_NAME_RE = re.compile(r"^[a-z0-9_-]+$")
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _SUPPORTED_SCHEMA_VERSIONS = frozenset({1})
 _KNOWN_FIELDS = frozenset({
     "project",
@@ -171,7 +171,7 @@ def _validate_project(path: Path, data: dict) -> str:
         raise PvtProjectValidationError(f"{path}: 'project' must be a string")
     if not _PROJECT_NAME_RE.match(value):
         raise PvtProjectValidationError(
-            f"{path}: 'project' {value!r} does not match ^[a-z0-9_-]+$"
+            f"{path}: 'project' {value!r} does not match ^[A-Za-z0-9_-]+$"
         )
     return value
 

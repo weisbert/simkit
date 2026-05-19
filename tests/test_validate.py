@@ -510,8 +510,9 @@ class CompositeTests(unittest.TestCase):
         dump = _good_dump()
         # 1. Bad schema_version (I23)
         dump["schema_version"] = 99
-        # 2. Bad project_id (I3)
-        dump["run"]["project_id"] = "WHOA"
+        # 2. Bad project_id (I3): space, still rejected (uppercase alone is
+        # now valid — see DECISIONS #79).
+        dump["run"]["project_id"] = "has space"
         # 3. Bad timestamp (I6)
         dump["run"]["timestamp"] = "yesterday"
         # 4. Status outside enum (I12) — also breaks I1 indirectly
