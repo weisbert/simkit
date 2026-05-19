@@ -2366,3 +2366,71 @@ Pre-created `python/simkit/gui/views/__init__.py` before dispatch to remove the 
 2. **Stage 3: Run path (§5) + Diff (§6) + module loading** (NEXT). This unlocks the Stage 2 stub handlers (D2) — once `pvt run --gui-jsonl` subprocess dispatch exists and `ModuleSession` wires a real project into the editors, the log-only `_on_*_requested` handlers become BridgeWorker queues and QProcess spawns. The union↔flat adapter (D3) lives here too.
 3. **Stage 4: Milestone tagging UI (§15) + Wizard (§14) + Polish + Tier-1 dogfood gate**.
 4. **Error translation table (B5)** — spec §8.3 lists 7 SkillBridgeError categories that should map to plain-English user messages. Mostly mechanical; can be Stage 3 or earlier.
+
+
+## #78 — Phase 4 Stage 3: 4-parallel building blocks + Phase-3 integration → real Run/Diff/Corners/Measures paths
+_Date: 2026-05-19 (evening, after Stage 2 handoff `7c2f252`)_
+
+**Context:** Stage 2 (#77) shipped 3 right-panel tabs (Results / Corners / Measures) with log-only stub handlers wired by an explicit D2 mandate — no `BridgeWorker.queue_op` calls, no module loading, no QProcess subprocess dispatch. Stage 3 closes those four gaps in one wall-clock session: 4 parallel agents (file-disjoint, same Stage-2 pattern that held the merge-trivial constraint) produce the building blocks, then the orchestrator does Phase-3 integration in `main_window.py` + `app.py` + `module_session.py`. End-state: `pvt gui --module <path>` loads a real project into the editors, "Run this review" spawns `pvt run --gui-jsonl` as a QProcess with structured progress events back to a kanban widget, Compare opens a Diff tab with 3 sub-tabs, all bridge errors translate through a 18-entry Chinese table with QMessageBox-Details disclosure for known categories.
+
+### D1 — 4-parallel scope assignments (file-disjoint by construction, repeats #77's pattern)
+
+| Agent | Spec section | Files (new) | Files (modified) |
+|---|---|---|---|
+| A | Module loading building blocks | `gui/loaders.py`, `gui/tree_model.py`, `gui/views/run_progress.py`, 4 new test files | `gui/views/corners_editor.py` (additive: `set_project_root` + model-file existence check), `tests/gui/test_corners_editor.py` |
+| B | §5 Run path | `gui_events.py`, `gui/controllers/{__init__,run}.py`, 4 new test files | `cli/run.py` (--gui-jsonl + SIGTERM), `orchestrator.py` (progress_cb + cancel_check kwargs) |
+| C | §6 Diff path | `gui/diff_model.py`, `gui/views/diff_tab.py`, `gui/views/run_picker.py`, `gui/controllers/diff.py`, 5 new test files | `gui/views/results_tab.py` (additive: Baseline pin + Compare button + compare_requested/baseline_pinned signals), `tests/gui/test_results_tab.py` |
+| D | §8.3 error translation | `gui/error_translation.py`, `gui/controllers/error_translator.py`, 2 new test files | none |
+
+Same forbidden-list discipline as #77: agents never touch `main_window.py` / `app.py`. Phase-3 integration (orchestrator) does all the wiring after agents return, in one sequential commit.
+
+### D2 — Phase 3 integration shape: per-op callback dispatcher on top of shared BridgeWorker signals
+
+**Decision:** MainWindow keeps a `_pending_ops: dict[req_id → {on_ok, on_err, func}]` dict. Every `_queue_op(func_name, on_ok=..., on_err=..., kwargs=...)` records the request_id → callbacks pair before posting to BridgeWorker. The single `op_complete(req_id, result)` / `op_failed(req_id, error)` signals are connected once to `_on_op_complete` / `_on_op_failed` which look up the per-request callbacks and dispatch them.
+
+**Alternatives rejected:**
+- `functools.partial` + per-call `.connect`: leaks signal-slot connections forever, hard to disconnect cleanly, defeats Qt's queued-dispatch ordering guarantees.
+- `QSignalMapper`: deprecated; designed for static dispatch.
+- One slot per op type (e.g. `_on_corners_pull_complete`): brittle, every new op needs a new slot, doesn't compose with the natural callback closures the call sites already want to write.
+
+The dict-pop pattern is the same one ErrorTranslator uses internally (`on_op_failed → translate → emit translated(req_id, ...)`), so both the per-call callback and the global error translator see every failure, in the right order.
+
+### D3 — Modal QMessageBox for known errors only; unknown errors stay in log
+
+**Decision:** `_show_translated_error(req_id, translated)` checks `translated.is_known`. If True, fire a `QMessageBox.exec_()` with headline + action_hint + detail in the disclosure pane. If False, only append to the bottom log panel.
+
+**Why:** Spec §8.3 says known errors should surface as proactive guidance (e.g. "Maestro 当前有对话框打开 — 点击 Maestro 主窗口取消对话框"). Unknown errors are caught-all noise; firing a modal for every unrecognized bridge exception is dialog-spam at the worst time (when the user is debugging). The log panel is always visible (spec §6: 160 px default expanded), so the user still sees the raw error; the "Report this" link in the table is the escalation path.
+
+### D4 — Maestro session lives in MainWindow's top bar, persisted via ModuleSession
+
+**Decision:** `ModuleSession` gains an additive `session_name: Optional[str]` field. MainWindow adds a `QLineEdit` (`sessionInput`) in the top bar between the module label and the bridge status dot. `current_session_name()` strips + nullifies. `_warn_session_required()` fires `QMessageBox` when any bridge-touching handler is invoked without a session set. `restore_session(session_name, baseline)` applied after `set_bridge_worker` so the worker exists before the input is touched.
+
+**Why not auto-discover:** [[reference-tier1-baseline]] memory + DECISIONS #53 pin `axlGetWindowSession()` returns nil on this user's setup with Maestro open. A reliable auto-discovery would need a probe round-trip every launch, which deadlocks on `pvt gui --safe-mode` (no bridge running until thread.start). The "type once, persist per-module" pattern matches the user's real workflow: one Maestro per Virtuoso, session name rarely changes within a module.
+
+### D5 — Smoke test pattern: replace `QMessageBox.exec_` with non-blocking stub for offscreen Qt
+
+**Decision (smoke-script-local, not in production):** `/tmp/simkit_smoke.py` monkey-patches `QtWidgets.QMessageBox.exec_` to a print-stub before importing MainWindow. Production code stays untouched; the patch is only there to keep the offscreen-Qt smoke test from deadlocking on the first user-warning modal.
+
+**Why this was a real bug, not a smoke quirk:** First smoke attempt sat for 14 minutes across 3 stuck Python processes; user noticed and asked "为什么这个烟测这么慢". Diagnosed: `_on_run_requested` warned about missing session, `QMessageBox.exec_()` is modal-blocking, offscreen Qt has no way for "someone" to dismiss the dialog → infinite wait. Production users dismiss the dialog by clicking; tests can't. The stub keeps the smoke script honest about what got emitted (prints the modal title + body so the test log shows them) without blocking the event-loopless smoke path.
+
+### D6 — Stage-2 test log-string assertions: tighten production strings, leave tests untouched
+
+**Decision:** 3 Stage-2 tests in `tests/gui/test_main_window.py` asserted log fragments ("2 rows", "pull-overrides-sidecar", "keep-sidecar") that the Stage-3 handlers no longer produced (they short-circuited to "no bridge worker — operation skipped" before logging the count). Instead of updating the tests, restored the row-count + action-name logging in production (which improves UX too — user sees "would push N rows" even when not connected) and added the missing distinct log lines for `pull-overrides-sidecar` and `keep-sidecar`.
+
+**Why tighten production over loosening tests:** the test assertions encode useful UX requirements (the user wants to see what would have happened, not just "skipped"). Loosening to match the short-circuit fallback would silently degrade the log over time. The production fix takes 6 lines; the test fix would erase user-visible info.
+
+### D7 — Numbers
+
+- **Python tests: 1270 → 1502 (+232 net)**: A=59, B=52, C=97, D=35, integration=0 (orchestrator wiring tested via offscreen-Qt smoke, not pytest). Net is lower than agents' subtotal because Agent A's `tests/gui/test_corners_editor.py` extension is part of A's count.
+- **Files added: 19** (12 production + 7 test files spanning 13 new + 4 modified — also 4 root-level Python files `gui_events.py`, `loaders.py`, `tree_model.py`, plus 4 controller files + 4 view files).
+- **Files modified: 7** (4 by agents, 3 by Phase-3 orchestrator: `main_window.py` 207→632 LOC, `app.py` 211→226 LOC, `module_session.py` +5 LOC for session_name field).
+- **Wall-clock**: A ~7m, B ~11m, C ~12m, D ~3m (all parallel, max ~12m). Phase-3 integration ~15min. Total ~27min from dispatch to last commit.
+- **Zero merge conflicts** (file disjointness enforced by prompts and dispatch order).
+- **Live offscreen-Qt smoke**: 8 outbound signals all dispatched cleanly; 5 missing-session modals fired as expected, 3 bridge ops queued through worker, clean worker.stop+thread.quit+wait teardown.
+
+### Outstanding (next session)
+
+1. **Stage 4: Milestone tagging UI (§15) + Wizard (§14) + Polish** — `runs.milestone` column already in DuckDB v4 from #77 D2; needs "Set milestone…" right-click action + autocomplete + left-tree Milestones group click-through filter. Wizard is the from-scratch review authoring path (Copy-as is the primary path; both per spec §14).
+2. **§12 dogfood acceptance gate** — user completes one real signoff cycle (NDIV PDR or CDR pass) entirely inside the GUI on red zone. Until this clears, Tier-2 work (cross-module dashboard, charts, etc.) is locked.
+3. **§16 top-bar status strip** — 30s DuckDB query for cross-module 24h summary. Schema migration needed (`runs.failed_corners`, `runs.start_ts`, `runs.finish_ts` if not already there). Light work; can land alongside Stage 4 milestone work.
+4. **Red-zone deploy + dogfood smoke** — recommended BEFORE Stage 4 lands more code. Stage 3 hasn't been physically verified on red zone yet; the home-Linux `.venv` smoke confirms the wiring but the LD_LIBRARY_PATH + Qt-5.15.3-shadowing fixes from [[reference-cadence-qt-ldpath]] need a fresh deploy to re-verify on the actual EDA host.

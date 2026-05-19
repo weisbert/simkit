@@ -376,32 +376,32 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 
 ### §4. View results path — Stage 2 DONE 2026-05-19 PM late (agent A; DECISIONS #77)
 
-- [ ] Left tree: Reviews / Milestones / History groups with proper data binding. **— Stage 3 (needs module loading + project context)**
+- [x] Left tree: Reviews / Milestones / History groups with proper data binding. **— Stage 3A DONE 2026-05-19 (agent A; DECISIONS #78). `gui/tree_model.py:ProjectTreeModel` + Phase-3 wiring in `main_window._on_tree_clicked` (click history row → load run into ResultsTab).**
 - [x] Results tab: `ResultsModel(QAbstractTableModel)` + `QSortFilterProxyModel` per spec §10/A3 (`python/simkit/gui/results_model.py` + `gui/views/results_tab.py`).
 - [x] Review header bar with "Run this review" button (B2) per spec §6.1 (`run_requested = pyqtSignal(str)`; MainWindow handler is log-only stub for Stage 2, BridgeWorker wire happens in Stage 3 alongside §5).
 - [x] Results table: corner × test × measure × pass/fail/spec/spec_status columns (7-col model with `value` merging via `simkit.from_db._merge_value`).
 - [x] Failed-corner highlight via `BackgroundRole` (`QBrush(QColor(255,220,220))` when `status==fail` OR `spec_status in {fail, eval_err}`).
 - [x] Widget tests (pytest-qt) for table rendering (16 model tests + 10 tab tests; `:memory:` DuckDB fixtures).
 
-### §5. Run path (subprocess + JSONL progress)
+### §5. Run path (subprocess + JSONL progress) — Stage 3B DONE 2026-05-19 (agent B; DECISIONS #78)
 
-- [ ] `pvt run --gui-jsonl` CLI flag (additive) — emits structured progress events per spec §9.2.
-- [ ] `GuiEventEmitter` hooked into `_run_strategy_chain` + post-PvtSave.
-- [ ] `RunController` (Python class) spawns QProcess, parses JSONL events, emits Qt signals.
-- [ ] Run progress UI per spec §13 (items kanban + text log streaming to bottom panel).
-- [ ] Cancel semantics per spec §9.3 (SIGTERM + 5s grace + SIGKILL + partial_run DB flag).
-- [ ] DuckDB schema migration: `runs.partial_run BOOLEAN DEFAULT FALSE`.
-- [ ] Live-verified end-to-end on fnxSession0: pick review → click Run → progress UI updates → results populate when done → cancel mid-run leaves partial state correctly tagged.
+- [x] `pvt run --gui-jsonl` CLI flag (additive) — emits structured progress events per spec §9.2.
+- [x] `GuiEventEmitter` hooked into `_run_strategy_chain` + post-PvtSave (`simkit/gui_events.py`; orchestrator.execute() gains `progress_cb` + `cancel_check` kwargs).
+- [x] `RunController` (Python class) spawns QProcess, parses JSONL events, emits Qt signals (`simkit/gui/controllers/run.py`; signals `progress_event(dict)` / `run_finished(int, dict)` / `cancelled()` / `error(str)`).
+- [x] Run progress UI per spec §13 (`gui/views/run_progress.py:RunProgressWidget` items kanban with ASCII glyphs; bottom log gets `log`-event passthrough).
+- [x] Cancel semantics per spec §9.3 (SIGTERM via QProcess.terminate → 5s QTimer grace → SIGKILL via QProcess.kill + cancelled() emit; CLI side: module-level _cancel_requested flag polled at item boundary; partial_run=TRUE marked on last ingested run; exit 130).
+- [x] DuckDB schema migration: `runs.partial_run BOOLEAN DEFAULT FALSE` — already landed in #77 D2 alongside `runs.milestone`.
+- [ ] Live-verified end-to-end on fnxSession0: pick review → click Run → progress UI updates → results populate when done → cancel mid-run leaves partial state correctly tagged. **— Needs fresh red-zone deploy + real Maestro session; only offscreen-Qt smoke verified here.**
 
-### §6. Diff path
+### §6. Diff path — Stage 3C DONE 2026-05-19 (agent C; DECISIONS #78)
 
-- [ ] `DiffResultsModel(QAbstractTableModel)` wraps two run_ids per spec §10.3.
-- [ ] "Compare" button on every run row in History + Results header (B3).
-- [ ] Run-picker dialog (filterable list) for compare-against selection.
-- [ ] Baseline pin in Results header; per-module sticky.
-- [ ] Diff view = new right-panel tab with sub-tabs (Spec delta / Netlist delta / Spec-string delta).
-- [ ] Color coding: pass→fail red, fail→pass green, value-change-only yellow, unchanged grey.
-- [ ] "Show only changed" filter via QSortFilterProxyModel.
+- [x] `DiffResultsModel(QAbstractTableModel)` wraps two run_ids per spec §10.3 (`gui/diff_model.py`; 11 cols; 3-tone BackgroundRole spec-verdict-flip > status-flip priority).
+- [x] "Compare" button on every run row in History + Results header (B3) (`results_tab.py` additive Compare button + `compare_requested = pyqtSignal()`).
+- [x] Run-picker dialog (filterable list) for compare-against selection (`gui/views/run_picker.py:RunPickerDialog`; QLineEdit filter on short_id+label, double-click=OK, current_run_id excluded).
+- [x] Baseline pin in Results header; per-module sticky (`results_tab.py:set_baseline` + clickable QLabel; ModuleSession.active_baseline persisted via app.py shutdown hook).
+- [x] Diff view = new right-panel tab with sub-tabs (`gui/views/diff_tab.py:DiffTab`; 3 sub-tabs Spec delta / Netlist delta / Spec-string delta; closed() signal for tab-removal; opened lazily by `DiffController.diff_ready` signal).
+- [x] Color coding: pass→fail red #ffd0d0, fail→pass green #d0ffd0, value-change-only yellow #fff5b3, unchanged grey/default.
+- [x] "Show only changed" filter via QSortFilterProxyModel (`_ChangedRowsProxy` + 3-mode combo: All / Show changed / Show verdict-flipped).
 
 ### §7. Corner editor — Stage 2 DONE 2026-05-19 PM late (agent B; DECISIONS #77)
 
@@ -409,9 +409,9 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 - [x] "Pull from Maestro" / "Send to Maestro" buttons with last-sync timestamp.
 - [x] Live-vs-sidecar divergence yellow strip (shown via `set_divergence(live_count, sidecar_count)`; 3 follow-up signals: `show_diff` / `pull_overrides_sidecar` / `keep_sidecar`).
 - [x] Live validation (cell highlight on invalid; `validation_errors()` returns list, gates Send-button).
-- [ ] Push via BridgeWorker → `pvt_corners_push --replace` **— Stage 3 (currently log-only stub)**.
-- [ ] union↔flat row-shape adapter **— Stage 3 (editor uses flat dicts; real `UnionRow` has `vars: dict[str, tuple]` + `models`)**.
-- [ ] model-file path existence validation **— Stage 3 (needs project root context)**.
+- [x] Push via BridgeWorker → `pvt_corners_push --replace` **— Phase-3 integration DONE 2026-05-19 (DECISIONS #78 D2). `main_window._on_corners_push_requested` serializes editor rows → temp `.union.json` → `worker.queue_op("pvt_corners_push", replace=True)`.**
+- [x] union↔flat row-shape adapter **— Stage 3A DONE 2026-05-19 (agent A; DECISIONS #78). `gui/loaders.py:union_to_editor_rows` + `editor_rows_to_union_rows` with case-insensitive process/temperature/supply column mapping; multi-axis vars round-trip through `extra_vars`.**
+- [x] model-file path existence validation **— Stage 3A DONE 2026-05-19 (agent A; DECISIONS #78). `CornersEditor.set_project_root(Path|None)` + extended `validation_errors()` only fires when bound; gates push button per spec §11.3.**
 
 ### §8. Measure bundle editor — Stage 2 DONE 2026-05-19 PM late (agent C; DECISIONS #77)
 
@@ -419,7 +419,7 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 - [x] Template picker + signal-group picker + param entry per spec §12 (`set_available_templates(list[str] | dict[str, Template])` dual-form contract).
 - [x] Live render preview re-renders on edit; show render errors inline (in-memory `MeasureBundle` construction + `render_bundle()`; bypasses file round-trip for keystroke-speed feedback).
 - [x] Apply to Maestro disabled while render shows errors (`apply_requested = pyqtSignal(object)` carries `list[RenderedRow]`, fired only when render is clean).
-- [ ] Real BridgeWorker `pvt_measure_apply` dispatch **— Stage 3 (currently log-only stub)**.
+- [x] Real BridgeWorker `pvt_measure_push` dispatch **— Phase-3 integration DONE 2026-05-19 (DECISIONS #78 D2). `main_window._on_measures_apply_requested` serializes RenderedRows → temp rendered `.measure.json` → `worker.queue_op("pvt_measure_push", replace=True)`.** (Function is `pvt_measure_push` in skill_bridge.py; the historical "apply" wording in spec refers to the editor's `apply_requested` signal name, not a separate bridge function.)
 
 ### §9. Milestone + status strip
 
@@ -435,11 +435,12 @@ All three architectural pillars (Data/Define/Execute) shipped and dogfooded. No 
 - [ ] Wizard: step 1 project/name, step 2 items (multi-select tests via bridge, file pickers for union/bundle), step 3 failure handling, step 4 review/save.
 - [ ] `simkit.review.validate` run before write; errors inline.
 
-### §11. Error translation + polish
+### §11. Error translation + polish — Stage 3D DONE 2026-05-19 (agent D; DECISIONS #78)
 
-- [ ] `simkit/gui/error_translation.py` with curated known-error table per spec §8.3.
-- [ ] "Details" disclosure for raw error text.
-- [ ] Unknown errors fall through with "Report this" link.
+- [x] `simkit/gui/error_translation.py` with curated known-error table per spec §8.3 (18 entries — expanded beyond spec's 9 to cover the SkillBridgeError categories actually raised in `skill_bridge.py`: session_focus_lost / bridge_dead / bridge_wedge / pvt_runner_timeout / pvt_io / bad_history_name / transport + socket-substring fallback. Substring matchers listed first so ASSEMBLER-2423 / axlGetRunStatus-returned-nil win over bare-category matches).
+- [x] "Details" disclosure for raw error text (`TranslatedError.detail` carries `[category] message  (source: ...)`; rendered as `QMessageBox.setDetailedText` in Phase-3 integration).
+- [x] Unknown errors fall through with "Report this" link (TranslatedError.is_known=False; hint text says "如果重现，请通过 Report this 反馈具体复现步骤 + Details 文本"; Phase-3 `_show_translated_error` only fires modal for known errors, unknown errors stay in log to avoid dialog spam — DECISIONS #78 D3).
+- [x] `simkit/gui/controllers/error_translator.py:ErrorTranslator(QObject)` — subscribes to BridgeWorker.op_failed, emits `translated(int, TranslatedError)`. Phase-3 wires `worker.op_failed → translator.on_op_failed` and `translator.translated → MainWindow._show_translated_error`.
 
 ### §12. Dogfood acceptance gate
 

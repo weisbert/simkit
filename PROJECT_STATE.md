@@ -1,6 +1,31 @@
 # Project State
 
-_Last updated: 2026-05-19 PM late (Phase 4 Stage 2 DONE + handoff cleanup. **HANDOFF: GUI shell is fully populated with 3 working tabs; next session does Stage 3 — module loading + Run path (§5) + Diff (§6), which unlocks the Stage-2 stub handlers**)_
+_Last updated: 2026-05-19 evening (Phase 4 **Stage 3 DONE** end-to-end — 4-parallel agents (A/B/C/D) + Phase-3 integration in one session. **HANDOFF: every Stage-2 stub has been replaced; `pvt gui --module <path>` loads a real project into the editors, "Run this review" spawns `pvt run --gui-jsonl` as a QProcess with cancel semantics, Compare opens a Diff tab with 3 sub-tabs, all bridge errors translate through an 18-entry Chinese table. Next session: red-zone deploy + dogfood smoke + Stage 4 (Milestone tagging + Wizard + Polish + §12 acceptance gate**.)_
+
+_Today's evening session (5 simkit commits past last handoff `7c2f252`). Repeated #77's 4-parallel pattern, file-disjoint scopes, no agent touches main_window.py — Phase-3 integration (orchestrator) does all the wiring after agents return. Agent A (~7m wall-clock) shipped loaders + tree_model + run_progress + corners_editor `set_project_root` (`ca09cab`); Agent B (~11m) shipped CLI `--gui-jsonl` + RunController + gui_events + orchestrator `progress_cb`/`cancel_check` (`99897de`); Agent C (~12m) shipped DiffController + DiffResultsModel + DiffTab + RunPickerDialog + results_tab Baseline pin (`2a147e6`); Agent D (~3m) shipped error_translation table (18 entries — expanded from spec's 9 to cover real SkillBridgeError categories) + ErrorTranslator QObject (`01c863f`). Phase-3 integration commit (`0eeab2d`) replaced all 5 log-only stubs in main_window.py with real BridgeWorker dispatch via a `_pending_ops: dict[req_id → {on_ok, on_err}]` callback dispatcher, added `set_bridge_worker` + `load_module` public surface, added Maestro-session QLineEdit in top bar persisted via additive `ModuleSession.session_name` field. Tests **1270 → 1502 (+232 net)** all green in 32s. Offscreen-Qt smoke verified 8 outbound signals dispatch cleanly + 3 ops queue through worker + clean teardown — needed to monkey-patch `QMessageBox.exec_` to a print-stub because the first smoke run sat 14min on a missing-session modal until user noticed ("为什么这个烟测这么慢"); root cause + smoke pattern pinned in DECISIONS #78 D5._
+
+_For the next conversation, read in order: this italic block, then DECISIONS #78 (the 4-agent dispatch + Phase-3 integration + the 7 design decisions D1-D7). Memories worth pulling: nothing new from this session — the Stage 2 memories (`[[feedback-mock-match-production-shape]]`, `[[feedback-pm-mode-verification]]`, `[[reference-tier1-baseline]]`) all still apply. The red-zone trio (`[[project-red-zone-glibc-217]]`, `[[reference-cadence-qt-ldpath]]`, `[[reference-red-zone-shell-csh]]`) is critical for the next-session red-zone deploy._
+
+_**Open items going into next session (priority order):**_
+
+_1. **Red-zone deploy + dogfood smoke** (DO THIS FIRST). Stage 3 hasn't been physically verified on red zone yet. Home-Linux .venv smoke confirms wiring; red-zone needs a fresh `make_payload + deploy_venv + activate.csh` cycle to re-verify the Qt 5.15.3-shadowing fix from `[[reference-cadence-qt-ldpath]]` + the CRLF defense layer + the glibc 2.17 baseline all still hold. Test: `pvt gui --module <a real .pvtproject>` on the red EDA host, click Run on a real review, verify progress UI updates, verify results re-ingest after run completes, click Compare to pick a baseline run. This is the dogfood gate, not "tests pass"._
+
+_2. **Stage 4: Milestone tagging (§15 right-click + autocomplete + left-tree Milestones group click-filter) + Wizard (§14 copy-as primary path + from-scratch wizard secondary) + §16 status strip + polish.** `runs.milestone` already in DuckDB v4 from #77 D2 so milestone is light. Wizard is the bigger piece._
+
+_3. **§12 dogfood acceptance gate** — user completes one real signoff cycle (NDIV PDR or CDR pass) entirely inside the GUI on red zone. Until this clears, Tier-2 work (cross-module dashboard, charts, etc.) is locked._
+
+_**Concrete state for next session resume:**_
+
+_- `origin/main` = `<head-after-push>` if user pushes; current local head is `0eeab2d` (5 simkit commits since last handoff `7c2f252`: `ca09cab` Stage 3A + `99897de` Stage 3B + `2a147e6` Stage 3C + `01c863f` Stage 3D + `0eeab2d` Phase-3 integration). Tree clean after this handoff commit._
+_- **Python 1502 / 1502 green** (32s). SKILL Tier-1 462 / 0 / 0 unchanged (no SKILL changes this session — pure Python GUI work)._
+_- Local `.venv` at `/home/yusheng/cadence_work/Test/workarea/simkit/.venv` (Python 3.11.13 + PyQt5 5.15.11 + pytest-qt 4.5.0). Gitignored._
+_- Smoke script at `/tmp/simkit_smoke.py` — synthetic .pvtproject + load_module + 8-signal dispatch. Use as the Phase-3 regression check when touching MainWindow wiring (don't commit; it's a dev tool)._
+_- **Phase-3 integration contracts pinned** (DECISIONS #78 D2 + D4): MainWindow's `_pending_ops` dispatcher is the only path BridgeWorker results take into the UI; ErrorTranslator subscribes to `op_failed` in parallel for translation. Session lives in `ModuleSession.session_name` (additive v1 field), edited via `MainWindow.session_input` QLineEdit, surfaced as required for every bridge-touching handler via `_warn_session_required`._
+_- **5 outbound editor signals all wired** (DECISIONS #78 D6): `results_tab.run_requested` → RunController + run-progress tab; `corners_editor.pull_requested` → queue_op pvt_corners_pull → load_union into editor; `corners_editor.push_requested` → editor_rows_to_union_rows → temp file → queue_op pvt_corners_push replace=True; `measures_editor.apply_requested` → serialize RenderedRows → temp file → queue_op pvt_measure_push replace=True; the 3 divergence-strip actions (show_diff/pull_overrides_sidecar/keep_sidecar) all log distinct lines._
+_- **DiffController, RunController, ErrorTranslator** instantiated lazily inside `MainWindow.set_bridge_worker(worker)` so MainWindow stays runnable for unit tests without a worker (the 5 outbound handlers gracefully no-op + log when `_worker is None`)._
+_- User's environment unchanged from last handoff: RHEL7-era glibc 2.17, csh interactive shell, Python 3.11.4 (red) / 3.11.13 (home), `$LD_LIBRARY_PATH` carries `/software/public/qt/5.15.3_xcb/lib` from Cadence (deploy_venv.sh handles it)._
+
+
 
 _Today's session (4 simkit commits past last handoff `a61543b`, plus one sibling `skill_tools` commit `d284bd4`). Three concurrent threads landed in sequence:_
 
