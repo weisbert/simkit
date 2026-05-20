@@ -195,14 +195,18 @@ class SubprocessIntegrationTests(unittest.TestCase):
         )
         self.c.error.connect(self.errors.append)
 
-    def _launch(self, code: str, *, extra: list[str] | None = None) -> None:
-        """Replace start_run's pvt-run argv with a tiny `python -c '...'`."""
+    def _launch(self, code: str, *, unbuffered: bool = False) -> None:
+        """Replace start_run's pvt-run argv with a tiny `python -c '...'`.
+
+        ``unbuffered=True`` prepends ``-u`` so the child Python streams
+        stdout per line (used by the streaming-timing test below)."""
         from PyQt5.QtCore import QProcess
         self.c._proc = QProcess(self.c)
         self.c._proc.setProcessChannelMode(QProcess.MergedChannels)
         self.c._proc.readyReadStandardOutput.connect(self.c._on_ready_read)
         self.c._proc.finished.connect(self.c._on_finished)
-        self.c._proc.start(sys.executable, ["-c", code])
+        argv = (["-u"] if unbuffered else []) + ["-c", code]
+        self.c._proc.start(sys.executable, argv)
         self.assertTrue(self.c._proc.waitForStarted(3000))
 
     def test_real_subprocess_streams_jsonl(self):
@@ -263,6 +267,51 @@ class SubprocessIntegrationTests(unittest.TestCase):
         _spin_until(lambda: len(self.finished) >= 1, timeout_ms=10_000)
         kinds = [e["event"] for e in self.events]
         self.assertIn("item_started", kinds)
+
+    def test_unbuffered_subprocess_streams_before_exit(self):
+        """Bug #1 (2026-05-19): with ``-u``, the first JSONL line must
+        reach the controller BEFORE the subprocess exits, not in the
+        final flush. Without ``-u`` the synthetic producer below would
+        block-buffer both prints and ``finished`` would fire before any
+        ``progress_event``. This reproduces the stuck-pending symptom
+        and proves ``-u`` cures it."""
+        code = (
+            "import json, sys, time\n"
+            # NOTE: no explicit flush() — relies on -u for streaming.
+            "print(json.dumps({'event':'item_started','item_index':1}))\n"
+            "time.sleep(0.6)\n"
+            "print(json.dumps({'event':'review_done','exit_code':0,'summary':{}}))\n"
+            "sys.exit(0)\n"
+        )
+        self._launch(code, unbuffered=True)
+        # Wait until the FIRST progress event lands, with a tight budget
+        # well below the producer's 0.6s sleep + exit time.
+        got_first = _spin_until(
+            lambda: len(self.events) >= 1, timeout_ms=400,
+        )
+        self.assertTrue(
+            got_first,
+            msg=(
+                "First JSONL line did not arrive within 400ms — child "
+                "subprocess is buffering stdout. -u is missing or "
+                "ineffective."
+            ),
+        )
+        # At this moment the child is still mid-sleep — ``finished`` has
+        # NOT fired yet. This is the exact condition that was broken
+        # before the fix.
+        self.assertEqual(
+            len(self.finished), 0,
+            msg=(
+                "Subprocess already finished before we saw the first "
+                "event — race outpaced the sleep. The streaming claim "
+                "is unverified, not necessarily false."
+            ),
+        )
+        # And eventually we do see review_done + finished.
+        _spin_until(lambda: len(self.finished) >= 1, timeout_ms=10_000)
+        kinds = [e["event"] for e in self.events]
+        self.assertEqual(kinds, ["item_started", "review_done"])
 
 
 class CancelTests(unittest.TestCase):
