@@ -79,6 +79,14 @@ _SPEC_HINT_TEXT = (
     "maximize 目标  ·  minimize 目标 （支持 SI 后缀 k m u n p M G）"
 )
 
+# Help text for a raw-expression entry (G-14). A raw entry bypasses the
+# template machinery — the user types a calculator/OCEAN expression
+# directly — so spell out what the two fields mean.
+_RAW_EXPR_HINT_TEXT = (
+    "raw_expression 是直接写的计算器/OCEAN 表达式(不经过模板)。"
+    "output_name 是它在结果表里的列名。"
+)
+
 
 # Default top-level metadata used when no bundle has been loaded yet.
 # These are placeholder values — load_bundle() will overwrite them as
@@ -161,11 +169,21 @@ class _EntryDialog(QDialog):
         self._output_name_edit = QLineEdit(self._entry.get("output_name", "") or "")
         form.addRow("output_name:", self._output_name_edit)
 
-        # Raw-only: expression
+        # Raw-only: expression. A raw entry is a hand-written calculator
+        # expression — there is no guided builder (Tier-2), so surface a
+        # concrete example + a plain-language note instead of leaving the
+        # field bare (G-14: "raw OCEAN strings with no guided build").
         self._raw_expr_edit: Optional[QLineEdit] = None
         if self._kind == "raw":
             self._raw_expr_edit = QLineEdit(self._entry.get("raw_expression", "") or "")
+            self._raw_expr_edit.setPlaceholderText(
+                'ymax(VT("/out"))    ·    cross(VT("/clk") 0.9 1 "rising")'
+            )
             form.addRow("raw_expression:", self._raw_expr_edit)
+            raw_hint = QLabel(_RAW_EXPR_HINT_TEXT)
+            raw_hint.setWordWrap(True)
+            raw_hint.setStyleSheet("color: #666;")
+            form.addRow("", raw_hint)
 
         # param_overrides — key=value;key=value
         self._overrides_edit = QLineEdit(_dump_kv(self._entry.get("param_overrides")))
@@ -307,23 +325,36 @@ def _entry_kind(entry: dict) -> str:
     return "template"
 
 
+# Plain-language kind labels for the entry list (G-14). The old form
+# used cryptic "[raw]" / "[template]" brackets + a "⨯" glyph that a new
+# user could not decode.
+_KIND_LABEL = {
+    "raw": "Raw expression",
+    "sweep": "Template sweep",
+    "template": "Template",
+}
+
+
 def _entry_summary(entry: dict) -> str:
     kind = _entry_kind(entry)
     if kind == "raw":
         out = entry.get("output_name", "?")
         expr = entry.get("raw_expression", "")
         short = expr if len(expr) <= 40 else expr[:37] + "…"
-        return f"[raw]      {out}  ← {short}"
+        return f"{_KIND_LABEL['raw']}  ·  {out} = {short}"
     if kind == "sweep":
         tmpl = entry.get("template", "?")
         ps = entry.get("param_sweep") or {}
         key = next(iter(ps.keys()), "?")
         n = len(ps.get(key, [])) if key != "?" else 0
-        return f"[sweep]    template={tmpl}  ${key} × {n}"
+        return (
+            f"{_KIND_LABEL['sweep']}  ·  template={tmpl}  ·  "
+            f"${key} swept over {n} value(s)"
+        )
     tmpl = entry.get("template", "?")
     sg = entry.get("signal_group")
     sg_str = sg if sg else "(none)"
-    return f"[template] {tmpl}  ⨯  signal_group={sg_str}"
+    return f"{_KIND_LABEL['template']}  ·  {tmpl}  ·  signal_group={sg_str}"
 
 
 def _parse_kv(text: str) -> dict[str, str]:
@@ -439,10 +470,20 @@ class MeasuresEditor(QWidget):
         # Entry list
         self._entry_list = QListWidget(objectName="entryList")
         self._entry_list.itemDoubleClicked.connect(self._on_entry_double_clicked)
+        self._entry_list.setToolTip(
+            "选中一条后点 “Edit entry…”,或直接双击该行进行编辑。"
+        )
         v.addWidget(self._entry_list, stretch=1)
 
-        # Bottom row: Delete / Move up / Move down
+        # Bottom row: Edit / Delete / Move up / Move down
         bottom_row = QHBoxLayout()
+        # Edit button (G-14) — editing used to be double-click-only, an
+        # affordance a new user never discovered.
+        self._edit_btn = QPushButton("Edit entry…")
+        self._edit_btn.setObjectName("editEntryBtn")
+        self._edit_btn.setToolTip("编辑选中的测量条目(等同于双击该行)。")
+        self._edit_btn.clicked.connect(self._on_edit_entry)
+        bottom_row.addWidget(self._edit_btn)
         self._delete_btn = QPushButton("Delete entry")
         self._delete_btn.setObjectName("deleteEntryBtn")
         self._delete_btn.clicked.connect(self._on_delete)
@@ -670,7 +711,14 @@ class MeasuresEditor(QWidget):
         self._render_preview()
 
     def _on_entry_double_clicked(self, item: QListWidgetItem) -> None:
-        row = self._entry_list.row(item)
+        self._edit_entry_at(self._entry_list.row(item))
+
+    def _on_edit_entry(self) -> None:
+        """Edit-button handler — opens the detail dialog for the selection."""
+        self._edit_entry_at(self._selected_row())
+
+    def _edit_entry_at(self, row: int) -> None:
+        """Open the per-entry detail dialog for ``row`` (no-op if invalid)."""
         if row < 0 or row >= len(self._entries):
             return
         dlg = _EntryDialog(

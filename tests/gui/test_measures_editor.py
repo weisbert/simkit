@@ -511,3 +511,75 @@ def test_entry_dialog_prefilled_bad_spec_flagged_on_open(qtbot):
     d = _entry_dialog(spec="garbage!!")
     qtbot.addWidget(d)
     assert "解析失败" in d._spec_hint.text()
+
+
+# --- G-14: measures-editor affordances ------------------------------------
+
+
+def test_edit_button_present(editor):
+    assert editor._edit_btn is not None
+    assert editor._edit_btn.objectName() == "editEntryBtn"
+    assert "Edit" in editor._edit_btn.text()
+
+
+def test_edit_entry_at_invalid_row_is_noop(editor):
+    editor.load_bundle({"apply": [
+        {"raw_expression": "0", "output_name": "x"},
+    ]})
+    before = editor.dump_bundle()
+    editor._edit_entry_at(-1)
+    editor._edit_entry_at(99)
+    assert editor.dump_bundle() == before
+
+
+def test_edit_button_opens_dialog_for_selected_entry(editor, qtbot, monkeypatch):
+    from PyQt5.QtWidgets import QDialog
+    from simkit.gui.views import measures_editor as me
+
+    captured = []
+
+    class _FakeDialog:
+        def __init__(self, entry, *, template_names, signal_group_names,
+                     parent=None):
+            captured.append(dict(entry))
+            self._entry = dict(entry)
+
+        def exec_(self):
+            return QDialog.Accepted
+
+        def updated_entry(self):
+            e = dict(self._entry)
+            e["alias_suffix"] = "EDITED"
+            return e
+
+    monkeypatch.setattr(me, "_EntryDialog", _FakeDialog)
+    editor.load_bundle({"apply": [
+        {"raw_expression": "0", "output_name": "first"},
+        {"raw_expression": "1", "output_name": "second"},
+    ]})
+    editor._entry_list.setCurrentRow(1)
+    qtbot.mouseClick(editor._edit_btn, Qt.LeftButton)
+
+    # Dialog opened for the *selected* (second) entry.
+    assert captured and captured[-1]["output_name"] == "second"
+    # The accepted edit was written back.
+    assert editor.dump_bundle()["apply"][1]["alias_suffix"] == "EDITED"
+
+
+def test_entry_summary_has_no_cryptic_brackets(editor):
+    editor.load_bundle({"apply": [
+        {"raw_expression": "ymax(VT(\"/o\"))", "output_name": "pk"},
+        {"template": "rise_time_threshold", "signal_group": None},
+    ]})
+    raw_label = editor._entry_list.item(0).text()
+    tmpl_label = editor._entry_list.item(1).text()
+    assert raw_label.startswith("Raw expression")
+    assert tmpl_label.startswith("Template")
+    assert "[raw]" not in raw_label and "[template]" not in tmpl_label
+
+
+def test_raw_entry_dialog_has_help_hint_and_placeholder(qtbot):
+    d = _entry_dialog()  # builds a raw-kind entry
+    qtbot.addWidget(d)
+    assert d._raw_expr_edit is not None
+    assert d._raw_expr_edit.placeholderText() != ""
