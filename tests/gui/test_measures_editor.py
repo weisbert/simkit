@@ -40,7 +40,10 @@ from simkit.signal_group import Signal, SignalGroup  # noqa: E402
 from simkit.template import Template, TemplateParam  # noqa: E402
 from simkit.template_render import RenderedRow  # noqa: E402
 
-from simkit.gui.views.measures_editor import MeasuresEditor  # noqa: E402
+from simkit.gui.views.measures_editor import (  # noqa: E402
+    MeasuresEditor,
+    _EntryDialog,
+)
 
 
 # --- Sample data ---------------------------------------------------------
@@ -466,3 +469,45 @@ def test_multi_signal_group_renders_one_row_per_signal(editor):
         for r in range(editor._preview_model.rowCount())
     ]
     assert names == ["Rtime_Vout", "Rtime_Vout2"]
+
+
+# --- G-1a: spec field discoverability + validation -----------------------
+
+
+def _entry_dialog(spec: str = ""):
+    entry = {"raw_expression": "/Vout", "output_name": "gain"}
+    if spec:
+        entry["spec"] = spec
+    return _EntryDialog(entry, template_names=[], signal_group_names=[])
+
+
+def test_entry_dialog_spec_field_has_placeholder_and_hint(qtbot):
+    d = _entry_dialog()
+    qtbot.addWidget(d)
+    assert d._spec_edit.placeholderText() != ""
+    # Hint label is present and non-empty so the syntax is discoverable.
+    assert d._spec_hint.text() != ""
+
+
+def test_entry_dialog_flags_unparseable_spec(qtbot):
+    d = _entry_dialog()
+    qtbot.addWidget(d)
+    d._spec_edit.setText(">> not a spec")
+    assert "解析失败" in d._spec_hint.text()
+    assert "border" in d._spec_edit.styleSheet()
+
+
+def test_entry_dialog_accepts_valid_spec(qtbot):
+    d = _entry_dialog()
+    qtbot.addWidget(d)
+    d._spec_edit.setText("range 1 5")
+    assert "解析失败" not in d._spec_hint.text()
+    assert d._spec_edit.styleSheet() == ""
+    # The valid spec round-trips through updated_entry().
+    assert d.updated_entry()["spec"] == "range 1 5"
+
+
+def test_entry_dialog_prefilled_bad_spec_flagged_on_open(qtbot):
+    d = _entry_dialog(spec="garbage!!")
+    qtbot.addWidget(d)
+    assert "解析失败" in d._spec_hint.text()

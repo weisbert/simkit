@@ -215,6 +215,44 @@ def load_rows_for_run(
     return out
 
 
+def apply_spec_to_output(
+    con: duckdb.DuckDBPyConnection,
+    run_id: str,
+    output: str,
+    spec: Optional[str],
+) -> int:
+    """Set (or clear) the spec on every result row of ``run_id`` named ``output``.
+
+    The post-hoc verdict ``spec_status`` is re-evaluated per row against
+    that row's recorded ``value`` via :func:`simkit.spec_eval.evaluate_spec`
+    — the measured ``value`` itself is never touched. Passing an empty or
+    ``None`` spec clears it (rows revert to ``no_spec``).
+
+    Returns the number of result rows updated. The caller owns the
+    connection lifetime.
+    """
+    from simkit.spec_eval import evaluate_spec
+
+    spec_clean = (spec or "").strip() or None
+    existing = con.execute(
+        "SELECT rowid, value_num, value_str FROM results "
+        "WHERE run_id = ? AND output = ?",
+        [run_id, output],
+    ).fetchall()
+    updates = []
+    for rowid, value_num, value_str in existing:
+        merged = _merge_value(value_num, value_str)
+        numeric = merged if isinstance(merged, (int, float)) else None
+        status = evaluate_spec(spec_clean, numeric)
+        updates.append([spec_clean, status, rowid])
+    if updates:
+        con.executemany(
+            "UPDATE results SET spec = ?, spec_status = ? WHERE rowid = ?",
+            updates,
+        )
+    return len(updates)
+
+
 def _merge_value(value_num: Any, value_str: Any) -> Any:
     """Same rule as :func:`simkit.from_db._merge_value`.
 

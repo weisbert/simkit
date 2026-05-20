@@ -34,10 +34,15 @@ import duckdb
 
 from PyQt5.QtCore import QSortFilterProxyModel, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
     QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QTableView,
@@ -46,6 +51,15 @@ from PyQt5.QtWidgets import (
 )
 
 from simkit.gui.results_model import ResultsModel, load_rows_for_run
+from simkit.spec_eval import SpecParseError, parse_spec
+
+
+# Syntax help shared by the Set-spec dialog. Mirrors the Measures-editor
+# spec hint so the two spec-authoring entry points read consistently.
+_SPEC_HINT_TEXT = (
+    "写法: >= 下限  ·  <= 上限  ·  range 下 上  ·  "
+    "maximize 目标  ·  minimize 目标 （支持 SI 后缀 k m u n p M G）"
+)
 
 
 # Default column widths for the results table. Picked to fit a typical
@@ -82,6 +96,9 @@ class ResultsTab(QWidget):
     run_requested = pyqtSignal(str)
     compare_requested = pyqtSignal()
     baseline_pinned = pyqtSignal(object)
+    # (output, spec) — user set a spec from the results table; an empty
+    # spec string means "clear". MainWindow owns the DB + bundle writes.
+    set_spec_requested = pyqtSignal(str, str)
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -132,6 +149,24 @@ class ResultsTab(QWidget):
         self.run_button.clicked.connect(self._on_run_clicked)
         header_layout.addWidget(self.run_button, stretch=0)
 
+        # --- zero-spec hint strip (G-1c) --------------------------------
+        # When a run carries no specs at all, every row reads `no_spec`
+        # and the user has no signal that auto pass/fail is even a thing.
+        # This strip points them at the fix; hidden whenever any spec
+        # exists (or no run is loaded).
+        self.no_spec_hint = QLabel(
+            "本次运行没有规格 — 右键某行选「设置规格…」，"
+            "或在 Measures 里给输出加 spec，才能得到自动 pass/fail。",
+            self,
+        )
+        self.no_spec_hint.setObjectName("noSpecHint")
+        self.no_spec_hint.setWordWrap(True)
+        self.no_spec_hint.setStyleSheet(
+            "QLabel#noSpecHint { background: #fff3a3; "
+            "border: 1px solid #d4b500; padding: 4px 8px; }"
+        )
+        self.no_spec_hint.setVisible(False)
+
         # --- table (spec A3 mandate) ------------------------------------
         self.table = QTableView(self)
         self.table.setObjectName("resultsTable")
@@ -149,11 +184,18 @@ class ResultsTab(QWidget):
         self._proxy.setSortRole(Qt.DisplayRole)
         self.table.setModel(self._proxy)
 
+        # Right-click → "Set spec for this output…" (G-1b).
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(
+            self._on_table_context_menu
+        )
+
         # --- assemble ---------------------------------------------------
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(self.header)
+        v.addWidget(self.no_spec_hint)
         v.addWidget(self.table, stretch=1)
 
     # --- public surface --------------------------------------------------
@@ -179,6 +221,7 @@ class ResultsTab(QWidget):
         # ``current_run_id()`` when it handles compare_requested.
         self._current_run_id = run_id
         self.compare_button.setEnabled(True)
+        self._update_no_spec_hint()
 
     def set_header(
         self,
@@ -248,6 +291,7 @@ class ResultsTab(QWidget):
         self._proxy.setSourceModel(None)
         self._current_run_id = None
         self.compare_button.setEnabled(False)
+        self.no_spec_hint.setVisible(False)
 
     def set_baseline(self, run_id: Optional[str]) -> None:
         """Pin (or unpin, with ``None``) a baseline run for diff workflows.
@@ -277,6 +321,12 @@ class ResultsTab(QWidget):
 
     # --- internals -------------------------------------------------------
 
+    def _update_no_spec_hint(self) -> None:
+        """Show the hint strip iff the run has rows but not one carries a spec."""
+        rows = self._model.rows() if self._model is not None else []
+        all_no_spec = bool(rows) and not any(_row_has_spec(r) for r in rows)
+        self.no_spec_hint.setVisible(all_no_spec)
+
     def _apply_column_widths(self) -> None:
         """Push the default widths from ``_COL_WIDTHS`` onto the header."""
         if self._model is None:
@@ -298,3 +348,103 @@ class ResultsTab(QWidget):
         """Slot: clicking the baseline label unpins (only when pinned)."""
         if self._baseline_run_id is not None:
             self.set_baseline(None)
+
+    def _on_table_context_menu(self, pos) -> None:
+        """Right-click a results row → offer "Set spec for <output>…"."""
+        if self._model is None:
+            return
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        row = self._proxy.mapToSource(index).row()
+        rows = self._model.rows()
+        if not (0 <= row < len(rows)):
+            return
+        record = rows[row]
+        output = record.get("output")
+        if not output:
+            return
+        current_spec = record.get("spec") or ""
+        menu = QMenu(self.table)
+        act = menu.addAction(f"为 '{output}' 设置规格…")
+        chosen = menu.exec_(self.table.viewport().mapToGlobal(pos))
+        if chosen is not act:
+            return
+        dialog = SetSpecDialog(str(output), str(current_spec), parent=self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.set_spec_requested.emit(str(output), dialog.spec_text())
+
+
+def _row_has_spec(record: dict) -> bool:
+    """True if a result row carries a non-empty spec string."""
+    spec = record.get("spec")
+    return isinstance(spec, str) and spec.strip() != ""
+
+
+class SetSpecDialog(QDialog):
+    """Prompt for a spec string to apply to one output (G-1b).
+
+    Live-validates via :func:`simkit.spec_eval.parse_spec`; OK is disabled
+    while the text is unparseable. An empty field is allowed and means
+    "clear the spec" — the output reverts to ``no_spec``.
+    """
+
+    def __init__(
+        self,
+        output: str,
+        current_spec: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"设置规格 — {output}")
+
+        form = QFormLayout()
+        self._edit = QLineEdit(current_spec or "")
+        self._edit.setPlaceholderText(
+            ">= 20    ·    <= 1.5m    ·    range 1 5    ·    maximize 30"
+        )
+        form.addRow(f"{output} 的 spec:", self._edit)
+        self._hint = QLabel(_SPEC_HINT_TEXT)
+        self._hint.setWordWrap(True)
+        form.addRow("", self._hint)
+
+        self._buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        self._buttons.accepted.connect(self.accept)
+        self._buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(form)
+        layout.addWidget(self._buttons)
+
+        self._edit.textChanged.connect(self._validate)
+        self._validate()
+
+    def _validate(self) -> None:
+        text = self._edit.text().strip()
+        ok = self._buttons.button(QDialogButtonBox.Ok)
+        if not text:
+            self._edit.setStyleSheet("")
+            self._hint.setText("留空 = 清除规格（该输出回到 no_spec）")
+            self._hint.setStyleSheet("color: #666;")
+            ok.setEnabled(True)
+            return
+        try:
+            parse_spec(text)
+        except SpecParseError as exc:
+            self._edit.setStyleSheet(
+                "QLineEdit { border: 1px solid #c0392b; }"
+            )
+            self._hint.setText(f"spec 解析失败: {exc}")
+            self._hint.setStyleSheet("color: #c0392b;")
+            ok.setEnabled(False)
+        else:
+            self._edit.setStyleSheet("")
+            self._hint.setText("✓ 规格有效")
+            self._hint.setStyleSheet("color: #2e7d32;")
+            ok.setEnabled(True)
+
+    def spec_text(self) -> str:
+        """The entered spec, stripped. Empty string means "clear"."""
+        return self._edit.text().strip()

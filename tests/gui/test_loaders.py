@@ -20,6 +20,7 @@ from simkit.gui.loaders import (
     editor_rows_to_union_rows,
     load_bundle_for_editor,
     load_module,
+    set_spec_in_project_bundles,
     union_to_editor_rows,
 )
 from simkit.union import (
@@ -549,3 +550,69 @@ def test_load_bundle_for_editor_missing_dirs_returns_empty_dicts(tmp_path):
     )
     assert templates == {}
     assert signal_groups == {}
+
+
+# --- G-1b: set_spec_in_project_bundles -----------------------------------
+
+
+def _write_bundle(path: Path, apply: list) -> None:
+    path.write_text(
+        json.dumps({"measure_schema_version": 1, "apply": apply}),
+        encoding="utf-8",
+    )
+
+
+def test_set_spec_writes_to_unique_output_name_match(tmp_path):
+    b = tmp_path / "a.measure.json"
+    _write_bundle(b, [{"raw_expression": "/Vout", "output_name": "gain"}])
+    res = set_spec_in_project_bundles([b], "gain", ">= 20")
+    assert res.status == "written"
+    assert res.bundle_path == b
+    entry = json.loads(b.read_text())["apply"][0]
+    assert entry["spec"] == ">= 20"
+
+
+def test_set_spec_no_match_when_output_unknown(tmp_path):
+    b = tmp_path / "a.measure.json"
+    _write_bundle(b, [{"raw_expression": "/Vout", "output_name": "gain"}])
+    res = set_spec_in_project_bundles([b], "nf", ">= 1")
+    assert res.status == "no_match"
+    assert res.bundle_path is None
+    # File untouched.
+    assert "spec" not in json.loads(b.read_text())["apply"][0]
+
+
+def test_set_spec_ambiguous_when_two_entries_match(tmp_path):
+    b1 = tmp_path / "a.measure.json"
+    b2 = tmp_path / "b.measure.json"
+    _write_bundle(b1, [{"raw_expression": "/x", "output_name": "gain"}])
+    _write_bundle(b2, [{"raw_expression": "/y", "output_name": "gain"}])
+    res = set_spec_in_project_bundles([b1, b2], "gain", ">= 20")
+    assert res.status == "ambiguous"
+    # Neither file written.
+    assert "spec" not in json.loads(b1.read_text())["apply"][0]
+    assert "spec" not in json.loads(b2.read_text())["apply"][0]
+
+
+def test_set_spec_sweep_output_names_writes_indexed_specs(tmp_path):
+    b = tmp_path / "a.measure.json"
+    _write_bundle(b, [{
+        "template": "pn",
+        "param_sweep": {"freq": ["1M", "10M"]},
+        "output_names": ["PN_1M", "PN_10M"],
+    }])
+    res = set_spec_in_project_bundles([b], "PN_10M", "< -100")
+    assert res.status == "written"
+    entry = json.loads(b.read_text())["apply"][0]
+    # specs parallels output_names — index 1 set, index 0 left None.
+    assert entry["specs"] == [None, "< -100"]
+
+
+def test_set_spec_empty_clears_existing(tmp_path):
+    b = tmp_path / "a.measure.json"
+    _write_bundle(b, [
+        {"raw_expression": "/Vout", "output_name": "gain", "spec": ">= 20"},
+    ])
+    res = set_spec_in_project_bundles([b], "gain", "")
+    assert res.status == "written"
+    assert "spec" not in json.loads(b.read_text())["apply"][0]

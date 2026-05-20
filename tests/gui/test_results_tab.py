@@ -23,10 +23,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "python"))
 
 from PyQt5.QtCore import pyqtBoundSignal  # noqa: E402
-from PyQt5.QtWidgets import QApplication  # noqa: E402
+from PyQt5.QtWidgets import QApplication, QDialogButtonBox  # noqa: E402
 
 from simkit.db import bootstrap, connect  # noqa: E402
-from simkit.gui.views.results_tab import ResultsTab  # noqa: E402
+from simkit.gui.views.results_tab import ResultsTab, SetSpecDialog  # noqa: E402
 
 
 # Re-use existing QApplication when running with the model tests.
@@ -290,3 +290,101 @@ def test_show_review_summary_flags_parse_error():
     t = ResultsTab()
     t.show_review_summary("bad", 0, parse_error="invalid JSON")
     assert "解析失败" in t.header_label.text()
+
+
+# --- G-1c: zero-spec hint strip ------------------------------------------
+
+
+def _con_no_specs():
+    """In-memory DuckDB with run 'R0' whose rows all carry NULL spec."""
+    con = connect(":memory:")
+    bootstrap(con)
+    con.execute(
+        """
+        INSERT INTO runs(
+          run_id, project_id, testbench_id, timestamp,
+          author, history_name, schema_version, ingested_at
+        ) VALUES
+          ('R0', 'projA', 'tbA', TIMESTAMPTZ '2026-05-19 12:00:00+00',
+           'tester', 'h0', 3, TIMESTAMPTZ '2026-05-19 12:00:00+00')
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO results(
+          run_id, point, corner, test, output,
+          value_num, value_str, status, sweep, corner_vars,
+          test_note, spec, spec_status
+        ) VALUES
+          ('R0', 0, 'TT', 'pn', 'PN_1M',
+           -125.0, NULL, 'pass', '{}', '{}', NULL, NULL, 'no_spec'),
+          ('R0', 0, 'SS', 'pn', 'PN_1M',
+           -95.0, NULL, 'pass', '{}', '{}', NULL, NULL, 'no_spec')
+        """
+    )
+    return con
+
+
+def test_no_spec_hint_shows_when_run_has_no_specs():
+    t = ResultsTab()
+    con = _con_no_specs()
+    try:
+        t.set_run("R0", con)
+    finally:
+        con.close()
+    # isHidden() reflects the explicit flag regardless of an unshown parent.
+    assert t.no_spec_hint.isHidden() is False
+
+
+def test_no_spec_hint_hidden_when_run_has_specs():
+    t = ResultsTab()
+    con = _con_with_two_rows()
+    try:
+        t.set_run("R1", con)
+    finally:
+        con.close()
+    assert t.no_spec_hint.isHidden() is True
+
+
+def test_no_spec_hint_hidden_for_review_summary():
+    t = ResultsTab()
+    con = _con_no_specs()
+    try:
+        t.set_run("R0", con)
+    finally:
+        con.close()
+    assert t.no_spec_hint.isHidden() is False
+    # Selecting a review (no run) must drop the hint.
+    t.show_review_summary("some_review", 2)
+    assert t.no_spec_hint.isHidden() is True
+
+
+# --- G-1b: set_spec_requested signal + SetSpecDialog ---------------------
+
+
+def test_set_spec_requested_signal_exists():
+    t = ResultsTab()
+    received: list[tuple] = []
+    t.set_spec_requested.connect(lambda o, s: received.append((o, s)))
+    t.set_spec_requested.emit("PN_1M", ">= 20")
+    assert received == [("PN_1M", ">= 20")]
+
+
+def test_set_spec_dialog_accepts_valid_spec():
+    d = SetSpecDialog("PN_1M", ">= 20")
+    assert d.spec_text() == ">= 20"
+    assert d._buttons.button(QDialogButtonBox.Ok).isEnabled() is True
+
+
+def test_set_spec_dialog_blocks_ok_on_bad_spec():
+    d = SetSpecDialog("PN_1M", "")
+    d._edit.setText(">> garbage")
+    assert d._buttons.button(QDialogButtonBox.Ok).isEnabled() is False
+
+
+def test_set_spec_dialog_empty_is_allowed_as_clear():
+    d = SetSpecDialog("PN_1M", ">= 20")
+    d._edit.setText("")
+    # Empty == "clear the spec"; OK must stay enabled.
+    assert d._buttons.button(QDialogButtonBox.Ok).isEnabled() is True
+    assert d.spec_text() == ""

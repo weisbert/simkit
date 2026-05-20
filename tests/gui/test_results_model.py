@@ -37,7 +37,11 @@ from PyQt5.QtGui import QBrush, QColor  # noqa: E402
 from PyQt5.QtWidgets import QApplication  # noqa: E402
 
 from simkit.db import bootstrap, connect  # noqa: E402
-from simkit.gui.results_model import ResultsModel, load_rows_for_run  # noqa: E402
+from simkit.gui.results_model import (  # noqa: E402
+    ResultsModel,
+    apply_spec_to_output,
+    load_rows_for_run,
+)
 
 
 # One QApplication per process — required for any QObject allocation
@@ -282,6 +286,82 @@ class LoadRowsForRunTests(unittest.TestCase):
         self.assertIsInstance(brush, QBrush)
         # Second row (TT_pvt, all pass) should not.
         self.assertIsNone(model.data(model.index(1, 0), Qt.BackgroundRole))
+
+
+class ApplySpecToOutputTests(unittest.TestCase):
+    """:func:`apply_spec_to_output` — in-place spec re-evaluation (G-1b)."""
+
+    def _con_no_specs(self):
+        """In-memory DuckDB, run 'R0', output 'PN_1M' across 2 corners,
+        no specs yet (spec NULL, spec_status 'no_spec')."""
+        con = connect(":memory:")
+        bootstrap(con)
+        con.execute(
+            """
+            INSERT INTO runs(
+              run_id, project_id, testbench_id, timestamp,
+              author, history_name, schema_version, ingested_at
+            ) VALUES
+              ('R0', 'projA', 'tbA', TIMESTAMPTZ '2026-05-19 12:00:00+00',
+               'tester', 'h0', 3, TIMESTAMPTZ '2026-05-19 12:00:00+00')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO results(
+              run_id, point, corner, test, output,
+              value_num, value_str, status, sweep, corner_vars,
+              test_note, spec, spec_status
+            ) VALUES
+              ('R0', 0, 'TT', 'pn', 'PN_1M',
+               -125.0, NULL, 'pass', '{}', '{}', NULL, NULL, 'no_spec'),
+              ('R0', 0, 'SS', 'pn', 'PN_1M',
+               -95.0, NULL, 'pass', '{}', '{}', NULL, NULL, 'no_spec'),
+              ('R0', 0, 'TT', 'pn', 'gain',
+               20.0, NULL, 'pass', '{}', '{}', NULL, NULL, 'no_spec')
+            """
+        )
+        return con
+
+    def test_apply_spec_sets_spec_and_reevaluates_per_row(self):
+        con = self._con_no_specs()
+        try:
+            n = apply_spec_to_output(con, "R0", "PN_1M", "< -100")
+            rows = load_rows_for_run(con, "R0")
+        finally:
+            con.close()
+        self.assertEqual(n, 2)  # only the two PN_1M rows
+        verdicts = {r["corner"]: r["spec_status"] for r in rows
+                    if r["output"] == "PN_1M"}
+        # TT value -125 < -100 → pass; SS value -95 → fail.
+        self.assertEqual(verdicts, {"TT": "pass", "SS": "fail"})
+        # The untouched 'gain' output keeps its no_spec verdict.
+        gain = [r for r in rows if r["output"] == "gain"][0]
+        self.assertEqual(gain["spec_status"], "no_spec")
+
+    def test_apply_spec_does_not_touch_recorded_value(self):
+        con = self._con_no_specs()
+        try:
+            apply_spec_to_output(con, "R0", "PN_1M", "< -100")
+            rows = load_rows_for_run(con, "R0")
+        finally:
+            con.close()
+        vals = {r["corner"]: r["value"] for r in rows
+                if r["output"] == "PN_1M"}
+        self.assertEqual(vals, {"TT": -125.0, "SS": -95.0})
+
+    def test_apply_empty_spec_clears_back_to_no_spec(self):
+        con = self._con_no_specs()
+        try:
+            apply_spec_to_output(con, "R0", "PN_1M", "< -100")
+            apply_spec_to_output(con, "R0", "PN_1M", "")
+            rows = load_rows_for_run(con, "R0")
+        finally:
+            con.close()
+        for r in rows:
+            if r["output"] == "PN_1M":
+                self.assertIsNone(r["spec"])
+                self.assertEqual(r["spec_status"], "no_spec")
 
 
 if __name__ == "__main__":  # pragma: no cover

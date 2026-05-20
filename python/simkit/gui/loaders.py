@@ -26,7 +26,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Iterable, Optional, TYPE_CHECKING
 
 import duckdb
 
@@ -205,6 +205,97 @@ def _count_apply_or_error(bundle_path: Path) -> tuple[int, Optional[str]]:
     if not isinstance(apply_list, list):
         return 0, "missing or invalid 'apply' array"
     return len(apply_list), None
+
+
+@dataclass(frozen=True)
+class SpecWriteResult:
+    """Outcome of writing a spec back into a project's measure bundles.
+
+    ``status`` is one of:
+      * ``"written"``   — spec set on exactly one entry; ``bundle_path`` set.
+      * ``"no_match"``  — no apply entry across the project produces ``output``.
+      * ``"ambiguous"`` — more than one entry produces ``output``; not written.
+    """
+    status: str
+    bundle_path: Optional[Path]
+    detail: str
+
+
+def _output_match_index(entry: dict, output: str) -> Optional[int]:
+    """How (if at all) an apply entry produces ``output``.
+
+    Returns ``-1`` for an ``output_name`` (single-output) match, the
+    list index for an ``output_names`` (sweep) match, or ``None``.
+    """
+    if entry.get("output_name") == output:
+        return -1
+    names = entry.get("output_names")
+    if isinstance(names, list) and output in names:
+        return names.index(output)
+    return None
+
+
+def set_spec_in_project_bundles(
+    bundle_paths: Iterable[Path], output: str, spec: Optional[str]
+) -> SpecWriteResult:
+    """Write ``spec`` onto the apply entry that produces ``output``.
+
+    Scans every bundle for an apply entry naming ``output`` (via
+    ``output_name`` or sweep ``output_names``). Writes only when exactly
+    one entry matches — 0 or >1 are reported back untouched so the caller
+    can tell the user. An empty/``None`` spec clears the field instead.
+
+    Template entries with no explicit output name cannot be matched here
+    (the name comes from the template); those count as ``no_match``.
+    """
+    spec_clean = (spec or "").strip() or None
+    matches: list[tuple[Path, dict, dict, int]] = []
+    for path in bundle_paths:
+        try:
+            with Path(path).open("r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(doc, dict) or not isinstance(doc.get("apply"), list):
+            continue
+        for entry in doc["apply"]:
+            if not isinstance(entry, dict):
+                continue
+            idx = _output_match_index(entry, output)
+            if idx is not None:
+                matches.append((Path(path), doc, entry, idx))
+
+    if not matches:
+        return SpecWriteResult(
+            "no_match", None,
+            f"no bundle entry produces output {output!r}",
+        )
+    if len(matches) > 1:
+        paths = ", ".join(sorted({m[0].name for m in matches}))
+        return SpecWriteResult(
+            "ambiguous", None,
+            f"{len(matches)} entries produce {output!r} ({paths})",
+        )
+
+    path, doc, entry, idx = matches[0]
+    if idx == -1:
+        if spec_clean is None:
+            entry.pop("spec", None)
+        else:
+            entry["spec"] = spec_clean
+    else:
+        names = entry.get("output_names") or []
+        specs = list(entry.get("specs") or [None] * len(names))
+        # Normalise length in case `specs` drifted from `output_names`.
+        specs = (specs + [None] * len(names))[: len(names)]
+        specs[idx] = spec_clean
+        if any(s is not None for s in specs):
+            entry["specs"] = specs
+        else:
+            entry.pop("specs", None)
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    verb = "cleared spec on" if spec_clean is None else "wrote spec to"
+    return SpecWriteResult("written", path, f"{verb} {path.name}")
 
 
 def snapshot_to_bundle_dict(

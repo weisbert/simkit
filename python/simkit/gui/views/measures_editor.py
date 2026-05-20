@@ -66,8 +66,18 @@ from PyQt5.QtWidgets import (
 
 from simkit.measure_bundle import MeasureApply, MeasureBundle
 from simkit.signal_group import SignalGroup
+from simkit.spec_eval import SpecParseError, parse_spec
 from simkit.template import Template
 from simkit.template_render import RenderedRow, render_bundle
+
+
+# Syntax help for the per-entry ``spec:`` field. A spec is the auto
+# pass/fail rule — without one a result row stays ``no_spec`` forever
+# (G-1: specs were authorable but undiscoverable).
+_SPEC_HINT_TEXT = (
+    "写法: >= 下限  ·  <= 上限  ·  range 下 上  ·  "
+    "maximize 目标  ·  minimize 目标 （支持 SI 后缀 k m u n p M G）"
+)
 
 
 # Default top-level metadata used when no bundle has been loaded yet.
@@ -165,9 +175,19 @@ class _EntryDialog(QDialog):
         self._alias_edit = QLineEdit(self._entry.get("alias_suffix", "") or "")
         form.addRow("alias_suffix:", self._alias_edit)
 
-        # spec
+        # spec — the auto pass/fail rule. Free text, but parsed by
+        # spec_eval.parse_spec; live-validate so a typo is caught here
+        # rather than silently surfacing as parse_err at run time (G-1a).
         self._spec_edit = QLineEdit(self._entry.get("spec", "") or "")
+        self._spec_edit.setPlaceholderText(
+            ">= 20    ·    <= 1.5m    ·    range 1 5    ·    maximize 30"
+        )
         form.addRow("spec:", self._spec_edit)
+        self._spec_hint = QLabel(_SPEC_HINT_TEXT)
+        self._spec_hint.setWordWrap(True)
+        form.addRow("", self._spec_hint)
+        self._spec_edit.textChanged.connect(self._validate_spec)
+        self._validate_spec()
 
         # Sweep-only: param_sweep + output_names
         self._sweep_key_edit: Optional[QLineEdit] = None
@@ -256,6 +276,27 @@ class _EntryDialog(QDialog):
             else:
                 entry.pop("output_names", None)
         return entry
+
+    def _validate_spec(self) -> None:
+        """Live-check the spec field; red border + reason on parse error."""
+        text = self._spec_edit.text().strip()
+        if not text:
+            self._spec_edit.setStyleSheet("")
+            self._spec_hint.setText(_SPEC_HINT_TEXT)
+            self._spec_hint.setStyleSheet("color: #666;")
+            return
+        try:
+            parse_spec(text)
+        except SpecParseError as exc:
+            self._spec_edit.setStyleSheet(
+                "QLineEdit { border: 1px solid #c0392b; }"
+            )
+            self._spec_hint.setText(f"spec 解析失败: {exc}")
+            self._spec_hint.setStyleSheet("color: #c0392b;")
+        else:
+            self._spec_edit.setStyleSheet("")
+            self._spec_hint.setText(f"✓ 规格有效 — {_SPEC_HINT_TEXT}")
+            self._spec_hint.setStyleSheet("color: #2e7d32;")
 
 
 def _entry_kind(entry: dict) -> str:

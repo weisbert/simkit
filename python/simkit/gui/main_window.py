@@ -230,6 +230,7 @@ class MainWindow(QMainWindow):
         self.results_tab.run_requested.connect(self._on_run_requested)
         self.results_tab.compare_requested.connect(self._on_compare_requested)
         self.results_tab.baseline_pinned.connect(self._on_baseline_pinned)
+        self.results_tab.set_spec_requested.connect(self._on_set_spec_requested)
         self.corners_editor.pull_requested.connect(self._on_corners_pull_requested)
         self.corners_editor.push_requested.connect(self._on_corners_push_requested)
         self.corners_editor.show_diff.connect(self._on_corners_show_diff)
@@ -966,6 +967,56 @@ class MainWindow(QMainWindow):
             self.right_panel.setCurrentWidget(self.results_tab)
         finally:
             con.close()
+
+    def _on_set_spec_requested(self, output: str, spec: str) -> None:
+        """Apply a user-set spec (G-1b): re-evaluate the current run + write back.
+
+        ``spec`` empty → clear. Two effects: the current run's
+        ``spec_status`` is recomputed in-place against the recorded
+        values, and the spec is written into the bundle entry so future
+        runs keep it.
+        """
+        if self._loaded_module is None:
+            return
+        run_id = self.results_tab.current_run_id()
+        if not run_id:
+            self.append_log("[spec] 没有选中的运行，无法设置规格")
+            return
+        from simkit.db import connect
+        from simkit.gui.loaders import set_spec_in_project_bundles
+        from simkit.gui.results_model import apply_spec_to_output
+
+        spec_clean = spec.strip() or None
+        try:
+            con = connect(self._loaded_module.db_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[spec] 打不开数据库: {exc}")
+            return
+        try:
+            n = apply_spec_to_output(con, run_id, output, spec_clean)
+            # Refresh the table on the same connection so the new
+            # spec_status is visible without a re-run.
+            self.results_tab.set_run(run_id, con)
+        finally:
+            con.close()
+
+        verb = "清除规格" if spec_clean is None else f"规格设为 {spec_clean!r}"
+        self.append_log(f"[spec] {output}: {verb} — {n} 行已就地重新判定")
+
+        bundle_paths = [b.bundle_path for b in self._loaded_module.bundles]
+        res = set_spec_in_project_bundles(bundle_paths, output, spec_clean)
+        if res.status == "written":
+            self.append_log(f"[spec] {res.detail}（重跑后保留）")
+        elif res.status == "no_match":
+            self.append_log(
+                f"[spec] 未写回 bundle: {res.detail} — "
+                "重跑会丢失，建议在 Measures 里给该输出设置 spec"
+            )
+        else:  # ambiguous
+            self.append_log(
+                f"[spec] 未写回 bundle: {res.detail} — "
+                "请在 Measures 里手动指定要改哪个 bundle"
+            )
 
     # ----------------------------------------------------------------
     # Run path (§5)
