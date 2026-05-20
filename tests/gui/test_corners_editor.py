@@ -252,6 +252,28 @@ def test_push_button_enabled_when_valid(editor):
     assert editor.push_button.isEnabled() is True
 
 
+# --- B-2: surface *why* "Send to Maestro" is disabled --------------------
+
+
+def test_error_strip_visible_and_lists_reasons_when_invalid(editor):
+    editor.show()  # widget must be visible for child visibility to mean anything
+    editor.load_union([{"row_name": ""}])
+    assert editor.push_button.isEnabled() is False
+    assert editor._errors.isVisible() is True
+    text = editor.errors_label.text()
+    assert "missing row_name" in text
+    # Tooltip must also carry the reason for hover discovery.
+    assert "missing row_name" in editor.push_button.toolTip()
+
+
+def test_error_strip_hidden_when_valid(editor):
+    editor.show()
+    editor.load_union(_sample_rows())
+    assert editor.push_button.isEnabled() is True
+    assert editor._errors.isVisible() is False
+    assert editor.errors_label.text() == ""
+
+
 # --- Signals --------------------------------------------------------------
 
 

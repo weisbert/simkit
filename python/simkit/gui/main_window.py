@@ -531,18 +531,22 @@ class MainWindow(QMainWindow):
     def _rewire_fs_watcher(self) -> None:
         """(Re-)install QFileSystemWatcher on the project's sidecar dirs.
 
-        Watches reviews/, unions/, bundles/. Any add/remove/edit triggers a
-        debounced reload of the current module so the left tree + editors
-        stay in sync with on-disk edits. Survives the user opening a file in
-        $EDITOR and saving it back.
+        Watches reviews/, unions/, and the project's measurements dir. Any
+        add/remove/edit triggers a debounced reload of the current module so
+        the left tree + editors stay in sync with on-disk edits. Survives the
+        user opening a file in $EDITOR and saving it back.
         """
         if self._loaded_module is None:
             return
         if self._fs_watcher is not None:
             self._fs_watcher.deleteLater()
         self._fs_watcher = QFileSystemWatcher(self)
-        for sub in ("reviews", "unions", "bundles"):
-            d = self._loaded_module.project_root / sub
+        watch_dirs = [
+            self._loaded_module.project_root / "reviews",
+            self._loaded_module.project_root / "unions",
+            self._loaded_module.measurements_dir,
+        ]
+        for d in watch_dirs:
             if d.is_dir():
                 self._fs_watcher.addPath(str(d))
         self._fs_watcher.directoryChanged.connect(self._on_project_dir_changed)
@@ -1248,13 +1252,13 @@ class MainWindow(QMainWindow):
         if n_rows == 0:
             self.append_log(f"[measures] pulled 0 rows (Test={test_name!r} has no outputs?)")
             return
-        # Generate a bundle name + path; write to bundles/ so it shows in tree.
+        # Generate a bundle name + path; write to the project's measurements
+        # dir so it shows in the tree and `pvt measure list-bundles` sees it.
         from datetime import datetime
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         bundle_name = f"live_pulled_{ts}"
         out_path = (
-            self._loaded_module.project_root
-            / "bundles"
+            self._loaded_module.measurements_dir
             / f"{bundle_name}.measure.json"
         )
         out_path.parent.mkdir(parents=True, exist_ok=True)

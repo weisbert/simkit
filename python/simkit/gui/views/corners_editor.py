@@ -201,6 +201,26 @@ class CornersEditor(QWidget):
         self._divergence.setVisible(False)
         root.addWidget(self._divergence)
 
+        # --- validation-error strip (B-2) -------------------------------
+        # "Send to Maestro" is gated on validation_errors(); without this
+        # strip the button just greys out with no explanation (observed
+        # 1AXX dogfood: a bare model_file fails the existence check and
+        # the user has no idea why push is dead).
+        self._errors = QFrame(self, objectName="cornerErrorStrip")
+        self._errors.setFrameShape(QFrame.StyledPanel)
+        self._errors.setStyleSheet(
+            "QFrame#cornerErrorStrip { background: #f8d7da; "
+            "border: 1px solid #c0392b; }"
+        )
+        err_layout = QHBoxLayout(self._errors)
+        err_layout.setContentsMargins(6, 4, 6, 4)
+        self.errors_label = QLabel("", self._errors)
+        self.errors_label.setObjectName("cornerErrorLabel")
+        self.errors_label.setWordWrap(True)
+        err_layout.addWidget(self.errors_label, stretch=1)
+        self._errors.setVisible(False)
+        root.addWidget(self._errors)
+
         # --- center table (spec §11 affordances + A3 model layer) -------
         # We use QStandardItemModel here (not a custom QAbstractTableModel)
         # because the editor mutates rows freely (add/dup/delete) and the
@@ -528,9 +548,25 @@ class CornersEditor(QWidget):
         self.push_requested.emit(self.dump_union())
 
     def _refresh_push_enabled(self) -> None:
-        has_errors = bool(self.validation_errors())
+        errors = self.validation_errors()
         has_rows = self._model.rowCount() > 0
-        self.push_button.setEnabled(has_rows and not has_errors)
+        self.push_button.setEnabled(has_rows and not errors)
+        if has_rows and errors:
+            joined = "; ".join(errors)
+            self.errors_label.setText(
+                f"Send to Maestro disabled — fix "
+                f"{len(errors)} issue(s): {joined}"
+            )
+            self._errors.setVisible(True)
+            self.push_button.setToolTip(joined)
+        else:
+            self._errors.setVisible(False)
+            self.errors_label.setText("")
+            self.push_button.setToolTip(
+                "Add at least one corner row before sending to Maestro."
+                if not has_rows
+                else "Send the current corner set to the live Maestro session."
+            )
 
     def _cell_text(self, row: int, col: int) -> str:
         item = self._model.item(row, col)

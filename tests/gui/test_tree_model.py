@@ -67,6 +67,7 @@ def _sample_module() -> LoadedModule:
         milestones=("CDR",),
         union_default=None,
         bundle_default=None,
+        measurements_dir=Path("/proj/measurements"),
     )
 
 
@@ -176,6 +177,7 @@ def test_empty_module_still_has_four_groups():
         milestones=(),
         union_default=None,
         bundle_default=None,
+        measurements_dir=Path("/proj/measurements"),
     )
     model.populate(module)
     assert model.rowCount() == 4

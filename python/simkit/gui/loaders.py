@@ -33,6 +33,7 @@ import duckdb
 from simkit.db import connect
 from simkit.measure_bundle import (
     MEASURE_FILE_SUFFIX,
+    resolve_measurements_dir,
     resolve_signal_groups_dir,
     resolve_templates_dir,
 )
@@ -63,9 +64,10 @@ if TYPE_CHECKING:
 # Default sidecar dirs under a `.pvtproject` parent. Match what
 # ``simkit.project`` advertises but the loader does not import — the
 # project file is the only authority on whether these exist.
+# Bundles live under the project's ``measurementsDir`` (resolved via
+# ``resolve_measurements_dir``), not a fixed subdir — CLI and GUI must agree.
 _REVIEWS_SUBDIR = "reviews"
 _UNIONS_SUBDIR = "unions"
-_BUNDLES_SUBDIR = "bundles"
 _DB_FILENAME = "simkit.duckdb"
 
 
@@ -110,6 +112,7 @@ class LoadedModule:
     milestones: tuple[str, ...]
     union_default: Path | None
     bundle_default: Path | None
+    measurements_dir: Path
     bundles: tuple[LoadedBundle, ...] = ()
 
 
@@ -129,11 +132,10 @@ def load_module(project_path: Path) -> LoadedModule:
     history = _read_history(db_path, project_name=pvtproject.project)
     milestones = _distinct_milestones(history)
     union_default = _single_default(project_root / _UNIONS_SUBDIR, ".union.json")
-    bundle_default = _single_default(
-        project_root / _BUNDLES_SUBDIR, MEASURE_FILE_SUFFIX
-    )
+    measurements_dir = resolve_measurements_dir(pvtproject)
+    bundle_default = _single_default(measurements_dir, MEASURE_FILE_SUFFIX)
 
-    bundles = _scan_bundles(project_root)
+    bundles = _scan_bundles(measurements_dir)
 
     return LoadedModule(
         project_path=project_path,
@@ -145,6 +147,7 @@ def load_module(project_path: Path) -> LoadedModule:
         milestones=milestones,
         union_default=union_default,
         bundle_default=bundle_default,
+        measurements_dir=measurements_dir,
         bundles=bundles,
     )
 
@@ -168,9 +171,9 @@ def _scan_reviews(project_root: Path) -> tuple[LoadedReview, ...]:
     return tuple(out)
 
 
-def _scan_bundles(project_root: Path) -> tuple[LoadedBundle, ...]:
-    """Walk bundles/ for *.measure.json files (mirror of _scan_reviews)."""
-    bundles_dir = project_root / _BUNDLES_SUBDIR
+def _scan_bundles(measurements_dir: Path) -> tuple[LoadedBundle, ...]:
+    """Walk the measurements dir for *.measure.json files (mirror of _scan_reviews)."""
+    bundles_dir = measurements_dir
     if not bundles_dir.is_dir():
         return tuple()
     out: list[LoadedBundle] = []

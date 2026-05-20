@@ -215,7 +215,7 @@ def test_load_module_single_default_union_and_bundle(tmp_path):
     unions.mkdir()
     u = unions / "lone.union.json"
     u.write_text("{}", encoding="utf-8")
-    bundles = tmp_path / "bundles"
+    bundles = tmp_path / "measurements"
     bundles.mkdir()
     b = bundles / "lone.measure.json"
     b.write_text("{}", encoding="utf-8")
@@ -223,6 +223,32 @@ def test_load_module_single_default_union_and_bundle(tmp_path):
     module = load_module(pvtproject)
     assert module.union_default == u.resolve()
     assert module.bundle_default == b.resolve()
+
+
+def test_load_module_honors_custom_measurements_dir(tmp_path):
+    # B-1 regression: the loader must scan the project's measurementsDir,
+    # not a hardcoded bundles/ — so CLI and GUI agree on where bundles live.
+    body = {
+        "schema_version": 1,
+        "project": "demo",
+        "dbRoot": str(tmp_path),
+        "measurementsDir": "./meas_custom",
+    }
+    pvtproject = tmp_path / ".pvtproject"
+    pvtproject.write_text(json.dumps(body), encoding="utf-8")
+    meas = tmp_path / "meas_custom"
+    meas.mkdir()
+    b = meas / "lone.measure.json"
+    b.write_text("{}", encoding="utf-8")
+    # A stray bundles/ dir must be ignored — only measurementsDir counts.
+    stray = tmp_path / "bundles"
+    stray.mkdir()
+    (stray / "ignored.measure.json").write_text("{}", encoding="utf-8")
+
+    module = load_module(pvtproject)
+    assert module.measurements_dir == meas.resolve()
+    assert module.bundle_default == b.resolve()
+    assert {x.bundle_name for x in module.bundles} == {"lone"}
 
 
 def test_load_module_ambiguous_default_is_none(tmp_path):
