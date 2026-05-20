@@ -19,11 +19,18 @@
 
 **目标(用户已拍板「永远是 Corner Manager」):**
 - `"Corners"` 标签永远承载 `CornerManagerView`,全程只有这一个标签。
-- 删掉动态 `"Corner: <name>"` 标签路径。`File → Open Corner Model…` 改为
-  「把选中的 sidecar 加载进那个唯一的 Corners 标签」,不再新开标签。
-- 工程里**没有 `.cornermodel.json` 时**:从 Maestro 当前 corners 自动生成一个
-  minimal `.cornermodel.json`(建议落在 `.pvtproject` 同级,名 `<project>.cornermodel.json`),
-  使 manager 永远有内容 —— 空态也不退回简易网格。
+- **GUI 一打开,Corners 标签就已存在且已填充 —— 不需要任何 load 动作。**
+  这是硬要求。用户原话:打开后"必须要 load 一个东西 corner manager 才出来,
+  太不合理"。corner 是工程的固有属性,不是要手动打开的外挂文件。
+  - GUI 启动时自动发现工程的 `.cornermodel.json`(`.pvtproject` 同级,或
+    `cornerModelsDir`),有就直接加载进 Corners 标签。
+  - 工程里**没有 `.cornermodel.json` 时**:从 Maestro 当前 corners 自动生成一个
+    minimal `.cornermodel.json`(建议落在 `.pvtproject` 同级,名
+    `<project>.cornermodel.json`),Corners 标签照样直接可用 —— 空态也不退回
+    简易网格,也不留空等用户去 Open。
+- 删掉动态 `"Corner: <name>"` 标签路径。`File → Open Corner Model…` 降级为
+  **可选** —— 仅用于加载另一个 sidecar,加载目标是那个唯一的 Corners 标签、
+  不再新开标签。正常使用根本不需要点它。
 - **删除** `python/simkit/gui/views/corners_editor.py`(Phase 4 `CornersEditor`)。
 - 把旧 Corners 标签独有的能力迁进 `CornerManagerView` —— 主要是 **Pull**
   (`main_window.py` Corners §7 区,约 1371–1404 行 + `_handle_pull`)。
@@ -59,5 +66,7 @@ tooltip / 菜单项 / QMessageBox / 标签页名 / 状态栏文案。
 ## 不在本次范围(仍 deferred)
 
 corner-model GUI pull 的交互式 reconciliation 回填、`pvt corner-model push/pull`
-CLI、多 sidecar 标签去重、`.pvtproject` 自动发现 `cornerModelsDir`。见
-`docs/phase5_dogfood_checklist.md` 末表。
+CLI、多 sidecar 标签去重。见 `docs/phase5_dogfood_checklist.md` 末表。
+
+注:`.pvtproject` 自动发现 cornermodel **不再 deferred** —— 任务 A 的
+「打开即在」硬要求依赖它,见上文。
