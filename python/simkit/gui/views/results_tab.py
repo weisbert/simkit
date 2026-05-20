@@ -62,8 +62,9 @@ from simkit.spec_eval import SpecParseError, parse_spec
 # Syntax help shared by the Set-spec dialog. Mirrors the Measures-editor
 # spec hint so the two spec-authoring entry points read consistently.
 _SPEC_HINT_TEXT = (
-    "写法: >= 下限  ·  <= 上限  ·  range 下 上  ·  "
-    "maximize 目标  ·  minimize 目标 （支持 SI 后缀 k m u n p M G）"
+    "Syntax: >= lower  ·  <= upper  ·  range lo hi  ·  "
+    "maximize target  ·  minimize target  (SI suffixes k m u n p M G "
+    "are supported)"
 )
 
 
@@ -178,7 +179,7 @@ class ResultsTab(QWidget):
         # Failed-only filter (G-4) — hide everything but failing rows so a
         # 240-corner sweep collapses to just the problems. Wired to the
         # proxy below, once it exists.
-        self.failed_only_check = QCheckBox("只看失败行", self.header)
+        self.failed_only_check = QCheckBox("Failed rows only", self.header)
         self.failed_only_check.setObjectName("failedOnlyCheck")
         header_layout.addWidget(self.failed_only_check, stretch=0)
 
@@ -204,8 +205,9 @@ class ResultsTab(QWidget):
         # This strip points them at the fix; hidden whenever any spec
         # exists (or no run is loaded).
         self.no_spec_hint = QLabel(
-            "本次运行没有规格 — 右键某行选「设置规格…」，"
-            "或在 Measures 里给输出加 spec，才能得到自动 pass/fail。",
+            "This run has no specs — right-click a row and choose "
+            "'Set spec…', or add a spec to the output in the Measures "
+            "tab, to get automatic pass/fail.",
             self,
         )
         self.no_spec_hint.setObjectName("noSpecHint")
@@ -330,12 +332,13 @@ class ResultsTab(QWidget):
         """
         if parse_error:
             self.header_label.setText(
-                f"Review: {review_name}  ·  解析失败: {parse_error}"
+                f"Review: {review_name}  ·  parse failed: {parse_error}"
             )
         else:
             self.header_label.setText(
-                f"Review: {review_name}  ·  {item_count} 个 item  ·  "
-                f"选 History 里的一次运行查看结果，或点 Run this review"
+                f"Review: {review_name}  ·  {item_count} items  ·  "
+                f"select a run under History to view results, or click "
+                f"Run this review"
             )
         self._model = None
         self._proxy.setSourceModel(None)
@@ -416,7 +419,7 @@ class ResultsTab(QWidget):
             return
         current_spec = record.get("spec") or ""
         menu = QMenu(self.table)
-        act = menu.addAction(f"为 '{output}' 设置规格…")
+        act = menu.addAction(f"Set spec for '{output}'…")
         chosen = menu.exec_(self.table.viewport().mapToGlobal(pos))
         if chosen is not act:
             return
@@ -446,14 +449,14 @@ class SetSpecDialog(QDialog):
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"设置规格 — {output}")
+        self.setWindowTitle(f"Set spec — {output}")
 
         form = QFormLayout()
         self._edit = QLineEdit(current_spec or "")
         self._edit.setPlaceholderText(
             ">= 20    ·    <= 1.5m    ·    range 1 5    ·    maximize 30"
         )
-        form.addRow(f"{output} 的 spec:", self._edit)
+        form.addRow(f"spec for {output}:", self._edit)
         self._hint = QLabel(_SPEC_HINT_TEXT)
         self._hint.setWordWrap(True)
         form.addRow("", self._hint)
@@ -476,7 +479,9 @@ class SetSpecDialog(QDialog):
         ok = self._buttons.button(QDialogButtonBox.Ok)
         if not text:
             self._edit.setStyleSheet("")
-            self._hint.setText("留空 = 清除规格（该输出回到 no_spec）")
+            self._hint.setText(
+                "Leave blank = clear the spec (the output reverts to no_spec)"
+            )
             self._hint.setStyleSheet("color: #666;")
             ok.setEnabled(True)
             return
@@ -486,12 +491,12 @@ class SetSpecDialog(QDialog):
             self._edit.setStyleSheet(
                 "QLineEdit { border: 1px solid #c0392b; }"
             )
-            self._hint.setText(f"spec 解析失败: {exc}")
+            self._hint.setText(f"spec failed to parse: {exc}")
             self._hint.setStyleSheet("color: #c0392b;")
             ok.setEnabled(False)
         else:
             self._edit.setStyleSheet("")
-            self._hint.setText("✓ 规格有效")
+            self._hint.setText("✓ spec valid")
             self._hint.setStyleSheet("color: #2e7d32;")
             ok.setEnabled(True)
 

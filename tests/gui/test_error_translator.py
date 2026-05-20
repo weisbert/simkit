@@ -124,4 +124,4 @@ def test_substring_match_routes_correctly(qtbot, wired):
     with qtbot.waitSignal(translator.translated, timeout=1000) as blocker:
         worker.op_failed.emit(5, err)
     _, payload = blocker.args
-    assert "对话框" in payload.headline
+    assert "dialog" in payload.headline

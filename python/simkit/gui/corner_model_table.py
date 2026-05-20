@@ -125,17 +125,19 @@ class CornerModelTableModel(QAbstractTableModel):
             if role == Qt.ToolTipRole:
                 bits = []
                 if col.is_managed:
-                    bits.append(f"模式: {col.mode}")
+                    bits.append(f"Mode: {col.mode}")
                 else:
-                    bits.append("未托管列(foreign)— push 时原样保留")
+                    bits.append(
+                        "Unmanaged (foreign) column — preserved as-is on push"
+                    )
                 if col.variant is not None:
-                    bits.append(f"变体: {col.variant}")
+                    bits.append(f"Variant: {col.variant}")
                 if col.template is not None:
-                    bits.append(f"由模板 {col.template} 生成")
+                    bits.append(f"Generated from template {col.template}")
                 if col.correlated_axes:
                     bits.append(
-                        f"复合轴: {', '.join(col.correlated_axes)} "
-                        f"({self._point_counts[section]} 点)"
+                        f"Correlated axes: {', '.join(col.correlated_axes)} "
+                        f"({self._point_counts[section]} pts)"
                     )
                 return "\n".join(bits)
             if role == Qt.BackgroundRole:
@@ -151,8 +153,9 @@ class CornerModelTableModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return var
         if role == Qt.ToolTipRole:
-            return "寄存器变量(模式管理)" if var in self._register_vars \
-                else "PVT 变量(逐列设置)"
+            return "Register variable (mode-managed)" \
+                if var in self._register_vars \
+                else "PVT variable (per-column)"
         return None
 
     def data(self, index: QModelIndex, role: int = Qt.DisplayRole) -> Any:
@@ -184,8 +187,8 @@ class CornerModelTableModel(QAbstractTableModel):
             if is_cell_red(self._cm, column, var):
                 base = self._cm.modes[column.mode].vars.get(var)
                 return (
-                    f"手改覆盖 {column.overrides[var]!r},与模式 base "
-                    f"{base!r} 不一致(D1)"
+                    f"Manual override {column.overrides[var]!r} diverges "
+                    f"from mode base {base!r} (D1)"
                 )
         return None
 

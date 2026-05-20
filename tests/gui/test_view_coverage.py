@@ -24,7 +24,6 @@ _GUI_TESTS_DIR = _REPO_ROOT / "tests" / "gui"
 # Phase 4 views — grandfathered, not backfilled (user decision 2026-05-20).
 # Do NOT add Phase 5 views here; they must ship with a render test instead.
 _GRANDFATHERED = frozenset({
-    "corners_editor",
     "diff_tab",
     "glossary_dialog",
     "measures_editor",

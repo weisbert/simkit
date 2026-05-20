@@ -59,10 +59,10 @@ def expansion_tooltip(flat_row: dict) -> str:
     """A multi-line description of the sub-corners, for a cell tooltip."""
     subs = expand_flat_row(flat_row)
     if not subs:
-        return "这一行还不是一个完整的 corner(缺少 vars 或 model_file)。"
+        return "This row is not a complete corner yet (missing vars or model_file)."
     if len(subs) == 1:
-        return f"展开为 1 个 corner: {subs[0].sub_corner_name}"
-    lines = [f"展开为 {len(subs)} 个 sub-corner:"]
+        return f"Expands to 1 corner: {subs[0].sub_corner_name}"
+    lines = [f"Expands to {len(subs)} sub-corners:"]
     for sc in subs:
         lines.append(f"  {sc.sub_corner_name}  —  {_describe(sc)}")
     return "\n".join(lines)
@@ -88,19 +88,21 @@ def coherence_warnings(flat_row: dict) -> List[str]:
       two sources of truth, and which one Maestro reads is non-obvious.
     """
     warnings: List[str] = []
-    name = (flat_row.get("row_name") or "").strip() or "(未命名行)"
+    name = (flat_row.get("row_name") or "").strip() or "(unnamed row)"
     vdd_col = (flat_row.get("vdd") or "").strip()
     extra_keys = [k for k, _ in parse_extra_vars(flat_row.get("extra_vars") or "")]
     supply_in_extras = [k for k in extra_keys if k.lower() in _SUPPLY_ALIASES]
 
     if supply_in_extras and not vdd_col:
         warnings.append(
-            f"{name}: 供电写在 extra_vars 里 ({', '.join(supply_in_extras)}),"
-            "而 vdd 列为空 — 建议移到 vdd 列,否则不易看出供电在变化"
+            f"{name}: supply is written in extra_vars "
+            f"({', '.join(supply_in_extras)}) while the vdd column is empty "
+            f"— move it to the vdd column, or the supply change is hard to see"
         )
     elif supply_in_extras and vdd_col:
         warnings.append(
-            f"{name}: 供电同时定义在 vdd 列和 extra_vars "
-            f"({', '.join(supply_in_extras)}) — 只保留一处,避免歧义"
+            f"{name}: supply is defined in both the vdd column and "
+            f"extra_vars ({', '.join(supply_in_extras)}) — keep just one "
+            f"to avoid ambiguity"
         )
     return warnings

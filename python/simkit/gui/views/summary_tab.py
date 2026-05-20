@@ -3,9 +3,9 @@
 Layout::
 
     ┌─ SummaryTab ───────────────────────────────────────────────────┐
-    │ 36 行 · 30 ok · 6 eval_err   [⚠ 部分运行]          ← health line │
+    │ 36 rows · 30 ok · 6 eval_err  [⚠ partial run]      ← health line │
     ├─────────────────────────────────────────────────────────────────┤
-    │ output | spec | 最差角 | 最差值 | 余量 | 判定 | 角数             │
+    │ output | spec | worst corner | worst value | margin | verdict |  │
     │ ...                                                              │ ← rollup
     └─────────────────────────────────────────────────────────────────┘
 
@@ -66,7 +66,8 @@ class MarginRollupModel(QAbstractTableModel):
     """Read-only table model over a tuple of :class:`OutputRollup`."""
 
     COLUMNS: tuple[str, ...] = (
-        "output", "spec", "最差角", "最差值", "余量", "判定", "角数",
+        "output", "spec", "worst corner", "worst value", "margin",
+        "verdict", "corners",
     )
 
     def __init__(self, rollup: tuple = (), parent: Any = None):
@@ -130,32 +131,33 @@ def provenance_line(prov: Optional[dict]) -> str:
     run is itself the thing a reviewer needs to notice.
     """
     if not prov:
-        return "运行条件: 未记录(此 run 早于可追溯性功能,或为手动 PvtSave)"
+        return ("Run conditions: not recorded (this run predates the "
+                "traceability feature, or was a manual PvtSave)")
     host = prov.get("host") or "?"
-    pdk = prov.get("pdk_version") or "未知"
+    pdk = prov.get("pdk_version") or "unknown"
     models = prov.get("model_files") or []
     captured = (prov.get("captured_at") or "")[:19].replace("T", " ")
-    parts = [f"host={host}", f"PDK={pdk}", f"{len(models)} 个 model 文件"]
+    parts = [f"host={host}", f"PDK={pdk}", f"{len(models)} model file(s)"]
     if captured:
-        parts.append(f"采集于 {captured}")
-    return "运行条件: " + "  ·  ".join(parts)
+        parts.append(f"captured {captured}")
+    return "Run conditions: " + "  ·  ".join(parts)
 
 
 def provenance_tooltip(prov: Optional[dict]) -> str:
     """Multi-line model-file detail for the provenance label's tooltip."""
     if not prov:
         return (
-            "没有 provenance 记录,无法证明这组数字用的是哪一版 model / "
-            "哪台机器。"
+            "No provenance record — cannot prove which model version / "
+            "which machine produced these numbers."
         )
     models = prov.get("model_files") or []
     if not models:
-        return "未记录任何 model 文件。"
-    lines = ["model 文件:"]
+        return "No model files recorded."
+    lines = ["Model files:"]
     for m in models:
         path = m.get("path", "?")
         if not m.get("exists", False):
-            lines.append(f"  {path}  (未找到)")
+            lines.append(f"  {path}  (not found)")
         else:
             mtime = (m.get("mtime") or "")[:19].replace("T", " ")
             size = m.get("size")
@@ -165,14 +167,14 @@ def provenance_tooltip(prov: Optional[dict]) -> str:
 
 def health_line(health: RunHealth) -> str:
     """Render a :class:`RunHealth` as the one-line summary string."""
-    parts = [f"{health.total_rows} 行"]
+    parts = [f"{health.total_rows} rows"]
     for status in sorted(health.status_counts):
         parts.append(f"{health.status_counts[status]} {status}")
     if health.sim_fail_corners:
-        parts.append(f"{health.sim_fail_corners} 角 sim 失败")
+        parts.append(f"{health.sim_fail_corners} corners sim-failed")
     line = "  ·  ".join(parts)
     if health.partial_run:
-        line += "    [⚠ 部分运行 — 结果不完整]"
+        line += "    [⚠ partial run — results incomplete]"
     return line
 
 

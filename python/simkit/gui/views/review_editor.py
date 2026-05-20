@@ -316,13 +316,13 @@ class ReviewItemsTable(QWidget):
         for i, item in enumerate(self.to_items(), start=1):
             missing: list[str] = []
             if not item.get("name"):
-                missing.append("名称")
+                missing.append("name")
             if not item.get("tests"):
-                missing.append("测试")
+                missing.append("tests")
             if not item.get("union"):
-                missing.append("角组 (union)")
+                missing.append("corner group (union)")
             if missing:
-                problems.append(f"第 {i} 行缺少: {'、'.join(missing)}")
+                problems.append(f"row {i} is missing: {', '.join(missing)}")
         return problems
 
     def to_items(self) -> list[dict[str, Any]]:

@@ -493,7 +493,7 @@ def test_entry_dialog_flags_unparseable_spec(qtbot):
     d = _entry_dialog()
     qtbot.addWidget(d)
     d._spec_edit.setText(">> not a spec")
-    assert "解析失败" in d._spec_hint.text()
+    assert "failed to parse" in d._spec_hint.text()
     assert "border" in d._spec_edit.styleSheet()
 
 
@@ -501,7 +501,7 @@ def test_entry_dialog_accepts_valid_spec(qtbot):
     d = _entry_dialog()
     qtbot.addWidget(d)
     d._spec_edit.setText("range 1 5")
-    assert "解析失败" not in d._spec_hint.text()
+    assert "failed to parse" not in d._spec_hint.text()
     assert d._spec_edit.styleSheet() == ""
     # The valid spec round-trips through updated_entry().
     assert d.updated_entry()["spec"] == "range 1 5"
@@ -510,7 +510,7 @@ def test_entry_dialog_accepts_valid_spec(qtbot):
 def test_entry_dialog_prefilled_bad_spec_flagged_on_open(qtbot):
     d = _entry_dialog(spec="garbage!!")
     qtbot.addWidget(d)
-    assert "解析失败" in d._spec_hint.text()
+    assert "failed to parse" in d._spec_hint.text()
 
 
 # --- G-14: measures-editor affordances ------------------------------------

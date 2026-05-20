@@ -111,9 +111,9 @@ def test_wizard_end_to_end_writes_loadable_review(qtbot, tmp_path):
     assert "item1" in preview
     # G-8: Step 4 also carries a plain-language recap, not just JSON.
     summary = w.page(3).summary_label.text()
-    assert "评审「brand_new」" in summary
+    assert "Review 'brand_new'" in summary
     assert "item1" in summary
-    assert "1 个 item" in summary
+    assert "1 items" in summary
 
     assert w.page(3).validatePage() is True
     assert w.saved_path == root / "reviews" / "brand_new.review.json"

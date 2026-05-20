@@ -171,7 +171,7 @@ class MultiRunPickerDialog(QDialog):
         self,
         runs: List[dict],
         *,
-        title: str = "里程碑趋势 — 选择 2 个以上 run",
+        title: str = "Milestone trend — select 2 or more runs",
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -183,8 +183,8 @@ class MultiRunPickerDialog(QDialog):
         v.setContentsMargins(12, 12, 12, 12)
 
         hint = QLabel(
-            "按住 Ctrl / Shift 多选。建议按里程碑顺序挑选 "
-            "(PDR → CDR → FDR);趋势会按时间先后排列。",
+            "Hold Ctrl / Shift to multi-select. Pick in milestone order "
+            "(PDR → CDR → FDR); the trend is arranged chronologically.",
             self,
         )
         hint.setObjectName("multiRunPickerHint")

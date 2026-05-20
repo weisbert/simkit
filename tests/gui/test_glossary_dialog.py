@@ -24,7 +24,7 @@ _QAPP = QApplication.instance() or QApplication(sys.argv)
 
 def test_glossary_covers_the_core_vocabulary():
     terms = " ".join(t for t, _ in GLOSSARY)
-    for needed in ("module", "Bridge", "Session", "Review", "Union",
+    for needed in ("Module", "Bridge", "Session", "Review", "Union",
                    "Bundle", "Template", "Signal group", "Raw", "Sweep"):
         assert needed in terms, f"{needed!r} missing from the glossary"
 
@@ -39,5 +39,5 @@ def test_glossary_dialog_constructs_and_shows_terms():
     d = GlossaryDialog()
     body = d.browser.toPlainText()
     # "Review" misreads as a meeting — the definition must say otherwise.
-    assert "评审" in body
-    assert "不是「开会评审」" in body
+    assert "Review" in body
+    assert "not a meeting" in body

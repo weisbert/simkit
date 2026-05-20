@@ -45,13 +45,13 @@ def test_translate_lock_failed_matches():
 def test_translate_pvt_runner_no_option_matches():
     out = translate(_err("pvt_runner_no_option", "skipped"))
     assert out.is_known is True
-    assert "Spectre 选项" in out.headline
+    assert "Spectre option" in out.headline
 
 
 def test_translate_pvt_runner_timeout_matches():
     out = translate(_err("pvt_runner_timeout", "did not return"))
     assert out.is_known is True
-    assert "超时" in out.headline
+    assert "timed out" in out.headline
 
 
 def test_translate_bridge_socket_dead_matches():
@@ -69,7 +69,7 @@ def test_translate_bridge_dead_matches():
 def test_translate_bridge_wedge_matches():
     out = translate(_err("bridge_wedge", "stale half-response"))
     assert out.is_known is True
-    assert "卡住" in out.headline
+    assert "stuck" in out.headline
 
 
 def test_translate_session_focus_lost_matches():
@@ -87,13 +87,13 @@ def test_translate_bad_history_name_matches():
 def test_translate_pvt_io_matches():
     out = translate(_err("pvt_io", "no such file"))
     assert out.is_known is True
-    assert "文件操作" in out.headline
+    assert "file operation" in out.headline
 
 
 def test_translate_transport_matches():
     out = translate(_err("transport", "weird shape"))
     assert out.is_known is True
-    assert "响应格式" in out.headline
+    assert "response format" in out.headline
 
 
 # --- Substring-priority entries ------------------------------------------
@@ -107,32 +107,32 @@ def test_translate_assembler_2423_wins_over_generic_category():
         _err("pvt_runner_timeout", "ASSEMBLER-2423: setupdb temporarily locked")
     )
     assert out.is_known is True
-    assert "对话框" in out.headline
+    assert "dialog" in out.headline
 
 
 def test_translate_axl_get_run_status_nil_substring():
     out = translate(_err("anything", "axlGetRunStatus returned nil for fnxSession0"))
     assert out.is_known is True
-    assert "session 未识别" in out.headline
+    assert "session is not recognised" in out.headline
 
 
 def test_translate_connection_refused_substring():
     out = translate(_err("transport", "Connection refused on socket"))
     # "Connection refused" is listed first; ensure that's the one we hit.
     assert out.is_known is True
-    assert "Virtuoso 没在运行" in out.headline
+    assert "Virtuoso is not running" in out.headline
 
 
 def test_translate_socket_substring_falls_to_socket_entry():
     out = translate(_err("anything", "the socket was closed unexpectedly"))
     assert out.is_known is True
-    assert "Virtuoso 没在运行" in out.headline
+    assert "Virtuoso is not running" in out.headline
 
 
 def test_translate_constraint_violation_substring():
     out = translate(_err("duckdb_error", "Constraint violation on PK"))
     assert out.is_known is True
-    assert "数据库" in out.headline
+    assert "database" in out.headline
 
 
 # --- pvt_validation: substring beats bare category ------------------------
@@ -141,13 +141,13 @@ def test_translate_constraint_violation_substring():
 def test_translate_pvt_validation_not_found_specific_match():
     out = translate(_err("pvt_validation", "review.json not found"))
     assert out.is_known is True
-    assert "路径找不到" in out.headline
+    assert "cannot be found" in out.headline
 
 
 def test_translate_pvt_validation_generic_falls_to_validation_entry():
     out = translate(_err("pvt_validation", "session field required"))
     assert out.is_known is True
-    assert "校验失败" in out.headline
+    assert "validation failed" in out.headline
 
 
 # --- Fallthrough ---------------------------------------------------------

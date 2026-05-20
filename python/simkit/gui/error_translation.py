@@ -42,93 +42,101 @@ Matcher = Union[str, Tuple[Optional[str], str]]
 KNOWN_ERRORS: List[Tuple[Matcher, str, str]] = [
     (
         (None, "ASSEMBLER-2423"),
-        "Maestro 当前有对话框打开 (setupdb temporarily locked)",
-        "请点击 Maestro 主窗口取消对话框，然后重试。",
+        "Maestro has a dialog open (setupdb temporarily locked)",
+        "Click the Maestro main window to dismiss the dialog, then retry.",
     ),
     (
         (None, "axlGetRunStatus returned nil"),
-        "Maestro 当前 session 未识别",
-        "在 Maestro 窗口里点一次以激活会话，然后重试。",
+        "Maestro's current session is not recognised",
+        "Click once in the Maestro window to activate the session, then retry.",
     ),
     (
         (None, "Connection refused"),
-        "Virtuoso 没在运行 / skillbridge server 已断开",
-        '在 CIW 重新执行 (pyKillServer)(pyStartServer ?python "/usr/bin/python3")，或重启 Virtuoso。',
+        "Virtuoso is not running / the skillbridge server is down",
+        'Re-run (pyKillServer)(pyStartServer ?python "/usr/bin/python3") '
+        'in the CIW, or restart Virtuoso.',
     ),
     (
         (None, "socket"),
-        "Virtuoso 没在运行 / skillbridge server 已断开",
-        '在 CIW 重新执行 (pyKillServer)(pyStartServer ?python "/usr/bin/python3")，或重启 Virtuoso。',
+        "Virtuoso is not running / the skillbridge server is down",
+        'Re-run (pyKillServer)(pyStartServer ?python "/usr/bin/python3") '
+        'in the CIW, or restart Virtuoso.',
     ),
     (
         (None, "Constraint violation"),
-        "本地数据库被并发写入",
-        "关闭其它 simkit 实例后重试。",
+        "The local database was written concurrently",
+        "Close other simkit instances and retry.",
     ),
     (
         ("pvt_validation", "not found"),
-        "输入文件路径找不到",
-        "检查 review.json / union.json / bundle.json 的路径。",
+        "An input file path cannot be found",
+        "Check the review.json / union.json / bundle.json paths.",
     ),
     (
         "pvt_runner_no_session",
-        "Maestro session 不存在或拼写错误",
-        "确认会话名 (e.g. fnxSession0) 拼写正确，并已在 Maestro 中打开。",
+        "The Maestro session does not exist or is misspelled",
+        "Confirm the session name (e.g. fnxSession0) is spelled correctly "
+        "and open in Maestro.",
     ),
     (
         "session_focus_lost",
-        "Maestro 当前 session 未识别 (focus 已切走)",
-        "在 Maestro Assembler 窗口里点一次以重新激活会话，然后重试。",
+        "Maestro's current session is not recognised (focus moved away)",
+        "Click once in the Maestro Assembler window to re-activate the "
+        "session, then retry.",
     ),
     (
         "bridge_socket_dead",
-        "Virtuoso 没在运行 / skillbridge server 已断开",
-        '在 CIW 重新执行 (pyKillServer)(pyStartServer ?python "/usr/bin/python3")，或重启 Virtuoso。',
+        "Virtuoso is not running / the skillbridge server is down",
+        'Re-run (pyKillServer)(pyStartServer ?python "/usr/bin/python3") '
+        'in the CIW, or restart Virtuoso.',
     ),
     (
         "bridge_dead",
-        "skillbridge python_server 进程已退出",
-        "在 shell 杀掉残留的 python_server 进程，然后在 CIW 执行 (pyStartServer)。",
+        "The skillbridge python_server process has exited",
+        "Kill any leftover python_server process in a shell, then run "
+        "(pyStartServer) in the CIW.",
     ),
     (
         "bridge_wedge",
-        "skillbridge 通道被卡住 (stale half-response)",
-        "在 CIW 执行 (pyKillServer)(pyStartServer)，然后重试。",
+        "The skillbridge channel is stuck (stale half-response)",
+        "Run (pyKillServer)(pyStartServer) in the CIW, then retry.",
     ),
     (
         "lock_failed",
-        "Maestro history lock 操作失败",
-        "确认 history 名称存在，且 Maestro 没在 cleanup 中。",
+        "The Maestro history lock operation failed",
+        "Confirm the history name exists and Maestro is not in cleanup.",
     ),
     (
         "pvt_runner_no_option",
-        "Spectre 选项未设置 (这通常是正常的)",
-        "如果是探测，可忽略；如果是写入，检查 test 名称。",
+        "A Spectre option is not set (this is usually normal)",
+        "If this was a probe, ignore it; if a write, check the test name.",
     ),
     (
         "pvt_runner_timeout",
-        "Maestro 运行超时未返回 idle",
-        "检查 Maestro 主窗口是否有错误对话框；如必要重启 Spectre。",
+        "The Maestro run timed out without returning to idle",
+        "Check the Maestro main window for an error dialog; restart "
+        "Spectre if necessary.",
     ),
     (
         "pvt_validation",
-        "输入参数校验失败",
-        "查看 Details 中的具体字段。",
+        "Input parameter validation failed",
+        "See the specific field in Details.",
     ),
     (
         "pvt_io",
-        "输入/输出文件操作失败",
-        "查看 Details 中的路径并确认权限。",
+        "An input/output file operation failed",
+        "Check the path in Details and confirm permissions.",
     ),
     (
         "bad_history_name",
-        "history 名称含非法字符 (换行/Tab)",
-        "改用纯文本 history 名称后重试。",
+        "The history name contains illegal characters (newline/Tab)",
+        "Use a plain-text history name and retry.",
     ),
     (
         "transport",
-        "skillbridge 响应格式异常",
-        "通常意味着 Virtuoso 端的 SKILL 没加载完整；重新加载 simkit SKILL 后重试。",
+        "The skillbridge response format is malformed",
+        "This usually means the Virtuoso-side SKILL did not load fully; "
+        "reload the simkit SKILL and retry.",
     ),
 ]
 
@@ -164,9 +172,10 @@ def translate(err: "BridgeError") -> TranslatedError:
                 is_known=True,
             )
     return TranslatedError(
-        headline=f"未识别的错误: {err.category}",
+        headline=f"Unrecognised error: {err.category}",
         detail=detail,
-        action_hint="如果重现，请通过 Report this 反馈具体复现步骤 + Details 文本。",
+        action_hint="If this recurs, use 'Report this' to send the exact "
+                    "reproduction steps + the Details text.",
         is_known=False,
     )
 

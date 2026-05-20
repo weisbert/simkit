@@ -2,9 +2,9 @@
 
 A single table: rows are ``(test, corner, point, output)`` keys, columns
 are the resolved slices side-by-side, plus a trailing direction glyph.
-Two checkboxes: "只看变化的行" (hide rows whose value never moved) and a
-sentinel toggle (``__sim_status__`` rows hidden by default — they are
-sweep bookkeeping, not review numbers).
+Two checkboxes: "Changed rows only" (hide rows whose value never moved)
+and a sentinel toggle (``__sim_status__`` rows hidden by default — they
+are sweep bookkeeping, not review numbers).
 
 Sibling of :class:`DiffTab`; the parent ``QTabWidget`` owns the close
 X, the in-tab Close button emits :pyattr:`closed`.
@@ -99,15 +99,16 @@ class TrendTab(QWidget):
         # --- controls ------------------------------------------------------
         controls = QHBoxLayout()
         controls.setContentsMargins(8, 4, 8, 0)
-        self.changed_only_check = QCheckBox("只看变化的行", self)
+        self.changed_only_check = QCheckBox("Changed rows only", self)
         self.changed_only_check.setObjectName("trendChangedOnlyCheck")
         self.changed_only_check.setToolTip(
-            "隐藏数值在所有里程碑之间完全相同的行"
+            "Hide rows whose value is identical across every milestone"
         )
-        self.sentinel_check = QCheckBox("显示 sim-status 行", self)
+        self.sentinel_check = QCheckBox("Show sim-status rows", self)
         self.sentinel_check.setObjectName("trendSentinelCheck")
         self.sentinel_check.setToolTip(
-            "显示 __sim_status__ 哨兵行(默认隐藏,它们是仿真记账行)"
+            "Show __sim_status__ sentinel rows (hidden by default — they "
+            "are simulation bookkeeping rows)"
         )
         controls.addWidget(self.changed_only_check)
         controls.addWidget(self.sentinel_check)
@@ -133,7 +134,7 @@ class TrendTab(QWidget):
 
         # --- empty-state hint ---------------------------------------------
         self.empty_label = QLabel(
-            "这些里程碑之间没有可对齐的结果行。", self,
+            "No result rows can be aligned across these milestones.", self,
         )
         self.empty_label.setObjectName("trendEmptyLabel")
         self.empty_label.setStyleSheet("color: #888;")
@@ -149,7 +150,8 @@ class TrendTab(QWidget):
         self.consistency_label.setWordWrap(True)
         if mismatches:
             self.consistency_label.setText(
-                "⚠ 运行条件不一致 —— 这些里程碑不是在同一套条件下跑的:\n"
+                "⚠ Inconsistent run conditions — these milestones were "
+                "not run under the same conditions:\n"
                 + "\n".join(f"  • {m}" for m in mismatches)
             )
             self.consistency_label.setStyleSheet(

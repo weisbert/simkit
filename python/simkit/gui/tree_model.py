@@ -30,19 +30,21 @@ _NODE_DATA_ROLE = Qt.UserRole + 1
 # a new user what a "review" or "bundle" is).
 _GROUP_TOOLTIPS = {
     "Reviews": (
-        "Review = 一份 .review.json，把测试 + 角组 + 测量包打包成一次"
-        "可重复的批量仿真。右键可新建 / 复制 / 运行。"
+        "Review = one .review.json that bundles tests + corner groups + "
+        "measurement bundles into a repeatable batch simulation. "
+        "Right-click to create / copy / run."
     ),
     "Bundles": (
-        "Bundle = 一份 .measure.json，定义要从仿真里取哪些输出量。"
+        "Bundle = one .measure.json that defines which output quantities "
+        "to extract from a simulation."
     ),
     "Milestones": (
-        "里程碑 = 给某次运行打的标签（如 PDR / CDR / FDR），"
-        "方便事后按阶段查结果。"
+        "Milestone = a label attached to a run (e.g. PDR / CDR / FDR) so "
+        "results can be reviewed by project stage afterwards."
     ),
     "History": (
-        "History = 这个模块跑过的每一次运行。点开任意一次查看 Results "
-        "与 Summary。"
+        "History = every run this module has executed. Open any one to "
+        "view its Results and Summary."
     ),
 }
 

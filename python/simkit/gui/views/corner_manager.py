@@ -1,13 +1,14 @@
-"""CornerManagerView — Phase 5 Stage 1 corner-manager view (spec §7).
+"""CornerManagerView — Phase 5 corner-manager view (spec §7).
 
 Layout follows Cadence's native corner manager: a left **modes panel** and a
 central **corner table** (variables as rows, corners as columns). Editing a
-register value in the modes panel is the痛点-b global edit — every column
-referencing that mode re-materialises at once.
+register value in the modes panel is the pain-point-b global edit — every
+column referencing that mode re-materialises at once.
 
 The view is self-contained and bridge-free: live pull / push are surfaced as
 signals (:pyattr:`pull_requested` / :pyattr:`push_requested`) for the owning
-window to route, mirroring the Phase 4 editor convention.
+window to route. It always holds a valid cornermodel (an empty one when the
+project has none yet), so the Corners tab is usable with no load step.
 """
 
 from __future__ import annotations
@@ -64,7 +65,7 @@ from simkit.gui.corner_model_table import CornerModelTableModel
 
 
 class CornerManagerView(QWidget):
-    """The Stage 1 corner manager — modes panel + corner table."""
+    """The corner manager — modes panel + corner table."""
 
     pull_requested = pyqtSignal()
     push_requested = pyqtSignal(object)        # current CornerModel
@@ -72,11 +73,13 @@ class CornerManagerView(QWidget):
 
     def __init__(
         self, model: CornerModel, profile: object = None,
+        source_path: object = None,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
         self._cm = model
         self._profile = profile   # PvtProfile | None (Stage 6)
+        self._source_path = source_path  # Path | None — where to persist
         self._loading_mode_vars = False
         self._loading_variant_vars = False
         self._set_filter: Optional[str] = None
@@ -89,17 +92,24 @@ class CornerManagerView(QWidget):
         """The bound PVT profile (or None) — main_window reads it for push."""
         return self._profile
 
+    def source_path(self) -> object:
+        """The .cornermodel.json this view is backed by (or None)."""
+        return self._source_path
+
     # --- construction ----------------------------------------------------
+
+    def _title_text(self) -> str:
+        return f"Corner Manager — {self._cm.name}"
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
 
         top = QHBoxLayout()
-        self.title_label = QLabel(f"Corner Manager — {self._cm.name}")
+        self.title_label = QLabel(self._title_text())
         top.addWidget(self.title_label)
         top.addStretch(1)
-        self.btn_new_mode = QPushButton("新建模式")
-        self.btn_new_column = QPushButton("新建列")
+        self.btn_new_mode = QPushButton("New Mode")
+        self.btn_new_column = QPushButton("New Column")
         self.btn_pull = QPushButton("Pull")
         self.btn_push = QPushButton("Push")
         for b in (self.btn_new_mode, self.btn_new_column,
@@ -108,21 +118,22 @@ class CornerManagerView(QWidget):
         outer.addLayout(top)
 
         filt = QHBoxLayout()
-        filt.addWidget(QLabel("列筛选:"))
+        filt.addWidget(QLabel("Column filter:"))
         self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText("按名字过滤 corner 列…")
+        self.filter_edit.setPlaceholderText("Filter corner columns by name…")
         filt.addWidget(self.filter_edit)
-        self.btn_filter_set = QPushButton("筛选到选中运行集")
-        self.btn_clear_filter = QPushButton("显示全部列")
+        self.btn_filter_set = QPushButton("Filter to selected run set")
+        self.btn_clear_filter = QPushButton("Show all columns")
         filt.addWidget(self.btn_filter_set)
         filt.addWidget(self.btn_clear_filter)
         outer.addLayout(filt)
 
         rowfilt = QHBoxLayout()
-        rowfilt.addWidget(QLabel("行筛选:"))
+        rowfilt.addWidget(QLabel("Row filter:"))
         self.row_filter_edit = QLineEdit()
         self.row_filter_edit.setPlaceholderText(
-            "按变量名过滤行 — 支持 and / or / 通配 *(如 ldo* or div12)"
+            "Filter rows by variable name — supports and / or / * "
+            "wildcards (e.g. ldo* or div12)"
         )
         rowfilt.addWidget(self.row_filter_edit)
         outer.addLayout(rowfilt)
@@ -131,16 +142,16 @@ class CornerManagerView(QWidget):
 
         left = QWidget()
         left_v = QVBoxLayout(left)
-        left_v.addWidget(QLabel("PVT Profile(语义映射层,只读)"))
+        left_v.addWidget(QLabel("PVT Profile (semantic mapping layer, read-only)"))
         self.profile_list = QListWidget()
         self.profile_list.setMaximumHeight(90)
         left_v.addWidget(self.profile_list)
-        left_v.addWidget(QLabel("模式"))
+        left_v.addWidget(QLabel("Modes"))
         self.modes_list = QListWidget()
         left_v.addWidget(self.modes_list)
-        left_v.addWidget(QLabel("寄存器配置(改一处,所有引用列同步)"))
+        left_v.addWidget(QLabel("Registers (edit once — every referencing column syncs)"))
         self.mode_vars = QTableWidget(0, 2)
-        self.mode_vars.setHorizontalHeaderLabels(["寄存器", "值"])
+        self.mode_vars.setHorizontalHeaderLabels(["Register", "Value"])
         self.mode_vars.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
@@ -148,48 +159,52 @@ class CornerManagerView(QWidget):
         left_v.addWidget(self.mode_vars)
 
         var_hdr = QHBoxLayout()
-        var_hdr.addWidget(QLabel("变体(模式的差量覆盖)"))
-        self.btn_new_variant = QPushButton("新建变体")
+        var_hdr.addWidget(QLabel("Variants (delta overlay on a mode)"))
+        self.btn_new_variant = QPushButton("New Variant")
         var_hdr.addWidget(self.btn_new_variant)
         left_v.addLayout(var_hdr)
         self.variants_list = QListWidget()
         left_v.addWidget(self.variants_list)
         self.variant_vars = QTableWidget(0, 2)
-        self.variant_vars.setHorizontalHeaderLabels(["覆盖寄存器", "绝对值"])
+        self.variant_vars.setHorizontalHeaderLabels(
+            ["Overridden register", "Absolute value"]
+        )
         self.variant_vars.horizontalHeader().setSectionResizeMode(
             QHeaderView.Stretch
         )
         self.variant_vars.verticalHeader().setDefaultSectionSize(24)
         left_v.addWidget(self.variant_vars)
 
-        left_v.addWidget(QLabel("PVT 模板"))
+        left_v.addWidget(QLabel("PVT Templates"))
         self.templates_list = QListWidget()
         left_v.addWidget(self.templates_list)
         tmpl_btns = QHBoxLayout()
-        self.btn_apply_template = QPushButton("套用到模式")
-        self.btn_unbind_template = QPushButton("解绑")
+        self.btn_apply_template = QPushButton("Apply to mode")
+        self.btn_unbind_template = QPushButton("Unbind")
         tmpl_btns.addWidget(self.btn_apply_template)
         tmpl_btns.addWidget(self.btn_unbind_template)
         left_v.addLayout(tmpl_btns)
         lib_btns = QHBoxLayout()
-        self.btn_export_lib = QPushButton("导出模板库")
-        self.btn_import_lib = QPushButton("导入模板库")
+        self.btn_export_lib = QPushButton("Export template library")
+        self.btn_import_lib = QPushButton("Import template library")
         lib_btns.addWidget(self.btn_export_lib)
         lib_btns.addWidget(self.btn_import_lib)
         left_v.addLayout(lib_btns)
 
-        left_v.addWidget(QLabel("复合轴(绑定 var 捆,叉乘算一个轴)"))
+        left_v.addWidget(
+            QLabel("Correlated axes (bound var bundle, cross-product as one axis)")
+        )
         self.axes_list = QListWidget()
         left_v.addWidget(self.axes_list)
 
         rs_hdr = QHBoxLayout()
-        rs_hdr.addWidget(QLabel("运行集(跨模式 corner 勾选)"))
-        self.btn_new_run_set = QPushButton("新建运行集")
+        rs_hdr.addWidget(QLabel("Run sets (cross-mode corner selection)"))
+        self.btn_new_run_set = QPushButton("New Run Set")
         rs_hdr.addWidget(self.btn_new_run_set)
         left_v.addLayout(rs_hdr)
         self.run_sets_list = QListWidget()
         left_v.addWidget(self.run_sets_list)
-        self.btn_apply_run_set = QPushButton("切换到此运行集")
+        self.btn_apply_run_set = QPushButton("Switch to this run set")
         left_v.addWidget(self.btn_apply_run_set)
         splitter.addWidget(left)
 
@@ -199,7 +214,7 @@ class CornerManagerView(QWidget):
         )
         self.table.setModel(self.table_model)
         self.table.verticalHeader().setDefaultSectionSize(24)
-        # Stage 5: drag variable rows to reorder (痛点 g).
+        # Stage 5: drag variable rows to reorder (pain-point g).
         self.table.verticalHeader().setSectionsMovable(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         splitter.addWidget(self.table)
@@ -238,6 +253,33 @@ class CornerManagerView(QWidget):
             lambda: self.push_requested.emit(self._cm)
         )
 
+    # --- model swap ------------------------------------------------------
+
+    def load_model(
+        self, model: CornerModel, profile: object = None,
+        source_path: object = None,
+    ) -> None:
+        """Replace the displayed cornermodel — used when the owning window
+        discovers or opens a different ``.cornermodel.json``. This is a load,
+        not an edit, so ``cornermodel_edited`` does not fire.
+        """
+        self._cm = model
+        self._profile = profile
+        self._source_path = source_path
+        self._set_filter = None
+        self.title_label.setText(self._title_text())
+        self.filter_edit.blockSignals(True)
+        self.row_filter_edit.blockSignals(True)
+        self.filter_edit.clear()
+        self.row_filter_edit.clear()
+        self.filter_edit.blockSignals(False)
+        self.row_filter_edit.blockSignals(False)
+        self.table_model.set_cornermodel(model, profile)
+        self._refresh_side_panels()
+        self._apply_column_filter()
+        self._apply_row_filter()
+        self._refresh_check_status()
+
     # --- modes panel -----------------------------------------------------
 
     def _refresh_modes_panel(self) -> None:
@@ -271,8 +313,8 @@ class CornerManagerView(QWidget):
         if self._profile is None:
             bound = self._cm.pvt_profile
             self.profile_list.addItem(
-                "(未绑定 PVT profile)" if bound is None
-                else f"⚠ 绑定了 profile {bound} 但未加载"
+                "(no PVT profile bound)" if bound is None
+                else f"⚠ profile {bound} bound but not loaded"
             )
             return
         self.profile_list.addItem(f"profile: {self._profile.name}")
@@ -289,7 +331,7 @@ class CornerManagerView(QWidget):
         names = sorted(self._cm.run_sets)
         for name in names:
             count = len(self._cm.run_sets[name].columns)
-            self.run_sets_list.addItem(f"{name}  ({count} 列)")
+            self.run_sets_list.addItem(f"{name}  ({count} cols)")
         if prev_name in names:
             self.run_sets_list.setCurrentRow(names.index(prev_name))
 
@@ -301,14 +343,14 @@ class CornerManagerView(QWidget):
 
     def _on_new_run_set(self) -> None:
         name, ok = QInputDialog.getText(
-            self, "新建运行集", "运行集名 (^[A-Za-z][A-Za-z0-9_]*$):"
+            self, "New Run Set", "Run set name (^[A-Za-z][A-Za-z0-9_]*$):"
         )
         if not ok or not name.strip():
             return
         all_names = [effective_name(c) for c in self._cm.columns]
         text, ok = QInputDialog.getMultiLineText(
-            self, "新建运行集 — 勾选 corner 列",
-            "每行一个 corner 有效名:", "\n".join(all_names),
+            self, "New Run Set — select corner columns",
+            "One corner effective-name per line:", "\n".join(all_names),
         )
         if not ok:
             return
@@ -318,21 +360,25 @@ class CornerManagerView(QWidget):
         try:
             new_cm = add_run_set(self._cm, name.strip(), columns)
         except CornerModelError as exc:
-            QMessageBox.warning(self, "新建运行集失败", str(exc))
+            QMessageBox.warning(self, "New run set failed", str(exc))
             return
         self._apply(new_cm)
 
     def _on_apply_run_set(self) -> None:
         name = self._selected_run_set_name()
         if name is None:
-            QMessageBox.warning(self, "切换运行集", "请先选中一个运行集。")
+            QMessageBox.warning(
+                self, "Switch run set", "Select a run set first."
+            )
             return
         self._apply(apply_run_set(self._cm, name))
 
     def _on_filter_set(self) -> None:
         name = self._selected_run_set_name()
         if name is None:
-            QMessageBox.warning(self, "列筛选", "请先选中一个运行集。")
+            QMessageBox.warning(
+                self, "Column filter", "Select a run set first."
+            )
             return
         self._set_filter = name
         self._apply_column_filter()
@@ -413,28 +459,29 @@ class CornerManagerView(QWidget):
                 self._cm, variant_name, var, new_value
             )
         except CornerModelError as exc:
-            QMessageBox.warning(self, "改变体失败", str(exc))
+            QMessageBox.warning(self, "Edit variant failed", str(exc))
             self._refresh_variants_panel()
             return
         self._apply(new_cm)
 
     def _on_new_variant(self) -> None:
         if not self._cm.modes:
-            QMessageBox.warning(self, "新建变体", "请先新建一个模式。")
+            QMessageBox.warning(self, "New Variant", "Create a mode first.")
             return
         base, ok = QInputDialog.getItem(
-            self, "新建变体", "基础模式:", sorted(self._cm.modes), 0, False
+            self, "New Variant", "Base mode:", sorted(self._cm.modes), 0, False
         )
         if not ok:
             return
         name, ok = QInputDialog.getText(
-            self, "新建变体", "变体名 (^[A-Za-z][A-Za-z0-9_]*$):"
+            self, "New Variant", "Variant name (^[A-Za-z][A-Za-z0-9_]*$):"
         )
         if not ok or not name.strip():
             return
         text, ok = QInputDialog.getMultiLineText(
-            self, "新建变体 — 覆盖寄存器",
-            "每行一个 var=绝对值(只能覆盖基础模式已有寄存器):",
+            self, "New Variant — override registers",
+            "One var=absolute-value per line (may only override "
+            "registers the base mode already has):",
             "d_div12_en=0",
         )
         if not ok:
@@ -445,7 +492,7 @@ class CornerManagerView(QWidget):
                 name=name.strip(), base_mode=base, vars=overlay
             ))
         except (ValueError, CornerModelError) as exc:
-            QMessageBox.warning(self, "新建变体失败", str(exc))
+            QMessageBox.warning(self, "New variant failed", str(exc))
             return
         self._apply(new_cm)
 
@@ -465,7 +512,7 @@ class CornerManagerView(QWidget):
         self.axes_list.clear()
         for name, axis in sorted(self._cm.correlated_axes.items()):
             self.axes_list.addItem(
-                f"{name}  ({len(axis.tuples)} 点 · "
+                f"{name}  ({len(axis.tuples)} pts · "
                 f"{'+'.join(axis.members)})"
             )
 
@@ -509,7 +556,7 @@ class CornerManagerView(QWidget):
                 self._cm, mode_item.text(), var, new_value
             )
         except CornerModelError as exc:
-            QMessageBox.warning(self, "改寄存器失败", str(exc))
+            QMessageBox.warning(self, "Edit register failed", str(exc))
             self._refresh_modes_panel()
             return
         self._apply(new_cm)
@@ -541,11 +588,11 @@ class CornerManagerView(QWidget):
     def _refresh_check_status(self) -> None:
         issues = check_cornermodel(self._cm, profile=self._profile)
         if not issues:
-            self.check_label.setText("校验: 无问题")
+            self.check_label.setText("Check: no issues")
         else:
             head = "; ".join(i.message for i in issues[:2])
             self.check_label.setText(
-                f"校验: {len(issues)} 个问题 — {head}"
+                f"Check: {len(issues)} issue(s) — {head}"
             )
 
     @staticmethod
@@ -594,7 +641,8 @@ class CornerManagerView(QWidget):
 
     def _on_export_library(self) -> None:
         path, ok = QInputDialog.getText(
-            self, "导出模板库", "写到 .cornerlib.json 路径:"
+            self, "Export template library",
+            "Path to write the .cornerlib.json:"
         )
         if not ok or not path.strip():
             return
@@ -612,11 +660,13 @@ class CornerManagerView(QWidget):
                 encoding="utf-8",
             )
         except (CornerModelError, OSError) as exc:
-            QMessageBox.warning(self, "导出模板库失败", str(exc))
+            QMessageBox.warning(
+                self, "Export template library failed", str(exc)
+            )
 
     def _on_import_library(self) -> None:
         path, ok = QInputDialog.getText(
-            self, "导入模板库", ".cornerlib.json 路径:"
+            self, "Import template library", "Path to the .cornerlib.json:"
         )
         if not ok or not path.strip():
             return
@@ -624,27 +674,34 @@ class CornerManagerView(QWidget):
             lib = load_library(path.strip())
             new_cm = import_library(self._cm, lib)
         except CornerModelError as exc:
-            QMessageBox.warning(self, "导入模板库失败", str(exc))
+            QMessageBox.warning(
+                self, "Import template library failed", str(exc)
+            )
             return
         self._apply(new_cm)
 
     # --- templates: apply / unbind --------------------------------------
 
-    _VARIANT_PREFIX = "变体: "
+    _VARIANT_PREFIX = "Variant: "
 
     def _on_apply_template(self) -> None:
         tmpl = self._selected_template_name()
         if tmpl is None:
-            QMessageBox.warning(self, "套用模板", "请先选中一个模板。")
+            QMessageBox.warning(
+                self, "Apply template", "Select a template first."
+            )
             return
         if not self._cm.modes:
-            QMessageBox.warning(self, "套用模板", "请先新建一个模式。")
+            QMessageBox.warning(
+                self, "Apply template", "Create a mode first."
+            )
             return
         targets = sorted(self._cm.modes) + [
             self._VARIANT_PREFIX + v for v in sorted(self._cm.variants)
         ]
         target, ok = QInputDialog.getItem(
-            self, "套用模板", f"把模板 {tmpl} 套用到(模式 / 变体):",
+            self, "Apply template",
+            f"Apply template {tmpl} to (mode / variant):",
             targets, 0, False,
         )
         if not ok:
@@ -652,7 +709,7 @@ class CornerManagerView(QWidget):
         try:
             new_cm = self._apply_template_to_target(tmpl, target)
         except CornerModelError as exc:
-            QMessageBox.warning(self, "套用模板失败", str(exc))
+            QMessageBox.warning(self, "Apply template failed", str(exc))
             return
         self._apply(new_cm)
 
@@ -668,14 +725,17 @@ class CornerManagerView(QWidget):
     def _on_unbind_template(self) -> None:
         tmpl = self._selected_template_name()
         if tmpl is None:
-            QMessageBox.warning(self, "解绑模板", "请先选中一个模板。")
+            QMessageBox.warning(
+                self, "Unbind template", "Select a template first."
+            )
             return
         bound = [
             b for b in self._cm.template_bindings if b.template == tmpl
         ]
         if not bound:
             QMessageBox.warning(
-                self, "解绑模板", f"模板 {tmpl} 没有绑定任何模式 / 变体。"
+                self, "Unbind template",
+                f"Template {tmpl} is not bound to any mode / variant."
             )
             return
         labels = [
@@ -683,7 +743,8 @@ class CornerManagerView(QWidget):
             for b in bound
         ]
         label, ok = QInputDialog.getItem(
-            self, "解绑模板", f"从哪个目标解绑 {tmpl}(列冻结保留):",
+            self, "Unbind template",
+            f"Unbind {tmpl} from which target (its columns stay, frozen):",
             labels, 0, False,
         )
         if not ok:
@@ -697,52 +758,52 @@ class CornerManagerView(QWidget):
 
     def _on_new_mode(self) -> None:
         name, ok = QInputDialog.getText(
-            self, "新建模式", "模式名 (^[A-Za-z][A-Za-z0-9_]*$):"
+            self, "New Mode", "Mode name (^[A-Za-z][A-Za-z0-9_]*$):"
         )
         if not ok or not name.strip():
             return
         text, ok = QInputDialog.getMultiLineText(
-            self, "新建模式 — 寄存器配置",
-            "每行一个 var=value:", "d_en_dummy=1",
+            self, "New Mode — register settings",
+            "One var=value per line:", "d_en_dummy=1",
         )
         if not ok:
             return
         try:
             mode_vars = _parse_var_lines(text)
         except ValueError as exc:
-            QMessageBox.warning(self, "新建模式失败", str(exc))
+            QMessageBox.warning(self, "New mode failed", str(exc))
             return
         try:
             new_cm = add_mode(self._cm, name.strip(), mode_vars)
         except CornerModelError as exc:
-            QMessageBox.warning(self, "新建模式失败", str(exc))
+            QMessageBox.warning(self, "New mode failed", str(exc))
             return
         self._apply(new_cm)
 
     def _on_new_column(self) -> None:
         if not self._cm.modes:
-            QMessageBox.warning(self, "新建列", "请先新建一个模式。")
+            QMessageBox.warning(self, "New Column", "Create a mode first.")
             return
         mode, ok = QInputDialog.getItem(
-            self, "新建列", "模式:", sorted(self._cm.modes), 0, False
+            self, "New Column", "Mode:", sorted(self._cm.modes), 0, False
         )
         if not ok:
             return
         label, ok = QInputDialog.getText(
-            self, "新建列", "PVT 标签 (^[A-Za-z0-9_]+$):"
+            self, "New Column", "PVT label (^[A-Za-z0-9_]+$):"
         )
         if not ok or not label.strip():
             return
         text, ok = QInputDialog.getMultiLineText(
-            self, "新建列 — PVT 变量",
-            "每行一个 var=value(可留空):", "temperature=55",
+            self, "New Column — PVT variables",
+            "One var=value per line (may be empty):", "temperature=55",
         )
         if not ok:
             return
         try:
             pvt = _parse_var_lines(text)
         except ValueError as exc:
-            QMessageBox.warning(self, "新建列失败", str(exc))
+            QMessageBox.warning(self, "New column failed", str(exc))
             return
         column = Column(
             mode=mode,
@@ -754,7 +815,7 @@ class CornerManagerView(QWidget):
         try:
             new_cm = add_column(self._cm, column)
         except CornerModelError as exc:
-            QMessageBox.warning(self, "新建列失败", str(exc))
+            QMessageBox.warning(self, "New column failed", str(exc))
             return
         self._apply(new_cm)
 
@@ -772,10 +833,10 @@ def _parse_var_lines(text: str) -> dict[str, str]:
         if not line:
             continue
         if "=" not in line:
-            raise ValueError(f"行 {line!r} 不是 var=value 格式")
+            raise ValueError(f"line {line!r} is not in var=value format")
         key, _, value = line.partition("=")
         key, value = key.strip(), value.strip()
         if not key:
-            raise ValueError(f"行 {line!r} 缺少 var 名")
+            raise ValueError(f"line {line!r} is missing the var name")
         out[key] = value
     return out

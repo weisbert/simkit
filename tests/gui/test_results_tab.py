@@ -289,7 +289,7 @@ def test_show_review_summary_updates_header_and_clears_run():
 def test_show_review_summary_flags_parse_error():
     t = ResultsTab()
     t.show_review_summary("bad", 0, parse_error="invalid JSON")
-    assert "解析失败" in t.header_label.text()
+    assert "parse failed" in t.header_label.text()
 
 
 # --- G-1c: zero-spec hint strip ------------------------------------------

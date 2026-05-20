@@ -33,11 +33,11 @@ _KEY_COLUMNS: tuple[str, ...] = ("test", "corner", "point", "output")
 
 _DIR_GLYPH = {"up": "▲", "down": "▼", "mixed": "≈", "flat": "=", None: ""}
 _DIR_TOOLTIP = {
-    "up": "每一步都上升",
-    "down": "每一步都下降",
-    "mixed": "方向不一致(有升有降)",
-    "flat": "数值未变",
-    None: "数值列不足两个,无法判断趋势",
+    "up": "Rises at every step",
+    "down": "Falls at every step",
+    "mixed": "Inconsistent direction (some up, some down)",
+    "flat": "Value unchanged",
+    None: "Fewer than two value columns — cannot determine a trend",
 }
 
 

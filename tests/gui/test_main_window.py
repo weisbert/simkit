@@ -2,7 +2,7 @@
 
 Pins the contract between :class:`simkit.gui.main_window.MainWindow` and
 the right-panel tab widgets (``ResultsTab`` / ``SummaryTab`` /
-``CornersEditor`` / ``MeasuresEditor``) so future refactors of either
+``CornerManagerView`` / ``MeasuresEditor``) so future refactors of either
 side surface as test failures rather than silent UX regressions.
 
 Scope (Stage 2 — log-only handlers): we only verify that:
@@ -30,7 +30,7 @@ pytest.importorskip("PyQt5")
 
 
 from simkit.gui.main_window import MainWindow  # noqa: E402
-from simkit.gui.views.corners_editor import CornersEditor  # noqa: E402
+from simkit.gui.views.corner_manager import CornerManagerView  # noqa: E402
 from simkit.gui.views.measures_editor import MeasuresEditor  # noqa: E402
 from simkit.gui.views.results_tab import ResultsTab  # noqa: E402
 from simkit.gui.views.summary_tab import SummaryTab  # noqa: E402
@@ -52,8 +52,20 @@ def test_tab_widgets_are_the_right_classes(qtbot):
     qtbot.addWidget(w)
     assert isinstance(w.results_tab, ResultsTab)
     assert isinstance(w.summary_tab, SummaryTab)
-    assert isinstance(w.corners_editor, CornersEditor)
+    assert isinstance(w.corner_manager, CornerManagerView)
     assert isinstance(w.measures_editor, MeasuresEditor)
+
+
+def test_corners_tab_is_a_usable_corner_manager_at_startup(qtbot):
+    """The Corners tab hosts the Corner Manager and is present + usable
+    on startup with no load step (user requirement 2026-05-20)."""
+    w = MainWindow()
+    qtbot.addWidget(w)
+    assert w.right_panel.widget(2) is w.corner_manager
+    # An empty-but-valid cornermodel — the manager works immediately.
+    cm = w.corner_manager.cornermodel()
+    assert cm.columns == ()
+    assert w.corner_manager.btn_new_mode.isEnabled()
 
 
 def test_run_requested_logs_to_bottom_panel(qtbot):
@@ -65,32 +77,19 @@ def test_run_requested_logs_to_bottom_panel(qtbot):
     assert "/tmp/foo.review.json" in text
 
 
-def test_corners_pull_requested_logs(qtbot):
+def test_corner_manager_pull_requested_logs(qtbot):
     w = MainWindow()
     qtbot.addWidget(w)
-    w.corners_editor.pull_requested.emit()
+    w.corner_manager.pull_requested.emit()
+    # No bridge/module wired → routes through _can_dispatch_bridge.
     assert "pull" in w.bottom_log.toPlainText().lower()
 
 
-def test_corners_push_requested_logs_row_count(qtbot):
+def test_corner_manager_push_requested_logs(qtbot):
     w = MainWindow()
     qtbot.addWidget(w)
-    w.corners_editor.push_requested.emit([{"row_name": "a"}, {"row_name": "b"}])
-    text = w.bottom_log.toPlainText()
-    assert "push" in text.lower()
-    assert "2 rows" in text
-
-
-def test_corners_divergence_signals_all_log(qtbot):
-    w = MainWindow()
-    qtbot.addWidget(w)
-    w.corners_editor.show_diff.emit()
-    w.corners_editor.pull_overrides_sidecar.emit()
-    w.corners_editor.keep_sidecar.emit()
-    text = w.bottom_log.toPlainText().lower()
-    assert "show-diff" in text
-    assert "pull-overrides-sidecar" in text
-    assert "keep-sidecar" in text
+    w.corner_manager.push_requested.emit(w.corner_manager.cornermodel())
+    assert "push" in w.bottom_log.toPlainText().lower()
 
 
 def test_measures_apply_requested_logs_row_count(qtbot):
@@ -270,11 +269,11 @@ def test_bridge_status_dot_tooltip_explains_each_state(qtbot):
     qtbot.addWidget(w)
     w.set_bridge_status(BridgeStatus.RED)
     red_tip = w.status_dot.toolTip()
-    assert "断开" in red_tip and "Restart bridge" in red_tip
+    assert "down" in red_tip and "Restart bridge" in red_tip
     w.set_bridge_status(BridgeStatus.GREEN)
-    assert "已连接" in w.status_dot.toolTip()
+    assert "connected" in w.status_dot.toolTip()
     w.set_bridge_status(BridgeStatus.AMBER)
-    assert "未确认" in w.status_dot.toolTip()
+    assert "unconfirmed" in w.status_dot.toolTip()
 
 
 # --- G-7: vocabulary tooltips + glossary -------------------------------------
@@ -550,7 +549,7 @@ def test_warn_if_op_stalled_logs_when_op_still_pending(qtbot):
         "on_ok": None, "on_err": None, "func": "pvt_corners_push",
     }
     w._warn_if_op_stalled(99)
-    assert "可能卡住" in w.bottom_log.toPlainText()
+    assert "may be stuck" in w.bottom_log.toPlainText()
 
 
 def test_warn_if_op_stalled_silent_when_op_completed(qtbot):
@@ -561,10 +560,8 @@ def test_warn_if_op_stalled_silent_when_op_completed(qtbot):
     assert w.bottom_log.toPlainText() == before
 
 
-def test_open_corner_model_adds_tab(qtbot, tmp_path):
+def test_open_corner_model_loads_into_the_single_corners_tab(qtbot, tmp_path):
     import json
-
-    from simkit.gui.views.corner_manager import CornerManagerView
 
     w = MainWindow()
     qtbot.addWidget(w)
@@ -580,10 +577,12 @@ def test_open_corner_model_adds_tab(qtbot, tmp_path):
     }), encoding="utf-8")
 
     view = w.open_corner_model(cm_path)
-    assert isinstance(view, CornerManagerView)
-    titles = [w.right_panel.tabText(i) for i in range(w.right_panel.count())]
-    assert "Corner: demo" in titles
-    assert w.right_panel.currentWidget() is view
+    # Loads into the existing Corners tab — no new tab is added.
+    assert view is w.corner_manager
+    assert w.right_panel.count() == 4
+    assert w.right_panel.tabText(2) == "Corners"
+    assert w.right_panel.currentWidget() is w.corner_manager
+    assert w.corner_manager.cornermodel().name == "demo"
 
 
 def test_open_corner_model_bad_file_logs_and_returns_none(qtbot, tmp_path):

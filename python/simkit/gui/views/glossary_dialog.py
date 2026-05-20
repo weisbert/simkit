@@ -2,7 +2,7 @@
 
 The backtest found that terms like *review*, *union*, *bundle* and
 *session* have no in-app explanation; "review" especially misreads as a
-meeting. This dialog is reachable from Help ▸ 术语表 and the same entries
+meeting. This dialog is reachable from Help ▸ Glossary and the same entries
 back the per-widget tooltips.
 """
 
@@ -21,32 +21,38 @@ from PyQt5.QtWidgets import (
 
 # (term, one-line definition). Order is roughly "outermost concept first".
 GLOSSARY: tuple[tuple[str, str], ...] = (
-    ("模块 (module)",
-     "一个 .pvtproject 工作区，对应一个被测电路。simkit 里所有 review / "
-     "union / bundle / 运行历史都属于某个模块。"),
+    ("Module",
+     "A .pvtproject workspace, one per circuit under test. Every review / "
+     "union / bundle / run history in simkit belongs to a module."),
     ("Bridge",
-     "simkit 与 Cadence Virtuoso 之间的 SKILL 通信通道。顶部的状态点显示"
-     "它是否连通；断开时 Pull / Run / Apply 不可用。"),
+     "The SKILL communication channel between simkit and Cadence Virtuoso. "
+     "The status dot at the top shows whether it is connected; when down, "
+     "Pull / Run / Apply are unavailable."),
     ("Session",
-     "一个已打开的 Maestro 仿真窗口的名字（如 fnxSession0）。每次 Pull / "
-     "Run / Apply 都要指明操作哪个 session。"),
-    ("Review（评审运行集）",
-     "一份 .review.json，把若干 item（测试 + 角组 + 测量包）打包成一次可"
-     "重复的批量仿真。注意：不是「开会评审」，而是「一组要跑的东西」。"),
-    ("Union（角组 / PVT 网格）",
-     "一份 .union.json，列出要扫的工艺 / 电压 / 温度角（process / voltage "
-     "/ temperature）。"),
-    ("Bundle（测量包）",
-     "一份 .measure.json，定义要从仿真结果里取哪些输出量。"),
-    ("Template（测量模板）",
-     "参数化的测量定义；bundle 通过填入参数来复用同一个模板。"),
-    ("Signal group（信号组）",
-     "一组命名信号。模板里用 $SIG 占位，由信号组展开成每个信号一行。"),
-    ("Raw（原始表达式条目）",
-     "bundle 里直接写一条 OCEAN / 计算表达式的条目，不经过模板。"),
-    ("Sweep（扫描条目）",
-     "bundle 里对某个参数取多个值的条目，展开成多个输出（如 PN_1M / "
-     "PN_10M / PN_100M）。"),
+     "The name of an open Maestro simulation window (e.g. fnxSession0). "
+     "Every Pull / Run / Apply must name which session to act on."),
+    ("Review (a run set)",
+     "A .review.json that bundles several items (test + corner group + "
+     "measurement bundle) into one repeatable batch simulation. Note: it "
+     "is not a meeting — it is 'a set of things to run'."),
+    ("Union (corner group / PVT grid)",
+     "A .union.json listing the process / voltage / temperature corners "
+     "to sweep."),
+    ("Bundle (measurement bundle)",
+     "A .measure.json that defines which output quantities to extract "
+     "from simulation results."),
+    ("Template (measurement template)",
+     "A parameterised measurement definition; a bundle reuses one "
+     "template by filling in parameters."),
+    ("Signal group",
+     "A set of named signals. A template uses $SIG as a placeholder, "
+     "which the signal group expands into one row per signal."),
+    ("Raw (raw-expression entry)",
+     "A bundle entry written as a direct OCEAN / calculator expression, "
+     "bypassing templates."),
+    ("Sweep (sweep entry)",
+     "A bundle entry that takes several values for one parameter, "
+     "expanding into several outputs (e.g. PN_1M / PN_10M / PN_100M)."),
 )
 
 
@@ -66,7 +72,7 @@ class GlossaryDialog(QDialog):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("simkit — 术语表")
+        self.setWindowTitle("simkit — Glossary")
         self.setMinimumSize(560, 480)
 
         self.browser = QTextBrowser(self)

@@ -189,7 +189,7 @@ class TrendTabConsistencyStripTests(unittest.TestCase):
         )
         tab = TrendTab(res)
         self.assertFalse(tab.consistency_label.isHidden())
-        self.assertIn("条件不一致", tab.consistency_label.text())
+        self.assertIn("Inconsistent", tab.consistency_label.text())
 
     def test_strip_shown_when_a_run_lacks_provenance(self):
         res = _result(

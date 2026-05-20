@@ -63,18 +63,18 @@ class ExpansionTooltipTests(unittest.TestCase):
         row = {"row_name": "TT_pvt", "process": "tt,ss,ff",
                "vdd": "1.0", "model_file": "/pdk/m.scs"}
         tip = expansion_tooltip(row)
-        self.assertIn("3 个 sub-corner", tip)
+        self.assertIn("3 sub-corners", tip)
         self.assertIn("TT_pvt_0", tip)
         self.assertIn("TT_pvt_2", tip)
 
     def test_tooltip_for_incomplete_row(self):
         tip = expansion_tooltip({"row_name": "draft"})
-        self.assertIn("还不是一个完整的 corner", tip)
+        self.assertIn("not a complete corner", tip)
 
     def test_tooltip_single_corner(self):
         tip = expansion_tooltip({"row_name": "nom", "process": "tt",
                                  "model_file": "/m.scs"})
-        self.assertIn("1 个 corner", tip)
+        self.assertIn("1 corner", tip)
 
 
 class CoherenceWarningTests(unittest.TestCase):
@@ -85,14 +85,14 @@ class CoherenceWarningTests(unittest.TestCase):
         warns = coherence_warnings(row)
         self.assertEqual(len(warns), 1)
         self.assertIn("extra_vars", warns[0])
-        self.assertIn("vdd 列为空", warns[0])
+        self.assertIn("vdd column is empty", warns[0])
 
     def test_supply_in_both_places_warns(self):
         row = {"row_name": "C2", "process": "tt", "vdd": "1.0",
                "model_file": "/m.scs", "extra_vars": "VDD=3"}
         warns = coherence_warnings(row)
         self.assertEqual(len(warns), 1)
-        self.assertIn("同时定义", warns[0])
+        self.assertIn("defined in both", warns[0])
 
     def test_supply_only_in_vdd_column_is_clean(self):
         row = {"row_name": "C3", "process": "tt", "vdd": "1.0",

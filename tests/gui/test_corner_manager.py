@@ -326,7 +326,7 @@ class CornerManagerStage3Test(unittest.TestCase):
         self.view.templates_list.setCurrentRow(0)
         with mock.patch.object(
             cm_mod.QInputDialog, "getItem",
-            return_value=("变体: BT_2G_RX_PN", True),
+            return_value=("Variant: BT_2G_RX_PN", True),
         ):
             self.view._on_apply_template()
         names = {
@@ -497,7 +497,7 @@ class CornerManagerStage5Test(unittest.TestCase):
         self.view.hide()
 
     def test_check_status_label_present(self):
-        self.assertIn("校验", self.view.check_label.text())
+        self.assertIn("Check", self.view.check_label.text())
 
     def test_row_drag_persists_var_order(self):
         self.view.show()
@@ -607,7 +607,7 @@ class CornerManagerStage6Test(unittest.TestCase):
             view.profile_list.item(i).text()
             for i in range(view.profile_list.count())
         ]
-        self.assertTrue(any("未加载" in r for r in rows))
+        self.assertTrue(any("not loaded" in r for r in rows))
 
 
 if __name__ == "__main__":

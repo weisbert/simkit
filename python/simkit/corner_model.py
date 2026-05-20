@@ -1219,6 +1219,42 @@ def make_unmanaged_column(row: UnionRow) -> Column:
     )
 
 
+def empty_cornermodel(
+    name: str = "corners", project: str = "", testbench_id: str = "unset"
+) -> CornerModel:
+    """A blank but valid cornermodel — zero modes, zero columns.
+
+    The GUI's Corners tab opens on one of these so the corner manager is
+    always present and usable without a load step (the user can start
+    creating modes / columns immediately). ``testbench_id`` defaults to the
+    ``"unset"`` sentinel so the model stays schema-valid and round-trips
+    through ``save_cornermodel`` / ``load_cornermodel`` before the real
+    Maestro testbench is known (a Pull replaces it).
+    """
+    return CornerModel(
+        cornermodel_schema_version=1,
+        name=name,
+        project=project,
+        testbench_id=testbench_id or "unset",
+        modes={},
+        columns=(),
+    )
+
+
+def cornermodel_from_union(union: Union, name: str = "corners") -> CornerModel:
+    """Seed a cornermodel from a ``Union`` — every union row becomes an
+    unmanaged column. Used to populate the Corners tab from Maestro's
+    current corners when the project has no ``.cornermodel.json`` yet."""
+    return CornerModel(
+        cornermodel_schema_version=1,
+        name=name,
+        project=union.project,
+        testbench_id=union.testbench_id,
+        modes={},
+        columns=tuple(make_unmanaged_column(r) for r in union.rows),
+    )
+
+
 @dataclass(frozen=True)
 class AdoptionSplit:
     """Preview of a §6.3 收编: how an unmanaged column's vars split when

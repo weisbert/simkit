@@ -64,14 +64,11 @@ from simkit.gui.loaders import (
     LoadedHistoryRun,
     LoadedModule,
     LoadedReview,
-    editor_rows_to_union_rows,
     load_bundle_for_editor,
     snapshot_to_bundle_dict,
-    union_to_editor_rows,
 )
 from simkit.gui.tree_model import ProjectTreeModel
 from simkit.gui.views.corner_manager import CornerManagerView
-from simkit.gui.views.corners_editor import CornersEditor
 from simkit.gui.views.diff_tab import DiffTab
 from simkit.gui.views.trend_tab import TrendTab
 from simkit.gui.views.measures_editor import MeasuresEditor
@@ -98,18 +95,20 @@ _DOT_COLORS = {
 # what, if anything, to do about it.
 _BRIDGE_TOOLTIPS = {
     BridgeStatus.GREEN: (
-        "Bridge 已连接 — 与 Cadence Virtuoso 的 SKILL 通信正常，"
-        "Pull / Run / Apply 可用。"
+        "Bridge connected — SKILL communication with Cadence Virtuoso "
+        "is healthy; Pull / Run / Apply are available."
     ),
     BridgeStatus.AMBER: (
-        "Bridge 未确认 — 正在探测 Cadence SKILL 连接。"
-        "短暂出现属正常；若持续琥珀色，点「Restart bridge」强制重探。"
+        "Bridge unconfirmed — probing the Cadence SKILL connection. "
+        "A brief amber is normal; if it stays amber, click "
+        "'Restart bridge' to force a re-probe."
     ),
     BridgeStatus.RED: (
-        "Bridge 断开 — 连不上 Cadence SKILL，所有实时操作不可用。"
-        "点「Restart bridge」；若仍为红色，说明 Virtuoso 端 pyServer "
-        "没起，在 CIW 里运行 "
-        "(pyKillServer)(pyStartServer ?python \"/usr/bin/python3\") 后再点。"
+        "Bridge down — cannot reach Cadence SKILL; all live operations "
+        "are unavailable. Click 'Restart bridge'; if it stays red the "
+        "Virtuoso pyServer is not running — run "
+        "(pyKillServer)(pyStartServer ?python \"/usr/bin/python3\") "
+        "in the CIW, then click again."
     ),
 }
 
@@ -152,9 +151,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self._sync_history_action)
 
         help_menu = menu_bar.addMenu("&Help")
-        self._glossary_action = QAction("术语表 (Glossary)…", self)
+        self._glossary_action = QAction("Glossary…", self)
         self._glossary_action.setToolTip(
-            "解释 module / session / review / union / bundle 等术语"
+            "Explains module / session / review / union / bundle and other terms"
         )
         self._glossary_action.triggered.connect(self._on_show_glossary)
         help_menu.addAction(self._glossary_action)
@@ -181,7 +180,7 @@ class MainWindow(QMainWindow):
         self.module_selector = QWidget(objectName="moduleSelector")
         ms_layout = QHBoxLayout(self.module_selector)
         ms_layout.setContentsMargins(0, 0, 0, 0)
-        self.module_label = QLabel("未打开模块 — File ▸ Open Module… (Ctrl+O)")
+        self.module_label = QLabel("No module open — File ▸ Open Module… (Ctrl+O)")
         ms_layout.addWidget(self.module_label)
         top_bar_layout.addWidget(self.module_selector)
 
@@ -193,8 +192,9 @@ class MainWindow(QMainWindow):
         self.session_input = QLineEdit(objectName="sessionInput")
         self.session_input.setPlaceholderText("e.g. fnxSession0")
         self.session_input.setToolTip(
-            "Maestro session — 一个已打开的 Maestro 仿真窗口的名字。"
-            "Pull / Run / Apply 都对这个 session 操作；留空则无法运行。"
+            "Maestro session — the name of an open Maestro simulation "
+            "window. Pull / Run / Apply all act on this session; "
+            "leave it blank and runs cannot start."
         )
         self.session_input.setFixedWidth(160)
         top_bar_layout.addWidget(self.session_input)
@@ -257,19 +257,19 @@ class MainWindow(QMainWindow):
 
         self.results_tab = ResultsTab()
         self.summary_tab = SummaryTab()
-        self.corners_editor = CornersEditor()
         self.measures_editor = MeasuresEditor()
 
-        # Right-click on corner-table rows: Duplicate / Delete (faster than
-        # the bottom button row for power users).
-        self.corners_editor.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.corners_editor.table.customContextMenuRequested.connect(
-            self._on_corners_table_context_menu
-        )
+        # The Corners tab always hosts the Corner Manager — present and
+        # usable on startup with no load step. It opens on an empty
+        # cornermodel; load_module discovers/seeds the project's real one.
+        from simkit.corner_model import empty_cornermodel
+        self.corner_manager = CornerManagerView(empty_cornermodel())
+        # Where the displayed cornermodel persists; set by load_module.
+        self._cornermodel_path: Optional[Path] = None
 
         self.right_panel.addTab(self.results_tab, "Results")
         self.right_panel.addTab(self.summary_tab, "Summary")
-        self.right_panel.addTab(self.corners_editor, "Corners")
+        self.right_panel.addTab(self.corner_manager, "Corners")
         self.right_panel.addTab(self.measures_editor, "Measures")
 
         # --- editor signal wiring ---------------------------------------
@@ -277,13 +277,15 @@ class MainWindow(QMainWindow):
         self.results_tab.compare_requested.connect(self._on_compare_requested)
         self.results_tab.baseline_pinned.connect(self._on_baseline_pinned)
         self.results_tab.set_spec_requested.connect(self._on_set_spec_requested)
-        self.corners_editor.pull_requested.connect(self._on_corners_pull_requested)
-        self.corners_editor.push_requested.connect(self._on_corners_push_requested)
-        self.corners_editor.show_diff.connect(self._on_corners_show_diff)
-        self.corners_editor.pull_overrides_sidecar.connect(
-            self._on_corners_pull_overrides_sidecar
+        self.corner_manager.pull_requested.connect(self._on_corner_model_pull)
+        self.corner_manager.push_requested.connect(
+            lambda cm: self._on_corner_model_push(
+                cm, self.corner_manager.profile()
+            )
         )
-        self.corners_editor.keep_sidecar.connect(self._on_corners_keep_sidecar)
+        self.corner_manager.cornermodel_edited.connect(
+            self._on_cornermodel_edited
+        )
         self.measures_editor.apply_requested.connect(self._on_measures_apply_requested)
         self.measures_editor.pull_requested.connect(self._on_measures_pull_requested)
 
@@ -347,7 +349,7 @@ class MainWindow(QMainWindow):
                 )
 
     def _on_show_glossary(self) -> None:
-        """Help ▸ 术语表 — open the vocabulary glossary dialog (G-7)."""
+        """Help ▸ Glossary — open the vocabulary glossary dialog (G-7)."""
         GlossaryDialog(self).exec_()
 
     def _on_restart_bridge_clicked(self) -> None:
@@ -480,11 +482,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"simkit — {module.project_name}")
         self._tree_model.populate(module)
         self.left_tree.expandAll()
-        self.corners_editor.set_project_root(module.project_root)
 
-        # Auto-load the default union/bundle if exactly one candidate each.
-        if module.union_default is not None:
-            self._load_union_from_disk(module.union_default)
+        # Populate the Corners tab — discover the project's cornermodel,
+        # else seed one so the corner manager is never empty/blank.
+        self._discover_cornermodel(module)
+
+        # Auto-load the default bundle if exactly one candidate.
         if module.bundle_default is not None:
             self._load_bundle_from_disk(module.bundle_default)
 
@@ -515,9 +518,9 @@ class MainWindow(QMainWindow):
         )
         if not pvtproject_path.is_file():
             self._warn(
-                "不是 simkit 模块",
-                f"{module_dir}\n\n该目录下没有 .pvtproject 文件，"
-                f"不是一个 simkit 模块。",
+                "Not a simkit module",
+                f"{module_dir}\n\nThis directory has no .pvtproject file — "
+                f"it is not a simkit module.",
             )
             self.append_log(f"[open-module] no .pvtproject under {module_dir}")
             return
@@ -536,7 +539,9 @@ class MainWindow(QMainWindow):
     # --- Phase 5 Corner Manager -----------------------------------------
 
     def _on_open_corner_model(self) -> None:
-        """File > Open Corner Model… — pick a .cornermodel.json sidecar."""
+        """File > Open Corner Model… — optional: load a *different*
+        .cornermodel.json into the Corners tab. Normal use needs no load
+        step; load_module already populates the tab on open."""
         chosen, _ = QFileDialog.getOpenFileName(
             self, "Open Corner Model — select a .cornermodel.json",
             str(Path.home()), "Corner model (*.cornermodel.json)",
@@ -545,10 +550,11 @@ class MainWindow(QMainWindow):
             self.open_corner_model(Path(chosen))
 
     def open_corner_model(self, path: Path) -> Optional[CornerManagerView]:
-        """Load a ``.cornermodel.json`` into a new Corner Manager tab.
+        """Load a ``.cornermodel.json`` into the (single) Corners tab.
 
-        Returns the view (or ``None`` on load failure). Separate from the
-        QFileDialog handler so it is testable without a modal.
+        Returns the Corner Manager view, or ``None`` on load failure.
+        Separate from the QFileDialog handler so it is testable without
+        a modal.
         """
         from simkit.corner_model import CornerModelError, load_cornermodel
         try:
@@ -558,15 +564,102 @@ class MainWindow(QMainWindow):
             self.append_log(f"[corner-model] load failed: {exc}")
             return None
         profile = self._load_bound_profile(cm, Path(path))
-        view = CornerManagerView(cm, profile)
-        view.push_requested.connect(
-            lambda model, v=view: self._on_corner_model_push(model, v.profile())
-        )
-        view.pull_requested.connect(self._on_corner_model_pull)
-        idx = self.right_panel.addTab(view, f"Corner: {cm.name}")
-        self.right_panel.setCurrentIndex(idx)
+        self.corner_manager.load_model(cm, profile, Path(path))
+        self._cornermodel_path = Path(path)
+        self.right_panel.setCurrentWidget(self.corner_manager)
         self.append_log(f"[corner-model] opened {path}")
-        return view
+        return self.corner_manager
+
+    def _discover_cornermodel(self, module: LoadedModule) -> None:
+        """Populate the Corners tab when a module loads — no load step.
+
+        Precedence: (1) an existing ``.cornermodel.json`` in the project →
+        load it; (2) else the project's default union → seed an unmanaged
+        cornermodel from Maestro's last-pulled corners; (3) else a blank
+        cornermodel. Either way the Corner Manager is ready to use.
+        """
+        import re
+        from simkit.corner_model import (
+            CornerModelError, cornermodel_from_union, empty_cornermodel,
+            load_cornermodel,
+        )
+        root = module.project_root
+        candidates = sorted(root.glob("*.cornermodel.json")) + sorted(
+            (root / "corner_models").glob("*.cornermodel.json")
+        )
+        if candidates:
+            path = candidates[0]
+            try:
+                cm = load_cornermodel(path)
+            except CornerModelError as exc:
+                self.append_log(f"[corner-model] discover failed: {exc}")
+            else:
+                profile = self._load_bound_profile(cm, path)
+                self.corner_manager.load_model(cm, profile, path)
+                self._cornermodel_path = path
+                self.append_log(f"[corner-model] discovered {path.name}")
+                if len(candidates) > 1:
+                    self.append_log(
+                        f"[corner-model] {len(candidates)} cornermodels "
+                        f"found; opened {path.name} (File ▸ Open Corner "
+                        f"Model… to pick another)"
+                    )
+                return
+        # No sidecar — derive a valid model name + default persist target.
+        cm_name = re.sub(r"[^a-z0-9_-]+", "_", module.project_name.lower())
+        cm_name = cm_name.strip("_") or "corners"
+        self._cornermodel_path = root / f"{cm_name}.cornermodel.json"
+        if module.union_default is not None:
+            try:
+                u = load_union(module.union_default)
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[corner-model] union seed failed: {exc}")
+            else:
+                self.corner_manager.load_model(
+                    cornermodel_from_union(u, name=cm_name), None,
+                    self._cornermodel_path,
+                )
+                self.append_log(
+                    f"[corner-model] no .cornermodel.json — seeded "
+                    f"{len(u.rows)} corners from {module.union_default.name}"
+                )
+                return
+        self.corner_manager.load_model(
+            empty_cornermodel(name=cm_name, project=module.project_name),
+            None, self._cornermodel_path,
+        )
+        self.append_log(
+            "[corner-model] no corners yet — use New Mode / New Column "
+            "or Pull from Maestro"
+        )
+
+    def _on_cornermodel_edited(self, cm: object) -> None:
+        """Persist an in-GUI cornermodel edit to its ``.cornermodel.json``."""
+        self._persist_cornermodel(cm)
+
+    def _persist_cornermodel(self, cm: object) -> None:
+        from simkit.corner_model import save_cornermodel
+        path = self._cornermodel_path
+        if path is None:
+            self.append_log(
+                "[corner-model] edit not persisted — no module loaded"
+            )
+            return
+        # The schema requires at least one column; a model with only modes
+        # is not yet a valid sidecar. Keep it in memory until a column
+        # exists rather than writing an unloadable file.
+        if not getattr(cm, "columns", ()):
+            self.append_log(
+                "[corner-model] edit kept in memory — add a column before "
+                "it can be saved to a .cornermodel.json"
+            )
+            return
+        try:
+            save_cornermodel(cm, path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[corner-model] save failed: {exc}")
+            return
+        self.append_log(f"[corner-model] saved {path.name}")
 
     def _load_bound_profile(self, cm: object, cm_path: Path) -> object:
         """Stage 6 — if the cornermodel names a ``pvt_profile``, find and load
@@ -595,8 +688,8 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_corner_model_push(self, cm: object, profile: object = None) -> None:
-        """Materialise the cornermodel to a union and push it to Maestro —
-        mirrors :meth:`_on_corners_push_requested` (spec §4.1)."""
+        """Materialise the cornermodel to a union and push it to Maestro
+        (spec §4.1)."""
         from simkit.corner_model import materialize
         self.append_log("[corner-model] push requested")
         if not self._can_dispatch_bridge("corner-model push"):
@@ -631,12 +724,59 @@ class MainWindow(QMainWindow):
         self.append_log("[corner-model] push queued (--replace)")
 
     def _on_corner_model_pull(self) -> None:
-        """Pull-into-cornermodel reconciliation (spec §6) routes a Maestro
-        pull through ``classify_pull``. Full interactive GUI wiring is
-        deferred — logged honestly rather than silently doing nothing."""
+        """Pull Maestro's current corners into the corner manager.
+
+        If the cornermodel is still empty, the pull seeds it directly
+        (auto-build from Maestro). If it already has columns, the pull is
+        classified against the model and reported — interactive
+        reconciliation backfill is deferred (spec §6).
+        """
+        if not self._can_dispatch_bridge("corner-model pull"):
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn_session_required()
+            return
+        out_path = self._scratch_path("cornermodel_pull", ".union.json")
+        self._queue_op(
+            "pvt_corners_pull",
+            on_ok=lambda result: self._on_corner_model_pulled(out_path),
+            kwargs={
+                "out_path": str(out_path),
+                "pvtproject_path": self._loaded_module.project_path,
+                "session": session,
+            },
+        )
+        self.append_log(f"[corner-model] pull queued → {out_path.name}")
+
+    def _on_corner_model_pulled(self, sidecar_path: Path) -> None:
+        from simkit.corner_model import classify_pull, cornermodel_from_union
+        try:
+            u = load_union(sidecar_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(
+                f"[corner-model] pulled union failed to load: {exc}"
+            )
+            return
+        cm = self.corner_manager.cornermodel()
+        self.right_panel.setCurrentWidget(self.corner_manager)
+        if not cm.columns:
+            seeded = cornermodel_from_union(u, name=cm.name)
+            self.corner_manager.load_model(
+                seeded, self.corner_manager.profile(),
+                self._cornermodel_path,
+            )
+            self._persist_cornermodel(seeded)
+            self.append_log(
+                f"[corner-model] pulled {len(u.rows)} corners → seeded the "
+                f"corner manager"
+            )
+            return
+        result = classify_pull(cm, u, self.corner_manager.profile())
         self.append_log(
-            "[corner-model] pull not yet wired — pull via the Corners tab, "
-            "then reconcile per spec §6 (deferred)"
+            f"[corner-model] pull classified: {len(result.matched)} matched, "
+            f"{len(result.foreign)} foreign, {len(result.missing)} missing — "
+            f"interactive reconciliation backfill is deferred (spec §6)"
         )
 
     def _on_sync_maestro_history(self) -> None:
@@ -827,8 +967,8 @@ class MainWindow(QMainWindow):
         self.summary_tab.clear()
         if payload.parse_error:
             self.append_log(
-                f"[tree] review {payload.review_name} 解析失败，无法运行: "
-                f"{payload.parse_error}"
+                f"[tree] review {payload.review_name} failed to parse — "
+                f"cannot run: {payload.parse_error}"
             )
         else:
             self.append_log(f"[tree] selected review {payload.review_name}")
@@ -837,24 +977,6 @@ class MainWindow(QMainWindow):
         """The review last selected in the tree — persisted by app.py so
         the next launch can restore it (spec A4)."""
         return self._selected_review_path
-
-    def _on_corners_table_context_menu(self, pos: QPoint) -> None:
-        """Right-click on a corner row → Duplicate / Delete shortcuts."""
-        table = self.corners_editor.table
-        index = table.indexAt(pos)
-        if not index.isValid():
-            return
-        # Select the right-clicked row so the existing helpers act on it
-        # (Qt's default context-menu policy doesn't auto-select for us).
-        table.selectRow(index.row())
-        menu = QMenu(table)
-        a_dup = menu.addAction("Duplicate row")
-        a_del = menu.addAction("Delete row")
-        chosen = menu.exec_(table.viewport().mapToGlobal(pos))
-        if chosen is a_dup:
-            self.corners_editor.duplicate_row()
-        elif chosen is a_del:
-            self.corners_editor.delete_row()
 
     def _on_tree_context_menu(self, pos: QPoint) -> None:
         """Right-click on a tree node → context menu (per node kind)."""
@@ -887,7 +1009,7 @@ class MainWindow(QMainWindow):
                 ProjectTreeModel.GROUP_MILESTONES,
             )
         ):
-            a_trend = menu.addAction("里程碑趋势 (Milestone trend)…")
+            a_trend = menu.addAction("Milestone trend…")
             chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
             if chosen is a_trend:
                 self._on_trend_requested()
@@ -898,7 +1020,7 @@ class MainWindow(QMainWindow):
                 # A review that doesn't parse can't be run — disable the
                 # action so the user can't dispatch a doomed pvt run.
                 a_run.setEnabled(False)
-                a_run.setText("Run this review…  (解析失败)")
+                a_run.setText("Run this review…  (parse failed)")
             a_copy = menu.addAction("Copy as…  (edit a duplicate)")
             a_open = menu.addAction("Open .review.json")
             menu.addSeparator()
@@ -948,7 +1070,7 @@ class MainWindow(QMainWindow):
         """From-scratch review creation — spec §14.2, Tier-1 capability #8."""
         if self._loaded_module is None:
             self._warn(
-                "没有 module 加载", "先打开一个工程 (File ▸ Open Module…)"
+                "No module loaded", "Open a project first (File ▸ Open Module…)"
             )
             return
         wizard = ReviewWizard(
@@ -970,7 +1092,7 @@ class MainWindow(QMainWindow):
                 payload.review_path.read_text(encoding="utf-8")
             )
         except Exception as exc:  # noqa: BLE001
-            self._warn("无法读取", f"{payload.review_path.name}: {exc}")
+            self._warn("Cannot read file", f"{payload.review_path.name}: {exc}")
             return
         dialog = ReviewEditorDialog(
             self._loaded_module.project_root,
@@ -1010,9 +1132,9 @@ class MainWindow(QMainWindow):
         """Confirm modal then delete a sidecar file from disk."""
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("simkit — 删除文件确认")
-        box.setText(f"确定要删除 {path.name}？")
-        box.setInformativeText(f"路径: {path}")
+        box.setWindowTitle("simkit — confirm file delete")
+        box.setText(f"Delete {path.name}?")
+        box.setInformativeText(f"Path: {path}")
         box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
         box.setDefaultButton(QMessageBox.Cancel)
         if box.exec_() != QMessageBox.Yes:
@@ -1155,7 +1277,7 @@ class MainWindow(QMainWindow):
             return
         run_id = self.results_tab.current_run_id()
         if not run_id:
-            self.append_log("[spec] 没有选中的运行，无法设置规格")
+            self.append_log("[spec] no run selected — cannot set a spec")
             return
         from simkit.db import connect
         from simkit.gui.loaders import set_spec_in_project_bundles
@@ -1165,7 +1287,7 @@ class MainWindow(QMainWindow):
         try:
             con = connect(self._loaded_module.db_path)
         except Exception as exc:  # noqa: BLE001
-            self.append_log(f"[spec] 打不开数据库: {exc}")
+            self.append_log(f"[spec] cannot open database: {exc}")
             return
         try:
             n = apply_spec_to_output(con, run_id, output, spec_clean)
@@ -1176,22 +1298,24 @@ class MainWindow(QMainWindow):
         finally:
             con.close()
 
-        verb = "清除规格" if spec_clean is None else f"规格设为 {spec_clean!r}"
-        self.append_log(f"[spec] {output}: {verb} — {n} 行已就地重新判定")
+        verb = "spec cleared" if spec_clean is None \
+            else f"spec set to {spec_clean!r}"
+        self.append_log(f"[spec] {output}: {verb} — {n} rows re-judged in place")
 
         bundle_paths = [b.bundle_path for b in self._loaded_module.bundles]
         res = set_spec_in_project_bundles(bundle_paths, output, spec_clean)
         if res.status == "written":
-            self.append_log(f"[spec] {res.detail}（重跑后保留）")
+            self.append_log(f"[spec] {res.detail} (kept across re-runs)")
         elif res.status == "no_match":
             self.append_log(
-                f"[spec] 未写回 bundle: {res.detail} — "
-                "重跑会丢失，建议在 Measures 里给该输出设置 spec"
+                f"[spec] not written back to bundle: {res.detail} — "
+                "it will be lost on re-run; set the spec for this output "
+                "in the Measures tab"
             )
         else:  # ambiguous
             self.append_log(
-                f"[spec] 未写回 bundle: {res.detail} — "
-                "请在 Measures 里手动指定要改哪个 bundle"
+                f"[spec] not written back to bundle: {res.detail} — "
+                "specify which bundle to edit in the Measures tab"
             )
 
     # ----------------------------------------------------------------
@@ -1205,15 +1329,16 @@ class MainWindow(QMainWindow):
         session = self.current_session_name()
         if not session:
             self._warn(
-                "缺少 Maestro session",
-                "请在顶部 Session 输入框填写 Maestro session 名 (e.g. fnxSession0).",
+                "Missing Maestro session",
+                "Enter a Maestro session name in the top Session field "
+                "(e.g. fnxSession0).",
             )
             return
         default_name = Path(review_path).stem.replace(".review", "")
         run_name, ok = QInputDialog.getText(
             self,
-            "simkit — 命名本次运行",
-            "Run name (出现在 History 树 + Maestro history 名里):",
+            "simkit — name this run",
+            "Run name (shown in the History tree + the Maestro history name):",
             QLineEdit.Normal,
             default_name,
         )
@@ -1368,98 +1493,6 @@ class MainWindow(QMainWindow):
             widget.deleteLater()
 
     # ----------------------------------------------------------------
-    # Corners (§7)
-    # ----------------------------------------------------------------
-
-    def _on_corners_pull_requested(self) -> None:
-        if not self._can_dispatch_bridge("corners pull"):
-            return
-        session = self.current_session_name()
-        if not session:
-            self._warn_session_required()
-            return
-        out_path = self._scratch_path("union_pull", ".union.json")
-        self._queue_op(
-            "pvt_corners_pull",
-            on_ok=lambda result: self._on_corners_pulled(out_path),
-            kwargs={
-                "out_path": str(out_path),
-                "pvtproject_path": self._loaded_module.project_path,
-                "session": session,
-            },
-        )
-        self.append_log(f"[corners] pull queued → {out_path.name}")
-
-    def _on_corners_pulled(self, sidecar_path: Path) -> None:
-        try:
-            u = load_union(sidecar_path)
-        except Exception as exc:  # noqa: BLE001
-            self.append_log(f"[corners] pulled union failed to load: {exc}")
-            return
-        self.corners_editor.load_union(union_to_editor_rows(u))
-        from datetime import datetime
-        self.corners_editor.set_last_sync(
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        )
-        # Switch focus to the Corners tab so the user sees the result of
-        # their action, and include row names in the log for diagnostic clarity
-        # (pull-of-same-data looks invisible otherwise).
-        self.right_panel.setCurrentWidget(self.corners_editor)
-        row_names = ", ".join(r.row_name for r in u.rows)
-        self.append_log(f"[corners] pulled {len(u.rows)} rows: {row_names}")
-
-    def _on_corners_push_requested(self, rows: object) -> None:
-        row_count = len(rows) if isinstance(rows, list) else "?"
-        self.append_log(f"[corners] push requested ({row_count} rows)")
-        if not self._can_dispatch_bridge("corners push"):
-            return
-        if not isinstance(rows, list):
-            self.append_log(f"[corners] push payload not a list: {type(rows).__name__}")
-            return
-        session = self.current_session_name()
-        if not session:
-            self._warn_session_required()
-            return
-        # Build a Union from editor rows + serialize to a temp sidecar
-        # (pvt_corners_push expects a file path, not in-memory rows).
-        module = self._loaded_module
-        try:
-            u = editor_rows_to_union_rows(
-                rows,
-                name="gui_push",
-                project=module.project_name,
-                testbench_id="",  # populated by the SKILL side or rejected; surface error
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.append_log(f"[corners] push rejected: {exc}")
-            return
-        out_path = self._scratch_path("union_push", ".union.json")
-        out_path.write_text(_serialize_union(u), encoding="utf-8")
-        self._queue_op(
-            "pvt_corners_push",
-            on_ok=lambda result: self.append_log(f"[corners] pushed: {result}"),
-            kwargs={
-                "union_json_path": str(out_path),
-                "pvtproject_path": module.project_path,
-                "session": session,
-                "replace": True,
-            },
-        )
-        self.append_log(f"[corners] push queued ({len(rows)} rows, --replace)")
-
-    def _on_corners_show_diff(self) -> None:
-        self.append_log("[corners] show-diff requested (sidecar vs live)")
-
-    def _on_corners_pull_overrides_sidecar(self) -> None:
-        self.append_log("[corners] pull-overrides-sidecar requested")
-        # Same as plain pull — load_union into editor overwrites local state.
-        self._on_corners_pull_requested()
-
-    def _on_corners_keep_sidecar(self) -> None:
-        self.corners_editor.set_divergence(0, 0)  # hides the strip
-        self.append_log("[corners] keep-sidecar requested — divergence strip dismissed")
-
-    # ----------------------------------------------------------------
     # Measures (§8)
     # ----------------------------------------------------------------
 
@@ -1473,7 +1506,7 @@ class MainWindow(QMainWindow):
         test_name, ok = QInputDialog.getText(
             self,
             "simkit — Pull measures",
-            "Maestro test 名 (Outputs 表按 Test 列过滤):",
+            "Maestro test name (filters the Outputs table by the Test column):",
             QLineEdit.Normal,
             "Test",
         )
@@ -1622,10 +1655,11 @@ class MainWindow(QMainWindow):
             return  # completed (or failed) normally — nothing to warn about
         secs = self.BRIDGE_OP_STALL_MS // 1000
         self.append_log(
-            f"[bridge] 操作 '{info.get('func')}' 已 {secs}s 未返回 —— "
-            f"SKILL bridge 可能卡住（常见：Maestro 弹出了模态对话框，"
-            f"或上一次仿真后 bridge 滞留）。请检查 Maestro 是否有待处理"
-            f"弹窗，或点顶部 Restart bridge 重新探测。"
+            f"[bridge] operation '{info.get('func')}' has not returned "
+            f"after {secs}s — the SKILL bridge may be stuck (commonly: "
+            f"Maestro popped up a modal dialog, or the bridge is wedged "
+            f"after the last simulation). Check Maestro for a pending "
+            f"dialog, or click Restart bridge at the top to re-probe."
         )
 
     def _on_op_complete(self, request_id: int, result: object) -> None:
@@ -1700,8 +1734,9 @@ class MainWindow(QMainWindow):
 
     def _warn_session_required(self) -> None:
         self._warn(
-            "缺少 Maestro session",
-            "请在顶部 Session 输入框填写 Maestro session 名 (e.g. fnxSession0).",
+            "Missing Maestro session",
+            "Enter a Maestro session name in the top Session field "
+            "(e.g. fnxSession0).",
         )
 
     def _warn(self, title: str, text: str) -> None:
@@ -1710,15 +1745,6 @@ class MainWindow(QMainWindow):
         box.setWindowTitle(f"simkit — {title}")
         box.setText(text)
         box.exec_()
-
-    def _load_union_from_disk(self, union_path: Path) -> None:
-        try:
-            u = load_union(union_path)
-        except Exception as exc:  # noqa: BLE001
-            self.append_log(f"[corners] load_union({union_path}) failed: {exc}")
-            return
-        self.corners_editor.load_union(union_to_editor_rows(u))
-        self.append_log(f"[corners] loaded {len(u.rows)} rows from {union_path.name}")
 
     def _load_bundle_from_disk(self, bundle_path: Path) -> None:
         if self._loaded_module is None:

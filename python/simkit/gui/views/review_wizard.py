@@ -141,21 +141,23 @@ def _review_summary(review_dict: dict[str, Any]) -> str:
     alone is not a confirmation a designer can sanity-check)."""
     items = review_dict.get("items") or []
     lines = [
-        f"评审「{review_dict.get('name', '?')}」 — {len(items)} 个 item",
+        f"Review '{review_dict.get('name', '?')}' — {len(items)} items",
     ]
     for i, item in enumerate(items, start=1):
-        tests = "、".join(item.get("tests") or []) or "(无测试)"
-        union = item.get("union") or "(无角组)"
-        bundle = item.get("bundle") or "(无测量包)"
+        tests = ", ".join(item.get("tests") or []) or "(no tests)"
+        union = item.get("union") or "(no corner group)"
+        bundle = item.get("bundle") or "(no measurement bundle)"
         lines.append(
-            f"  {i}. {item.get('name', '?')}  ·  测试 {tests}  ·  "
-            f"角组 {union}  ·  测量包 {bundle}"
+            f"  {i}. {item.get('name', '?')}  ·  tests {tests}  ·  "
+            f"corner group {union}  ·  bundle {bundle}"
         )
     on_failure = review_dict.get("on_failure") or {}
     default = on_failure.get("default", "skip")
     strategies = on_failure.get("strategies") or []
-    retry = strategies[0].get("name") if strategies else "无"
-    lines.append(f"失败处理: 默认 {default}  ·  重试策略 {retry}")
+    retry = strategies[0].get("name") if strategies else "none"
+    lines.append(
+        f"On failure: default {default}  ·  retry strategy {retry}"
+    )
     return "\n".join(lines)
 
 
@@ -176,7 +178,7 @@ class _ReviewPage(QWizardPage):
             "border: 1px solid #b9c9e8; padding: 6px 8px; }"
         )
         layout.addWidget(self.summary_label)
-        layout.addWidget(QLabel("完整 JSON（高级用户参考）:"))
+        layout.addWidget(QLabel("Full JSON (for advanced users):"))
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         layout.addWidget(self.preview)

@@ -75,16 +75,18 @@ from simkit.template_render import RenderedRow, render_bundle
 # pass/fail rule — without one a result row stays ``no_spec`` forever
 # (G-1: specs were authorable but undiscoverable).
 _SPEC_HINT_TEXT = (
-    "写法: >= 下限  ·  <= 上限  ·  range 下 上  ·  "
-    "maximize 目标  ·  minimize 目标 （支持 SI 后缀 k m u n p M G）"
+    "Syntax: >= lower  ·  <= upper  ·  range lo hi  ·  "
+    "maximize target  ·  minimize target  (SI suffixes k m u n p M G "
+    "are supported)"
 )
 
 # Help text for a raw-expression entry (G-14). A raw entry bypasses the
 # template machinery — the user types a calculator/OCEAN expression
 # directly — so spell out what the two fields mean.
 _RAW_EXPR_HINT_TEXT = (
-    "raw_expression 是直接写的计算器/OCEAN 表达式(不经过模板)。"
-    "output_name 是它在结果表里的列名。"
+    "raw_expression is a calculator/OCEAN expression written directly "
+    "(it bypasses templates). output_name is its column name in the "
+    "results table."
 )
 
 
@@ -309,11 +311,11 @@ class _EntryDialog(QDialog):
             self._spec_edit.setStyleSheet(
                 "QLineEdit { border: 1px solid #c0392b; }"
             )
-            self._spec_hint.setText(f"spec 解析失败: {exc}")
+            self._spec_hint.setText(f"spec failed to parse: {exc}")
             self._spec_hint.setStyleSheet("color: #c0392b;")
         else:
             self._spec_edit.setStyleSheet("")
-            self._spec_hint.setText(f"✓ 规格有效 — {_SPEC_HINT_TEXT}")
+            self._spec_hint.setText(f"✓ spec valid — {_SPEC_HINT_TEXT}")
             self._spec_hint.setStyleSheet("color: #2e7d32;")
 
 
@@ -471,7 +473,8 @@ class MeasuresEditor(QWidget):
         self._entry_list = QListWidget(objectName="entryList")
         self._entry_list.itemDoubleClicked.connect(self._on_entry_double_clicked)
         self._entry_list.setToolTip(
-            "选中一条后点 “Edit entry…”,或直接双击该行进行编辑。"
+            "Select an entry and click 'Edit entry…', or double-click "
+            "the row to edit it."
         )
         v.addWidget(self._entry_list, stretch=1)
 
@@ -481,7 +484,10 @@ class MeasuresEditor(QWidget):
         # affordance a new user never discovered.
         self._edit_btn = QPushButton("Edit entry…")
         self._edit_btn.setObjectName("editEntryBtn")
-        self._edit_btn.setToolTip("编辑选中的测量条目(等同于双击该行)。")
+        self._edit_btn.setToolTip(
+            "Edit the selected measurement entry (same as double-clicking "
+            "the row)."
+        )
         self._edit_btn.clicked.connect(self._on_edit_entry)
         bottom_row.addWidget(self._edit_btn)
         self._delete_btn = QPushButton("Delete entry")

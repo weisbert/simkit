@@ -76,7 +76,7 @@ class HealthLineTests(unittest.TestCase):
             partial_run=False,
         )
         line = health_line(h)
-        self.assertIn("4 行", line)
+        self.assertIn("4 rows", line)
         self.assertIn("3 ok", line)
         self.assertIn("1 eval_err", line)
 
@@ -85,14 +85,14 @@ class HealthLineTests(unittest.TestCase):
             total_rows=1, status_counts={"ok": 1},
             sim_fail_corners=0, partial_run=True,
         )
-        self.assertIn("部分运行", health_line(h))
+        self.assertIn("partial run", health_line(h))
 
     def test_health_line_flags_sim_failures(self):
         h = RunHealth(
             total_rows=2, status_counts={"ok": 2},
             sim_fail_corners=3, partial_run=False,
         )
-        self.assertIn("3 角 sim 失败", health_line(h))
+        self.assertIn("3 corners sim-failed", health_line(h))
 
 
 class MarginRollupModelTests(unittest.TestCase):
@@ -125,7 +125,7 @@ class MarginRollupModelTests(unittest.TestCase):
             model = MarginRollupModel(margin_rollup(con, "R1"))
         finally:
             con.close()
-        verdict_col = model.COLUMNS.index("判定")
+        verdict_col = model.COLUMNS.index("verdict")
         verdicts = {
             model.data(model.index(r, 0)): model.data(
                 model.index(r, verdict_col)
@@ -148,7 +148,7 @@ class SummaryTabTests(unittest.TestCase):
             tab.set_run("R1", con)
         finally:
             con.close()
-        self.assertIn("部分运行", tab.health_label.text())
+        self.assertIn("partial run", tab.health_label.text())
         self.assertEqual(tab._proxy.rowCount(), 2)
 
     def test_set_run_amber_styles_an_unhealthy_run(self):
@@ -187,7 +187,7 @@ class ProvenanceLineTests(unittest.TestCase):
 
     def test_none_says_not_recorded(self):
         line = provenance_line(None)
-        self.assertIn("未记录", line)
+        self.assertIn("not recorded", line)
 
     def test_with_data_lists_host_and_pdk(self):
         prov = {
@@ -198,7 +198,7 @@ class ProvenanceLineTests(unittest.TestCase):
         line = provenance_line(prov)
         self.assertIn("farm-03", line)
         self.assertIn("v1.9", line)
-        self.assertIn("1 个 model", line)
+        self.assertIn("1 model file", line)
 
     def test_tooltip_lists_model_files(self):
         prov = {
@@ -210,7 +210,7 @@ class ProvenanceLineTests(unittest.TestCase):
         self.assertIn("/pdk/x.scs", provenance_tooltip(prov))
 
     def test_tooltip_none_explains_risk(self):
-        self.assertIn("无法证明", provenance_tooltip(None))
+        self.assertIn("cannot prove", provenance_tooltip(None))
 
 
 class SummaryTabProvenanceTests(unittest.TestCase):
@@ -224,7 +224,7 @@ class SummaryTabProvenanceTests(unittest.TestCase):
         finally:
             con.close()
         self.assertTrue(tab.provenance_label.isVisibleTo(tab))
-        self.assertIn("未记录", tab.provenance_label.text())
+        self.assertIn("not recorded", tab.provenance_label.text())
         # Amber treatment when conditions are unknown.
         self.assertIn("fff3a3", tab.provenance_label.styleSheet())
 
