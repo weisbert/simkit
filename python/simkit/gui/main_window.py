@@ -570,13 +570,33 @@ class MainWindow(QMainWindow):
         self.append_log(f"[corner-model] opened {path}")
         return self.corner_manager
 
+    def _cornermodels_dir(self, module: LoadedModule) -> Path:
+        """The project's ``cornerModelsDir`` (`.pvtproject` setting, default
+        ``./corner_models``), resolved against the `.pvtproject` directory."""
+        raw = "corner_models"
+        try:
+            data = json.loads(
+                Path(module.project_path).read_text(encoding="utf-8")
+            )
+            if isinstance(data, dict) and data.get("cornerModelsDir"):
+                raw = str(data["cornerModelsDir"])
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(
+                f"[corner-model] cornerModelsDir read failed: {exc}"
+            )
+        d = Path(raw).expanduser()
+        if not d.is_absolute():
+            d = (module.project_root / d).resolve()
+        return d
+
     def _discover_cornermodel(self, module: LoadedModule) -> None:
         """Populate the Corners tab when a module loads — no load step.
 
-        Precedence: (1) an existing ``.cornermodel.json`` in the project →
-        load it; (2) else the project's default union → seed an unmanaged
-        cornermodel from Maestro's last-pulled corners; (3) else a blank
-        cornermodel. Either way the Corner Manager is ready to use.
+        Precedence: (1) an existing ``.cornermodel.json`` in the project's
+        ``cornerModelsDir`` or next to the `.pvtproject` → load it; (2) else
+        the project's default union → seed an unmanaged cornermodel from
+        Maestro's last-pulled corners; (3) else a blank cornermodel. Either
+        way the Corner Manager is ready to use.
         """
         import re
         from simkit.corner_model import (
@@ -584,9 +604,14 @@ class MainWindow(QMainWindow):
             load_cornermodel,
         )
         root = module.project_root
-        candidates = sorted(root.glob("*.cornermodel.json")) + sorted(
-            (root / "corner_models").glob("*.cornermodel.json")
-        )
+        cm_dir = self._cornermodels_dir(module)
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+        for d in (cm_dir, root):
+            if d in seen or not d.is_dir():
+                continue
+            seen.add(d)
+            candidates += sorted(d.glob("*.cornermodel.json"))
         if candidates:
             path = candidates[0]
             try:
@@ -606,9 +631,10 @@ class MainWindow(QMainWindow):
                     )
                 return
         # No sidecar — derive a valid model name + default persist target.
+        # New cornermodels land in the project's cornerModelsDir.
         cm_name = re.sub(r"[^a-z0-9_-]+", "_", module.project_name.lower())
         cm_name = cm_name.strip("_") or "corners"
-        self._cornermodel_path = root / f"{cm_name}.cornermodel.json"
+        self._cornermodel_path = cm_dir / f"{cm_name}.cornermodel.json"
         if module.union_default is not None:
             try:
                 u = load_union(module.union_default)
@@ -655,6 +681,7 @@ class MainWindow(QMainWindow):
             )
             return
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             save_cornermodel(cm, path)
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[corner-model] save failed: {exc}")

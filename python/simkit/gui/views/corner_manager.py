@@ -21,12 +21,15 @@ from typing import Optional
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QDialog,
+    QDialogButtonBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -42,9 +45,15 @@ from simkit.corner_model import (
     Column,
     CornerModel,
     CornerModelError,
+    CorrelatedAxis,
+    CorrelatedTuple,
+    PvtTemplate,
+    TemplateColumn,
     Variant,
     add_column,
+    add_correlated_axis,
     add_mode,
+    add_pvt_template,
     add_run_set,
     add_variant,
     apply_run_set,
@@ -109,9 +118,25 @@ class CornerManagerView(QWidget):
         top.addWidget(self.title_label)
         top.addStretch(1)
         self.btn_new_mode = QPushButton("New Mode")
+        self.btn_new_mode.setToolTip(
+            "Define a new operating mode — a named bag of register values "
+            "(e.g. BT_2G_RX). Columns reference a mode."
+        )
         self.btn_new_column = QPushButton("New Column")
+        self.btn_new_column.setToolTip(
+            "Add one corner column to a mode (a PVT label + per-column "
+            "PVT variables)."
+        )
         self.btn_pull = QPushButton("Pull")
+        self.btn_pull.setToolTip(
+            "Pull the current corners from the live Maestro session. If "
+            "this corner model is empty, the pull seeds it."
+        )
         self.btn_push = QPushButton("Push")
+        self.btn_push.setToolTip(
+            "Materialise this corner model and push the corners to the "
+            "live Maestro session (replaces the Maestro corner table)."
+        )
         for b in (self.btn_new_mode, self.btn_new_column,
                   self.btn_pull, self.btn_push):
             top.addWidget(b)
@@ -120,7 +145,9 @@ class CornerManagerView(QWidget):
         filt = QHBoxLayout()
         filt.addWidget(QLabel("Column filter:"))
         self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText("Filter corner columns by name…")
+        self.filter_edit.setPlaceholderText(
+            "Filter columns by name — supports and / or / * (e.g. RX or TX)"
+        )
         filt.addWidget(self.filter_edit)
         self.btn_filter_set = QPushButton("Filter to selected run set")
         self.btn_clear_filter = QPushButton("Show all columns")
@@ -175,7 +202,15 @@ class CornerManagerView(QWidget):
         self.variant_vars.verticalHeader().setDefaultSectionSize(24)
         left_v.addWidget(self.variant_vars)
 
-        left_v.addWidget(QLabel("PVT Templates"))
+        tmpl_hdr = QHBoxLayout()
+        tmpl_hdr.addWidget(QLabel("PVT Templates"))
+        self.btn_new_template = QPushButton("New Template")
+        self.btn_new_template.setToolTip(
+            "Author a reusable PVT template — a list of corner columns "
+            "you can apply to any mode or variant (pain point a)."
+        )
+        tmpl_hdr.addWidget(self.btn_new_template)
+        left_v.addLayout(tmpl_hdr)
         self.templates_list = QListWidget()
         left_v.addWidget(self.templates_list)
         tmpl_btns = QHBoxLayout()
@@ -191,9 +226,17 @@ class CornerManagerView(QWidget):
         lib_btns.addWidget(self.btn_import_lib)
         left_v.addLayout(lib_btns)
 
-        left_v.addWidget(
+        axes_hdr = QHBoxLayout()
+        axes_hdr.addWidget(
             QLabel("Correlated axes (bound var bundle, cross-product as one axis)")
         )
+        self.btn_new_axis = QPushButton("New Axis")
+        self.btn_new_axis.setToolTip(
+            "Define a correlated axis — a bundle of variables that must "
+            "vary together, cross-multiplied as one axis (pain point h)."
+        )
+        axes_hdr.addWidget(self.btn_new_axis)
+        left_v.addLayout(axes_hdr)
         self.axes_list = QListWidget()
         left_v.addWidget(self.axes_list)
 
@@ -235,6 +278,8 @@ class CornerManagerView(QWidget):
         self.btn_new_mode.clicked.connect(self._on_new_mode)
         self.btn_new_column.clicked.connect(self._on_new_column)
         self.btn_new_variant.clicked.connect(self._on_new_variant)
+        self.btn_new_template.clicked.connect(self._on_new_template)
+        self.btn_new_axis.clicked.connect(self._on_new_axis)
         self.btn_apply_template.clicked.connect(self._on_apply_template)
         self.btn_unbind_template.clicked.connect(self._on_unbind_template)
         self.btn_new_run_set.clicked.connect(self._on_new_run_set)
@@ -342,23 +387,28 @@ class CornerManagerView(QWidget):
         return item.text().split("  ")[0]
 
     def _on_new_run_set(self) -> None:
+        if not self._cm.columns:
+            QMessageBox.warning(
+                self, "New Run Set", "Add a corner column first."
+            )
+            return
         name, ok = QInputDialog.getText(
             self, "New Run Set", "Run set name (^[A-Za-z][A-Za-z0-9_]*$):"
         )
         if not ok or not name.strip():
             return
         all_names = [effective_name(c) for c in self._cm.columns]
-        text, ok = QInputDialog.getMultiLineText(
-            self, "New Run Set — select corner columns",
-            "One corner effective-name per line:", "\n".join(all_names),
+        dialog = _ColumnPickerDialog(
+            "New Run Set — select corner columns",
+            "Tick the corner columns this run set should enable:",
+            all_names, parent=self,
         )
-        if not ok:
+        if dialog.exec_() != QDialog.Accepted:
             return
-        columns = tuple(
-            ln.strip() for ln in text.splitlines() if ln.strip()
-        )
         try:
-            new_cm = add_run_set(self._cm, name.strip(), columns)
+            new_cm = add_run_set(
+                self._cm, name.strip(), dialog.checked_columns()
+            )
         except CornerModelError as exc:
             QMessageBox.warning(self, "New run set failed", str(exc))
             return
@@ -389,7 +439,9 @@ class CornerManagerView(QWidget):
         self._apply_column_filter()
 
     def _apply_column_filter(self) -> None:
-        text = self.filter_edit.text().strip().lower()
+        # The column filter shares the row filter's and / or / * grammar
+        # (pain point f) so the two filters read consistently.
+        expr = self.filter_edit.text()
         members = (
             run_set_membership(self._cm, self._set_filter)
             if self._set_filter in self._cm.run_sets else None
@@ -397,7 +449,7 @@ class CornerManagerView(QWidget):
         for c in range(self.table_model.columnCount()):
             col = self.table_model.column_at(c)
             name = effective_name(col)
-            hide = bool(text) and text not in name.lower()
+            hide = not self._row_matches(name, expr)
             if members is not None and name not in members:
                 hide = True
             self.table.setColumnHidden(c, hide)
@@ -496,6 +548,66 @@ class CornerManagerView(QWidget):
             return
         self._apply(new_cm)
 
+    def _on_new_template(self) -> None:
+        if not self._cm.modes:
+            QMessageBox.warning(self, "New Template", "Create a mode first.")
+            return
+        name, ok = QInputDialog.getText(
+            self, "New Template", "Template name (^[A-Za-z][A-Za-z0-9_]*$):"
+        )
+        if not ok or not name.strip():
+            return
+        cols_text, ok = QInputDialog.getMultiLineText(
+            self, "New Template — columns",
+            "One column per line — pvt_label: var=value, var=value\n"
+            "(use +axisName to attach an existing correlated axis):",
+            "TT: temperature=55, VDD=0.9",
+        )
+        if not ok:
+            return
+        try:
+            columns = _parse_template_columns(cols_text)
+            new_cm = add_pvt_template(self._cm, PvtTemplate(
+                name=name.strip(), columns=columns,
+            ))
+        except (ValueError, CornerModelError) as exc:
+            QMessageBox.warning(self, "New template failed", str(exc))
+            return
+        self._apply(new_cm)
+
+    def _on_new_axis(self) -> None:
+        name, ok = QInputDialog.getText(
+            self, "New Axis", "Axis name (^[A-Za-z][A-Za-z0-9_]*$):"
+        )
+        if not ok or not name.strip():
+            return
+        members_text, ok = QInputDialog.getText(
+            self, "New Axis",
+            "Member variables that vary together (comma-separated):",
+        )
+        if not ok or not members_text.strip():
+            return
+        members = tuple(
+            m.strip() for m in members_text.split(",") if m.strip()
+        )
+        tuples_text, ok = QInputDialog.getMultiLineText(
+            self, "New Axis — correlated points",
+            "One point per line — label: member=value, member=value\n"
+            "(each line must assign exactly the members above):",
+            "TT: " + ", ".join(f"{m}=" for m in members),
+        )
+        if not ok:
+            return
+        try:
+            tuples = _parse_axis_tuples(tuples_text)
+            new_cm = add_correlated_axis(self._cm, CorrelatedAxis(
+                name=name.strip(), members=members, tuples=tuples,
+            ))
+        except (ValueError, CornerModelError) as exc:
+            QMessageBox.warning(self, "New axis failed", str(exc))
+            return
+        self._apply(new_cm)
+
     def _refresh_templates_panel(self) -> None:
         prev = self._selected_template_name()
         self.templates_list.clear()
@@ -586,7 +698,13 @@ class CornerManagerView(QWidget):
     # --- Stage 5: row filter / row reorder / check / library ------------
 
     def _refresh_check_status(self) -> None:
-        issues = check_cornermodel(self._cm, profile=self._profile)
+        base = (
+            Path(self._source_path).parent
+            if self._source_path is not None else None
+        )
+        issues = check_cornermodel(
+            self._cm, base_dir=base, profile=self._profile
+        )
         if not issues:
             self.check_label.setText("Check: no issues")
         else:
@@ -840,3 +958,111 @@ def _parse_var_lines(text: str) -> dict[str, str]:
             raise ValueError(f"line {line!r} is missing the var name")
         out[key] = value
     return out
+
+
+class _ColumnPickerDialog(QDialog):
+    """A checkable list of corner columns — used to assemble a run set
+    without retyping column names (pain point d)."""
+
+    def __init__(
+        self, title: str, prompt: str, names: list[str],
+        preselected: tuple[str, ...] = (),
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(320)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(prompt))
+        self._list = QListWidget()
+        pre = set(preselected)
+        for name in names:
+            item = QListWidgetItem(name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if name in pre else Qt.Unchecked
+            )
+            self._list.addItem(item)
+        layout.addWidget(self._list)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def checked_columns(self) -> tuple[str, ...]:
+        return tuple(
+            self._list.item(i).text()
+            for i in range(self._list.count())
+            if self._list.item(i).checkState() == Qt.Checked
+        )
+
+
+def _split_label_line(line: str) -> tuple[str, str]:
+    """Split ``label: rest`` into ``(label, rest)``."""
+    if ":" not in line:
+        raise ValueError(f"line {line!r} must be 'label: ...'")
+    label, _, rest = line.partition(":")
+    label = label.strip()
+    if not label:
+        raise ValueError(f"line {line!r} is missing the label")
+    return label, rest
+
+
+def _parse_kv_comma(segment: str) -> tuple[dict[str, str], list[str]]:
+    """Parse ``a=1, b=2, +axis`` → ``({a:1, b:2}, ['axis'])``."""
+    pairs: dict[str, str] = {}
+    axes: list[str] = []
+    for raw in segment.split(","):
+        tok = raw.strip()
+        if not tok:
+            continue
+        if tok.startswith("+"):
+            axes.append(tok[1:].strip())
+            continue
+        if "=" not in tok:
+            raise ValueError(
+                f"token {tok!r} is not var=value or +axisName"
+            )
+        key, _, value = tok.partition("=")
+        pairs[key.strip()] = value.strip()
+    return pairs, axes
+
+
+def _parse_template_columns(text: str) -> tuple[TemplateColumn, ...]:
+    """Parse the New-Template multi-line dialog into TemplateColumns."""
+    cols: list[TemplateColumn] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        label, rest = _split_label_line(line)
+        pairs, axes = _parse_kv_comma(rest)
+        cols.append(TemplateColumn(
+            pvt_label=label,
+            pvt_vars={k: (v,) for k, v in pairs.items()},
+            correlated_axes=tuple(axes),
+        ))
+    if not cols:
+        raise ValueError("a template needs at least one column")
+    return tuple(cols)
+
+
+def _parse_axis_tuples(text: str) -> tuple[CorrelatedTuple, ...]:
+    """Parse the New-Axis multi-line dialog into CorrelatedTuples."""
+    tuples: list[CorrelatedTuple] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        label, rest = _split_label_line(line)
+        pairs, axes = _parse_kv_comma(rest)
+        if axes:
+            raise ValueError(
+                f"point {label!r}: '+axis' tokens are not valid here"
+            )
+        tuples.append(CorrelatedTuple(label=label, values=pairs))
+    if not tuples:
+        raise ValueError("a correlated axis needs at least one point")
+    return tuple(tuples)

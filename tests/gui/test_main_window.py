@@ -585,6 +585,35 @@ def test_open_corner_model_loads_into_the_single_corners_tab(qtbot, tmp_path):
     assert w.corner_manager.cornermodel().name == "demo"
 
 
+def test_discover_cornermodel_honours_cornermodelsdir(qtbot, tmp_path):
+    """A custom cornerModelsDir in the .pvtproject must be searched, not
+    just the project root (RFIC-designer walkthrough finding 2026-05-21)."""
+    import json
+
+    from simkit.gui.loaders import load_module
+
+    pvtproject = _build_module_with_run(tmp_path)
+    # point cornerModelsDir at a non-default subdir
+    data = json.loads(pvtproject.read_text())
+    data["cornerModelsDir"] = "my_corners"
+    pvtproject.write_text(json.dumps(data))
+    cm_dir = pvtproject.parent / "my_corners"
+    cm_dir.mkdir()
+    (cm_dir / "lo.cornermodel.json").write_text(json.dumps({
+        "cornermodel_schema_version": 1, "name": "lo",
+        "project": "milestonetest", "testbench_id": "tb",
+        "modes": {"M": {"vars": {"d_en": "1"}}},
+        "columns": [{"mode": "M", "pvt_label": "TT", "enabled": True,
+                     "pvt_vars": {"temperature": "55"}}],
+    }))
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.load_module(load_module(pvtproject))
+    assert w.corner_manager.cornermodel().name == "lo"
+    assert "discovered lo.cornermodel.json" in w.bottom_log.toPlainText()
+
+
 def test_open_corner_model_bad_file_logs_and_returns_none(qtbot, tmp_path):
     w = MainWindow()
     qtbot.addWidget(w)

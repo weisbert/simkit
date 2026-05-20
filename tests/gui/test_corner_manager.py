@@ -428,8 +428,11 @@ class CornerManagerStage4Test(unittest.TestCase):
             cm_mod.QInputDialog, "getText",
             return_value=("TX_only", True),
         ), mock.patch.object(
-            cm_mod.QInputDialog, "getMultiLineText",
-            return_value=("BT_2G_TX_TT", True),
+            cm_mod._ColumnPickerDialog, "exec_",
+            return_value=cm_mod.QDialog.Accepted,
+        ), mock.patch.object(
+            cm_mod._ColumnPickerDialog, "checked_columns",
+            return_value=("BT_2G_TX_TT",),
         ):
             self.view._on_new_run_set()
         self.assertIn("TX_only", self.view.cornermodel().run_sets)
@@ -608,6 +611,119 @@ class CornerManagerStage6Test(unittest.TestCase):
             for i in range(view.profile_list.count())
         ]
         self.assertTrue(any("not loaded" in r for r in rows))
+
+
+def _make_basic_cm() -> "object":
+    """A cornermodel with one mode + two columns — bare authoring start."""
+    data = {
+        "cornermodel_schema_version": 1,
+        "name": "lo_corners",
+        "project": "1AXX",
+        "testbench_id": "sim_yusheng/Test/maestro",
+        "modes": {"BT_2G_RX": {"vars": {"d_en": "1"}}},
+        "columns": [
+            {"mode": "BT_2G_RX", "pvt_label": "TT", "enabled": True,
+             "pvt_vars": {"temperature": "55"}},
+            {"mode": "BT_2G_RX", "pvt_label": "SS", "enabled": True,
+             "pvt_vars": {"temperature": "125"}},
+        ],
+    }
+    tmp = Path(tempfile.mkdtemp())
+    p = tmp / "lo_corners.cornermodel.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    return load_cornermodel(p)
+
+
+class CornerManagerAuthoringTest(unittest.TestCase):
+    """GUI authoring of templates / axes / run sets — the controls the
+    RFIC-designer walkthrough flagged as missing (2026-05-21)."""
+
+    def setUp(self):
+        patcher = mock.patch.object(
+            cm_mod.QMessageBox, "warning", return_value=None
+        )
+        self._warning_mock = patcher.start()
+        self.addCleanup(patcher.stop)
+        self.view = CornerManagerView(_make_basic_cm())
+        self.addCleanup(self.view.deleteLater)
+
+    def test_new_axis_button_creates_a_correlated_axis(self):
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText",
+            side_effect=[("proc_ct", True), ("process, CT", True)],
+        ), mock.patch.object(
+            cm_mod.QInputDialog, "getMultiLineText",
+            return_value=("TT: process=tt, CT=100\nFF: process=ff, CT=88",
+                          True),
+        ):
+            self.view._on_new_axis()
+        axes = self.view.cornermodel().correlated_axes
+        self.assertIn("proc_ct", axes)
+        self.assertEqual(axes["proc_ct"].members, ("process", "CT"))
+        self.assertEqual(len(axes["proc_ct"].tuples), 2)
+
+    def test_new_template_button_creates_a_pvt_template(self):
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=("rx_full", True),
+        ), mock.patch.object(
+            cm_mod.QInputDialog, "getMultiLineText",
+            return_value=("TT: temperature=55, VDD=0.9\n"
+                          "SS_1: temperature=125, VDD=0.85", True),
+        ):
+            self.view._on_new_template()
+        tmpl = self.view.cornermodel().pvt_templates.get("rx_full")
+        self.assertIsNotNone(tmpl)
+        self.assertEqual([c.pvt_label for c in tmpl.columns], ["TT", "SS_1"])
+
+    def test_new_template_then_apply_generates_columns(self):
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=("rx_full", True),
+        ), mock.patch.object(
+            cm_mod.QInputDialog, "getMultiLineText",
+            return_value=("LP: temperature=55, VDD=0.7", True),
+        ):
+            self.view._on_new_template()
+        self.view.templates_list.setCurrentRow(0)
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getItem", return_value=("BT_2G_RX", True),
+        ):
+            self.view._on_apply_template()
+        names = {
+            self.view.table_model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
+            for c in range(self.view.table_model.columnCount())
+        }
+        self.assertIn("BT_2G_RX_LP", names)
+
+    def test_new_run_set_uses_column_picker(self):
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=("All_TT", True),
+        ), mock.patch.object(
+            cm_mod._ColumnPickerDialog, "exec_",
+            return_value=cm_mod.QDialog.Accepted,
+        ), mock.patch.object(
+            cm_mod._ColumnPickerDialog, "checked_columns",
+            return_value=("BT_2G_RX_TT",),
+        ):
+            self.view._on_new_run_set()
+        run_sets = self.view.cornermodel().run_sets
+        self.assertIn("All_TT", run_sets)
+        self.assertEqual(run_sets["All_TT"].columns, ("BT_2G_RX_TT",))
+
+    def test_column_filter_supports_or_grammar(self):
+        # pain point f — the column filter shares the row filter's grammar.
+        self.view.filter_edit.setText("TT or SS")
+        hidden = [
+            self.view.table.isColumnHidden(c)
+            for c in range(self.view.table_model.columnCount())
+        ]
+        self.assertEqual(hidden, [False, False])
+        self.view.filter_edit.setText("TT")
+        hidden = [
+            self.view.table.isColumnHidden(c)
+            for c in range(self.view.table_model.columnCount())
+        ]
+        # only the BT_2G_RX_TT column stays visible
+        self.assertEqual(hidden.count(False), 1)
 
 
 if __name__ == "__main__":
