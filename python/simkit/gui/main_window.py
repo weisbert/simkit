@@ -72,6 +72,7 @@ from simkit.gui.loaders import (
 from simkit.gui.tree_model import ProjectTreeModel
 from simkit.gui.views.corners_editor import CornersEditor
 from simkit.gui.views.diff_tab import DiffTab
+from simkit.gui.views.trend_tab import TrendTab
 from simkit.gui.views.measures_editor import MeasuresEditor
 from simkit.gui.views.glossary_dialog import GlossaryDialog
 from simkit.gui.views.results_tab import ResultsTab
@@ -455,6 +456,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         self._diff_controller.diff_ready.connect(self._on_diff_ready)
+        self._diff_controller.trend_ready.connect(self._on_trend_ready)
         self._diff_controller.error.connect(
             lambda msg: self.append_log(f"[diff] {msg}")
         )
@@ -762,6 +764,18 @@ class MainWindow(QMainWindow):
                     str(self._loaded_module.project_root / "reviews")
                     if self._loaded_module else ""
                 )
+            return
+        if (
+            kind == ProjectTreeModel.NODE_KIND_GROUP
+            and payload in (
+                ProjectTreeModel.GROUP_HISTORY,
+                ProjectTreeModel.GROUP_MILESTONES,
+            )
+        ):
+            a_trend = menu.addAction("里程碑趋势 (Milestone trend)…")
+            chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
+            if chosen is a_trend:
+                self._on_trend_requested()
             return
         if kind == ProjectTreeModel.NODE_KIND_REVIEW and isinstance(payload, LoadedReview):
             a_run = menu.addAction("Run this review…")
@@ -1199,6 +1213,34 @@ class MainWindow(QMainWindow):
     def _on_diff_ready(self, widget: object) -> None:
         if not isinstance(widget, DiffTab):
             self.append_log(f"[diff] unexpected widget type {type(widget).__name__}")
+            return
+        idx = self.right_panel.addTab(widget, widget.title)
+        widget.closed.connect(lambda: self._close_tab(widget))
+        self.right_panel.setCurrentIndex(idx)
+
+    # ----------------------------------------------------------------
+    # Trend path (G-6 — cross-milestone)
+    # ----------------------------------------------------------------
+
+    def _on_trend_requested(self) -> None:
+        """Open the multi-run picker, then materialise a TrendTab."""
+        if self._diff_controller is None or self._loaded_module is None:
+            self.append_log("[trend] no bridge / module loaded")
+            return
+        run_ids = self._diff_controller.pick_runs_for_trend(
+            self._loaded_module.project_path, parent_widget=self,
+        )
+        if not run_ids:
+            return  # cancelled or fewer than two picked
+        self._diff_controller.open_trend(
+            self._loaded_module.project_path, run_ids,
+        )
+
+    def _on_trend_ready(self, widget: object) -> None:
+        if not isinstance(widget, TrendTab):
+            self.append_log(
+                f"[trend] unexpected widget type {type(widget).__name__}"
+            )
             return
         idx = self.right_panel.addTab(widget, widget.title)
         widget.closed.connect(lambda: self._close_tab(widget))

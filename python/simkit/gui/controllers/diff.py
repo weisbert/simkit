@@ -21,13 +21,22 @@ from PyQt5.QtWidgets import QDialog, QWidget
 from simkit.db import connect
 from simkit.diff import compute_diff
 from simkit.gui.views.diff_tab import DiffTab
-from simkit.gui.views.run_picker import RunPickerDialog
+from simkit.gui.views.run_picker import MultiRunPickerDialog, RunPickerDialog
+from simkit.gui.views.trend_tab import TrendTab
+from simkit.trend import compute_trend
 
 
 class DiffController(QObject):
-    """Compute diffs + materialise :class:`DiffTab` widgets."""
+    """Compute diffs + trends; materialise :class:`DiffTab` / :class:`TrendTab`.
+
+    Despite the name this controller owns both the pairwise diff path
+    (§6 / §10) and the N-way cross-milestone trend path (G-6) — they
+    share the same run-list loader and DB-resolver, so splitting them
+    would only duplicate that plumbing.
+    """
 
     diff_ready = pyqtSignal(object)  # the DiffTab widget
+    trend_ready = pyqtSignal(object)  # the TrendTab widget
     error = pyqtSignal(str)
 
     def __init__(
@@ -96,7 +105,70 @@ class DiffController(QObject):
             return dlg.selected_run_id
         return None
 
+    # --- trend (G-6) ----------------------------------------------------
+
+    def pick_runs_for_trend(
+        self,
+        project_path: Path,
+        parent_widget: QWidget,
+    ) -> Optional[List[str]]:
+        """Modally pick 2+ runs for a trend. Returns run_ids or None."""
+        try:
+            runs = self._load_runs(project_path)
+        except Exception as exc:  # noqa: BLE001
+            self.error.emit(f"Run list unavailable: {exc}")
+            return None
+
+        dlg = MultiRunPickerDialog(runs, parent=parent_widget)
+        if dlg.exec_() == QDialog.Accepted and dlg.selected_run_ids:
+            return dlg.selected_run_ids
+        return None
+
+    def open_trend(
+        self,
+        project_path: Path,
+        run_ids: List[str],
+    ) -> None:
+        """Compute an N-way trend and emit :pyattr:`trend_ready`.
+
+        ``run_ids`` are re-ordered oldest-first so the trend axis reads
+        left-to-right in time regardless of the picker's display order.
+        Errors surface via the :pyattr:`error` signal; never raises.
+        """
+        if len(run_ids) < 2:
+            self.error.emit("Trend needs at least two runs.")
+            return
+        try:
+            db_path = self._resolve_db(project_path)
+            con = connect(db_path, read_only=True)
+            try:
+                ordered = self._order_by_timestamp(con, run_ids)
+                result = compute_trend(con, slices=ordered)
+            finally:
+                con.close()
+        except Exception as exc:  # noqa: BLE001 — error surfaces via signal
+            self.error.emit(f"Trend failed: {exc}")
+            return
+
+        self.trend_ready.emit(TrendTab(result))
+
     # --- internals ------------------------------------------------------
+
+    def _order_by_timestamp(
+        self, con, run_ids: List[str],
+    ) -> List[str]:
+        """Sort ``run_ids`` oldest-first; unknown ids keep their position."""
+        ts: dict[str, str] = {}
+        for rid in set(run_ids):
+            row = con.execute(
+                "SELECT CAST(timestamp AS VARCHAR) FROM runs WHERE run_id = ?",
+                [rid],
+            ).fetchone()
+            if row is not None and row[0] is not None:
+                ts[rid] = str(row[0])
+        # Stable sort: ids with a known timestamp sort by it; the rest
+        # keep their original relative order at the front.
+        return sorted(run_ids, key=lambda r: (r in ts, ts.get(r, "")))
 
     def _load_runs(self, project_path: Path) -> List[dict]:
         """Fetch the run list for the picker — minimal columns."""
@@ -109,7 +181,7 @@ class DiffController(QObject):
             # the CLI list-runs uses.
             rows = con.execute(
                 """
-                SELECT run_id, label, CAST(timestamp AS VARCHAR)
+                SELECT run_id, label, CAST(timestamp AS VARCHAR), milestone
                 FROM runs
                 ORDER BY timestamp DESC
                 """,
@@ -117,11 +189,12 @@ class DiffController(QObject):
         finally:
             con.close()
         out: List[dict] = []
-        for run_id, label, ts in rows:
+        for run_id, label, ts, milestone in rows:
             out.append({
                 "run_id": run_id,
                 "short_id": (run_id or "")[:8],
                 "timestamp": "" if ts is None else str(ts),
                 "label": label,
+                "milestone": milestone,
             })
         return out

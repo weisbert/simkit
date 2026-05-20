@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import QApplication, QWidget  # noqa: E402
 from simkit.db import bootstrap, connect  # noqa: E402
 from simkit.gui.controllers.diff import DiffController  # noqa: E402
 from simkit.gui.views.diff_tab import DiffTab  # noqa: E402
+from simkit.gui.views.trend_tab import TrendTab  # noqa: E402
 from simkit.ingest import ingest_run_json  # noqa: E402
 
 
@@ -216,6 +217,78 @@ class DiffControllerLoadRunsTests(DiffControllerTestBase):
         self._close_write_con()
         ctrl = self._make_controller()
         self.assertEqual(ctrl._load_runs(self.tmp), [])  # noqa: SLF001
+
+
+_RUN_C_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+
+
+class DiffControllerOpenTrendTests(DiffControllerTestBase):
+    """The G-6 trend path."""
+
+    def test_signals_exist(self):
+        ctrl = self._make_controller()
+        self.assertIsInstance(ctrl.trend_ready, pyqtBoundSignal)
+
+    def test_open_trend_emits_trendtab_with_columns(self):
+        self._ingest(_RUN_A_ID, [_result_row("T", "TT", 0, "v", 1.0)],
+                     timestamp="2026-05-10T12:00:00+08:00")
+        self._ingest(_RUN_B_ID, [_result_row("T", "TT", 0, "v", 2.0)],
+                     timestamp="2026-05-11T12:00:00+08:00")
+        self._ingest(_RUN_C_ID, [_result_row("T", "TT", 0, "v", 3.0)],
+                     timestamp="2026-05-12T12:00:00+08:00")
+        self._close_write_con()
+        ctrl = self._make_controller()
+        seen: list[TrendTab] = []
+        ctrl.trend_ready.connect(seen.append)
+
+        ctrl.open_trend(self.tmp, [_RUN_A_ID, _RUN_B_ID, _RUN_C_ID])
+
+        self.assertEqual(len(seen), 1)
+        tab = seen[0]
+        self.assertIsInstance(tab, TrendTab)
+        self.assertEqual(len(tab.trend_result.columns), 3)
+        self.assertEqual(tab.trend_result.rows[0].direction, "up")
+
+    def test_open_trend_reorders_run_ids_oldest_first(self):
+        # Pass newest-first; the trend axis must still read oldest-first.
+        self._ingest(_RUN_A_ID, [_result_row("T", "TT", 0, "v", 10.0)],
+                     timestamp="2026-05-01T00:00:00+08:00")
+        self._ingest(_RUN_B_ID, [_result_row("T", "TT", 0, "v", 20.0)],
+                     timestamp="2026-05-09T00:00:00+08:00")
+        self._close_write_con()
+        ctrl = self._make_controller()
+        seen: list[TrendTab] = []
+        ctrl.trend_ready.connect(seen.append)
+
+        ctrl.open_trend(self.tmp, [_RUN_B_ID, _RUN_A_ID])
+
+        col_runs = [c.run_id for c in seen[0].trend_result.columns]
+        self.assertEqual(col_runs, [_RUN_A_ID, _RUN_B_ID])
+
+    def test_open_trend_single_run_emits_error(self):
+        self._ingest(_RUN_A_ID, [])
+        self._close_write_con()
+        ctrl = self._make_controller()
+        errors: list[str] = []
+        trends: list[object] = []
+        ctrl.error.connect(errors.append)
+        ctrl.trend_ready.connect(trends.append)
+
+        ctrl.open_trend(self.tmp, [_RUN_A_ID])
+
+        self.assertEqual(trends, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("at least two", errors[0])
+
+    def test_open_trend_unknown_run_emits_error(self):
+        self._ingest(_RUN_A_ID, [])
+        self._close_write_con()
+        ctrl = self._make_controller()
+        errors: list[str] = []
+        ctrl.error.connect(errors.append)
+        ctrl.open_trend(self.tmp, [_RUN_A_ID, "no-such-id"])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Trend failed", errors[0])
 
 
 if __name__ == "__main__":  # pragma: no cover

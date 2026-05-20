@@ -24,6 +24,7 @@ from simkit.cli import list_runs as list_cmd
 from simkit.cli import measure as measure_cmd
 from simkit.cli import run as run_cmd
 from simkit.cli import star as star_cmd
+from simkit.cli import trend as trend_cmd
 from simkit.cli import validate as validate_cmd
 
 
@@ -42,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     label_cmd.add_subparser(sub)
     list_cmd.add_subparser(sub)
     diff_cmd.add_subparser(sub)
+    trend_cmd.add_subparser(sub)
     corners_cmd.add_subparser(sub)
     measure_cmd.add_subparser(sub)
     run_cmd.add_subparser(sub)

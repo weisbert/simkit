@@ -14,7 +14,10 @@ sys.path.insert(0, str(_REPO_ROOT / "python"))
 
 from PyQt5.QtWidgets import QApplication, QDialogButtonBox  # noqa: E402
 
-from simkit.gui.views.run_picker import RunPickerDialog  # noqa: E402
+from simkit.gui.views.run_picker import (  # noqa: E402
+    MultiRunPickerDialog,
+    RunPickerDialog,
+)
 
 
 _QAPP = QApplication.instance() or QApplication(sys.argv)
@@ -170,6 +173,56 @@ class RunPickerFormatTests(unittest.TestCase):
                 break
         else:
             self.fail("row not found")
+
+
+class MultiRunPickerTests(unittest.TestCase):
+    """MultiRunPickerDialog — the G-6 trend chooser."""
+
+    def test_construction_populates_all_rows(self):
+        dlg = MultiRunPickerDialog(_runs())
+        self.assertEqual(dlg.list_widget.count(), 3)
+
+    def test_ok_disabled_until_two_selected(self):
+        dlg = MultiRunPickerDialog(_runs())
+        ok = dlg.button_box.button(QDialogButtonBox.Ok)
+        self.assertFalse(ok.isEnabled())
+        dlg.list_widget.item(0).setSelected(True)
+        dlg._update_ok_enabled()
+        self.assertFalse(ok.isEnabled())
+        dlg.list_widget.item(1).setSelected(True)
+        dlg._update_ok_enabled()
+        self.assertTrue(ok.isEnabled())
+
+    def test_accept_returns_selection_in_list_order(self):
+        dlg = MultiRunPickerDialog(_runs())
+        # Select rows 2 then 0 — result must follow list order, not click order.
+        dlg.list_widget.item(2).setSelected(True)
+        dlg.list_widget.item(0).setSelected(True)
+        dlg._on_accept()
+        self.assertEqual(
+            dlg.selected_run_ids, ["aaaaaaaa-...", "cccccccc-..."],
+        )
+
+    def test_milestone_shown_in_row_text(self):
+        runs = [
+            {"run_id": "x", "short_id": "xxxx", "timestamp": "2026-05-01",
+             "label": None, "milestone": "PDR"},
+            {"run_id": "y", "short_id": "yyyy", "timestamp": "2026-05-02",
+             "label": None, "milestone": None},
+        ]
+        dlg = MultiRunPickerDialog(runs)
+        self.assertIn("[PDR]", dlg.list_widget.item(0).text())
+
+    def test_filter_matches_milestone(self):
+        runs = [
+            {"run_id": "x", "short_id": "xxxx", "timestamp": "t",
+             "label": None, "milestone": "PDR"},
+            {"run_id": "y", "short_id": "yyyy", "timestamp": "t",
+             "label": None, "milestone": "CDR"},
+        ]
+        dlg = MultiRunPickerDialog(runs)
+        dlg.filter_edit.setText("pdr")
+        self.assertEqual(dlg.list_widget.count(), 1)
 
 
 if __name__ == "__main__":  # pragma: no cover
