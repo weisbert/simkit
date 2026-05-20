@@ -267,3 +267,252 @@ def test_sanitize_history_prefix_drops_punctuation():
     assert _sanitize_history_prefix("___") == "run"   # empty after strip
     assert _sanitize_history_prefix("") == "run"
     assert _sanitize_history_prefix("ok_name") == "ok_name"
+
+
+# --- _serialize_union carries _file_abs (SFE-73) ----------------------------
+
+def _one_model_union(file_abs):
+    from simkit.union import Union, UnionRow, ModelEntry
+
+    return Union(
+        union_schema_version=1, name="u", project="demo",
+        testbench_id="LIB/cell/sch",
+        rows=(
+            UnionRow(
+                row_name="TT", vars={},
+                models=(ModelEntry(
+                    file="rf018.scs", block="Global", test="All",
+                    section=("tt",), file_abs=file_abs,
+                ),),
+            ),
+        ),
+    )
+
+
+def test_serialize_union_emits_file_abs_when_present():
+    import json as _json
+    from simkit.gui.main_window import _serialize_union
+
+    out = _json.loads(_serialize_union(_one_model_union("/pdk/models/rf018.scs")))
+    model = out["rows"][0]["models"][0]
+    assert model["_file_abs"] == "/pdk/models/rf018.scs"
+    assert model["file"] == "rf018.scs"
+
+
+def test_serialize_union_omits_file_abs_when_absent():
+    import json as _json
+    from simkit.gui.main_window import _serialize_union
+
+    out = _json.loads(_serialize_union(_one_model_union(None)))
+    assert "_file_abs" not in out["rows"][0]["models"][0]
+
+
+# --- File > Open Module… menu item ------------------------------------------
+
+def test_menu_bar_exists(qtbot):
+    """MainWindow must expose a QMenuBar (not None and not empty)."""
+    w = MainWindow()
+    qtbot.addWidget(w)
+    mb = w.menuBar()
+    assert mb is not None
+    assert mb.actions(), "menu bar has no menus"
+
+
+def test_file_menu_has_open_module_action(qtbot):
+    """File menu must contain an 'Open Module…' action."""
+    w = MainWindow()
+    qtbot.addWidget(w)
+    mb = w.menuBar()
+    # Find the File menu by title (strip & mnemonic marker).
+    file_menu = None
+    for action in mb.actions():
+        if "file" in action.text().lower().replace("&", ""):
+            file_menu = action.menu()
+            break
+    assert file_menu is not None, "No 'File' menu found in menu bar"
+    action_texts = [a.text() for a in file_menu.actions()]
+    assert any("open module" in t.lower() for t in action_texts), (
+        f"'Open Module…' action not found in File menu; found: {action_texts}"
+    )
+
+
+def test_open_module_action_wired_to_handler(qtbot):
+    """_open_module_action must exist as a QAction attribute and be connected."""
+    w = MainWindow()
+    qtbot.addWidget(w)
+    action = getattr(w, "_open_module_action", None)
+    assert action is not None, "_open_module_action attribute missing from MainWindow"
+    from PyQt5.QtWidgets import QAction
+    assert isinstance(action, QAction)
+
+
+def test_open_module_cancels_gracefully(qtbot, monkeypatch):
+    """Cancelling the file dialog (empty string returned) must not crash or log."""
+    from PyQt5.QtWidgets import QFileDialog
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getExistingDirectory",
+        staticmethod(lambda *a, **kw: ""),
+    )
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._on_open_module()  # must not raise
+    assert w.bottom_log.toPlainText() == "", (
+        "Cancelling open-module dialog should not write to the log"
+    )
+
+
+# --- File > Sync Maestro History --------------------------------------------
+
+def test_file_menu_has_sync_history_action(qtbot):
+    """File menu must contain a 'Sync Maestro History' action."""
+    w = MainWindow()
+    qtbot.addWidget(w)
+    mb = w.menuBar()
+    file_menu = None
+    for action in mb.actions():
+        if "file" in action.text().lower().replace("&", ""):
+            file_menu = action.menu()
+            break
+    assert file_menu is not None
+    action_texts = [a.text() for a in file_menu.actions()]
+    assert any("sync maestro history" in t.lower() for t in action_texts), (
+        f"'Sync Maestro History' action missing; found: {action_texts}"
+    )
+
+
+def test_sync_history_done_logs_summary_and_handles_failures(qtbot):
+    """_on_sync_maestro_history_done must log the mirror/skip/fail counts."""
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._on_sync_maestro_history_done(
+        {
+            "mirrored": ["Interactive.0", "Interactive.1"],
+            "skipped": ["orch_x"],
+            "failed": [{"history": "bad", "error": "rdb unreadable"}],
+        }
+    )
+    log = w.bottom_log.toPlainText()
+    assert "2 mirrored" in log
+    assert "1 already present" in log
+    assert "1 failed" in log
+    assert "bad" in log and "rdb unreadable" in log
+
+
+# --- regression tests: scenario-testing bug fixes ---------------------------
+
+
+def _add_review(pvtproject_path, name, *, valid=True):
+    """Drop a .review.json into the project's reviews/ dir."""
+    reviews = pvtproject_path.parent / "reviews"
+    reviews.mkdir(exist_ok=True)
+    path = reviews / f"{name}.review.json"
+    if valid:
+        path.write_text(
+            '{"review_schema_version": 1, "name": "%s", '
+            '"project": "milestonetest", "items": []}' % name
+        )
+    else:
+        path.write_text("{ this is not valid json")
+    return path
+
+
+def test_open_module_resolves_directory_to_pvtproject(qtbot, tmp_path, monkeypatch):
+    """getExistingDirectory hands back a directory; _on_open_module must
+    resolve it to the .pvtproject file before load_module sees it."""
+    from PyQt5.QtWidgets import QFileDialog
+
+    pvtproject = _build_module_with_run(tmp_path)
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        staticmethod(lambda *a, **kw: str(pvtproject.parent)),
+    )
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._on_open_module()
+    assert w._loaded_module is not None
+    assert w._loaded_module.project_name == "milestonetest"
+
+
+def test_open_module_warns_when_dir_has_no_pvtproject(qtbot, tmp_path, monkeypatch):
+    from PyQt5.QtWidgets import QFileDialog
+
+    empty = tmp_path / "notamodule"
+    empty.mkdir()
+    monkeypatch.setattr(
+        QFileDialog, "getExistingDirectory",
+        staticmethod(lambda *a, **kw: str(empty)),
+    )
+    warned = []
+    monkeypatch.setattr(
+        MainWindow, "_warn", lambda self, title, text: warned.append(title)
+    )
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._on_open_module()
+    assert w._loaded_module is None
+    assert warned
+
+
+def test_broken_review_keeps_run_button_disabled(qtbot, tmp_path):
+    from simkit.gui.loaders import load_module
+
+    pvtproject = _build_module_with_run(tmp_path)
+    _add_review(pvtproject, "broken", valid=False)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.load_module(load_module(pvtproject))
+    broken = next(
+        r for r in w._loaded_module.reviews if r.review_name == "broken"
+    )
+    assert broken.parse_error
+    w._select_review(broken)
+    assert w.results_tab.run_button.isEnabled() is False
+
+
+def test_good_review_enables_run_and_is_remembered(qtbot, tmp_path):
+    from simkit.gui.loaders import load_module
+
+    pvtproject = _build_module_with_run(tmp_path)
+    path = _add_review(pvtproject, "good", valid=True)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.load_module(load_module(pvtproject))
+    good = next(
+        r for r in w._loaded_module.reviews if r.review_name == "good"
+    )
+    w._select_review(good)
+    assert w.results_tab.run_button.isEnabled() is True
+    assert w.current_review_path() == str(path.resolve())
+
+
+def test_restore_session_rebinds_last_selected_review(qtbot, tmp_path):
+    from simkit.gui.loaders import load_module
+
+    pvtproject = _build_module_with_run(tmp_path)
+    path = _add_review(pvtproject, "good", valid=True)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.load_module(load_module(pvtproject))
+    w.restore_session(None, None, str(path.resolve()))
+    assert w.current_review_path() == str(path.resolve())
+    assert w.results_tab.run_button.isEnabled() is True
+
+
+def test_warn_if_op_stalled_logs_when_op_still_pending(qtbot):
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._pending_ops[99] = {
+        "on_ok": None, "on_err": None, "func": "pvt_corners_push",
+    }
+    w._warn_if_op_stalled(99)
+    assert "可能卡住" in w.bottom_log.toPlainText()
+
+
+def test_warn_if_op_stalled_silent_when_op_completed(qtbot):
+    w = MainWindow()
+    qtbot.addWidget(w)
+    before = w.bottom_log.toPlainText()
+    w._warn_if_op_stalled(4242)  # never registered → already done
+    assert w.bottom_log.toPlainText() == before

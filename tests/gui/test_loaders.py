@@ -299,7 +299,62 @@ def test_union_to_editor_rows_respects_enabled_flag(tmp_path):
     assert rows[0]["_enabled"] is False
 
 
+def test_union_to_editor_rows_shows_absolute_model_path(tmp_path):
+    # SFE-73 guard: when the pulled union carries `_file_abs`, the editor
+    # must surface the absolute path, not the bare model name.
+    body = {
+        "union_schema_version": 1,
+        "name": "demo_abs",
+        "project": "demo",
+        "testbench_id": "LIB/cell/schematic",
+        "rows": [
+            {
+                "row_name": "TT",
+                "vars": {"process": "tt"},
+                "models": [
+                    {
+                        "file": "rf018.scs",
+                        "_file_abs": "/pdk/models/spectre/rf018.scs",
+                        "block": "Global",
+                        "test": "All",
+                        "section": "tt",
+                    }
+                ],
+            }
+        ],
+    }
+    p = tmp_path / "demo_abs.union.json"
+    p.write_text(json.dumps(body), encoding="utf-8")
+    rows = union_to_editor_rows(load_union(p))
+    assert rows[0]["model_file"] == "/pdk/models/spectre/rf018.scs"
+
+
 # --- editor_rows_to_union_rows ------------------------------------------
+
+
+def test_editor_rows_to_union_rows_splits_path_into_file_and_file_abs():
+    # An absolute model_file path becomes file=basename + file_abs=path so
+    # push can call axlSetModelFile and Spectre does not see `include ""`.
+    abs_path = "/pdk/models/spectre/rf018.scs"
+    union = editor_rows_to_union_rows(
+        [{"row_name": "TT", "process": "tt", "model_file": abs_path}],
+        name="u", project="demo", testbench_id="LIB/cell/sch",
+    )
+    m = union.rows[0].models[0]
+    assert m.file == "rf018.scs"
+    assert m.file_abs == abs_path
+
+
+def test_editor_rows_to_union_rows_bare_basename_has_no_file_abs():
+    # A bare basename has no path to preserve; file_abs stays None so push
+    # falls back to add-name-only (no regression for that degenerate case).
+    union = editor_rows_to_union_rows(
+        [{"row_name": "TT", "process": "tt", "model_file": "rf018.scs"}],
+        name="u", project="demo", testbench_id="LIB/cell/sch",
+    )
+    m = union.rows[0].models[0]
+    assert m.file == "rf018.scs"
+    assert m.file_abs is None
 
 
 def test_editor_rows_to_union_rows_single_axis_round_trip(tmp_path):

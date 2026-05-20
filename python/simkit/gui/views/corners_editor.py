@@ -437,9 +437,19 @@ class CornersEditor(QWidget):
         positive integer that doesn't collide with any existing row
         name in this editor (spec §11.1 wording: "New row gets a
         generated unique row_name").
+
+        The new row inherits the ``model_file`` path from the first
+        existing row that carries one.  Rows within a corner normally
+        share a single model file, so this avoids the empty-``_file_abs``
+        / ``include ""`` Spectre error (SFE-73) that appears when an
+        add-row corner is pushed without a model file.
         """
         name = self._next_unique_name("corner_")
-        self._append_row_from_dict({"row_name": name})
+        inherited_model_file = self._first_nonempty_model_file()
+        row: dict = {"row_name": name}
+        if inherited_model_file:
+            row["model_file"] = inherited_model_file
+        self._append_row_from_dict(row)
         self._refresh_push_enabled()
 
     def duplicate_row(self) -> None:
@@ -572,3 +582,16 @@ class CornersEditor(QWidget):
         while f"{base}{n}" in existing:
             n += 1
         return f"{base}{n}"
+
+    def _first_nonempty_model_file(self) -> str:
+        """Return the first non-empty ``model_file`` value in the model.
+
+        Used by :meth:`add_row` so new rows inherit the corner's shared
+        model file rather than leaving ``model_file`` blank (SFE-73).
+        Returns an empty string when no row has a model file yet.
+        """
+        for r in range(self._model.rowCount()):
+            value = self._cell_text(r, COL_MODEL_FILE).strip()
+            if value:
+                return value
+        return ""

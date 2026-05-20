@@ -933,6 +933,17 @@
                     (cond
                       ((equal statusSym 'failed)  "failed")
                       ((equal statusSym 'running) "running")
+                      ;; Maestro emits 'prepFailed / 'aborted / 'killed for
+                      ;; runs that produced no sim data (netlisting/prep
+                      ;; failed, or the run was stopped). All are degenerate
+                      ;; failures with no results — map to the valid simkit
+                      ;; sentinel "failed" so the run still ingests. Without
+                      ;; this the raw Maestro symbol passes through verbatim
+                      ;; and validator I12 (status enum) rejects the whole
+                      ;; run.json — the history can never be mirrored and
+                      ;; re-fails on every Sync Maestro History.
+                      ((member statusSym '(prepFailed aborted killed))
+                        "failed")
                       ((symbolp statusSym)        (_pvtSymToStr statusSym))
                       ;; Non-symbol status (nil filtered upstream): surface as
                       ;; "unknown" so validator I12 (status enum) hard-errors

@@ -267,3 +267,26 @@ class ResultsTabCompareButtonTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def test_set_review_path_not_runnable_keeps_run_disabled():
+    """A review that fails to parse binds the path but must NOT enable
+    the Run button — dispatching pvt run on it would just fail."""
+    t = ResultsTab()
+    t.set_review_path("/tmp/x.review.json", runnable=False)
+    assert t.run_button.isEnabled() is False
+    t.set_review_path("/tmp/x.review.json", runnable=True)
+    assert t.run_button.isEnabled() is True
+
+
+def test_show_review_summary_updates_header_and_clears_run():
+    t = ResultsTab()
+    t.show_review_summary("my_review", 4)
+    assert "my_review" in t.header_label.text()
+    assert t.current_run_id() is None
+
+
+def test_show_review_summary_flags_parse_error():
+    t = ResultsTab()
+    t.show_review_summary("bad", 0, parse_error="invalid JSON")
+    assert "解析失败" in t.header_label.text()

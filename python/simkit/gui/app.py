@@ -188,7 +188,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # --- restore per-module session bits (after worker is wired) ------
     if session is not None:
-        window.restore_session(session.session_name, session.active_baseline)
+        window.restore_session(
+            session.session_name,
+            session.active_baseline,
+            session.last_selected_review,
+        )
 
     # --- shutdown wiring ---------------------------------------------
     def _persist_on_close():
@@ -199,6 +203,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             try:
                 session.session_name = window.current_session_name()
                 session.active_baseline = window.current_baseline_run_id()
+                session.last_selected_review = window.current_review_path()
             except Exception as exc:  # noqa: BLE001
                 log.debug("could not capture window session bits: %s", exc)
             try:

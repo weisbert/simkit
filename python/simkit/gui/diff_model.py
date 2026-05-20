@@ -170,6 +170,9 @@ def _format_cell(value: Any) -> str:
     if isinstance(value, float):
         # Compact float rendering — full precision lives in the DiffRow
         # object, accessible via ``diff_row_at()`` for tooltip overlays.
+        if value == 0.0:
+            # Collapse IEEE -0.0 so an unchanged delta renders "0", not "-0".
+            value = 0.0
         return f"{value:g}"
     return str(value)
 

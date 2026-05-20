@@ -30,12 +30,14 @@ from PyQt5.QtCore import Qt, QModelIndex, QPoint, QFileSystemWatcher, QTimer
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QFileDialog,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QMenu,
+    QMenuBar,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -95,8 +97,28 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("simkit")
         self.resize(*self.DEFAULT_SIZE)
 
+        # --- menu bar ---------------------------------------------------
+        menu_bar = self.menuBar()
+        file_menu = menu_bar.addMenu("&File")
+        self._open_module_action = QAction("Open Module…", self)
+        self._open_module_action.setShortcut("Ctrl+O")
+        self._open_module_action.setToolTip(
+            "Browse for a .pvtproject directory to open"
+        )
+        self._open_module_action.triggered.connect(self._on_open_module)
+        file_menu.addAction(self._open_module_action)
+        self._sync_history_action = QAction("Sync Maestro History", self)
+        self._sync_history_action.setToolTip(
+            "Ingest Maestro history entries not yet in this module's database"
+        )
+        self._sync_history_action.triggered.connect(
+            self._on_sync_maestro_history
+        )
+        file_menu.addAction(self._sync_history_action)
+
         # --- live state (populated lazily) ------------------------------
         self._loaded_module: Optional[LoadedModule] = None
+        self._selected_review_path: Optional[str] = None
         self._worker: Optional[BridgeWorker] = None
         self._run_controller: Optional[RunController] = None
         self._diff_controller: Optional[DiffController] = None
@@ -116,7 +138,7 @@ class MainWindow(QMainWindow):
         self.module_selector = QWidget(objectName="moduleSelector")
         ms_layout = QHBoxLayout(self.module_selector)
         ms_layout.setContentsMargins(0, 0, 0, 0)
-        self.module_label = QLabel("[Module: -]")
+        self.module_label = QLabel("未打开模块 — File ▸ Open Module… (Ctrl+O)")
         ms_layout.addWidget(self.module_label)
         top_bar_layout.addWidget(self.module_selector)
 
@@ -257,6 +279,8 @@ class MainWindow(QMainWindow):
         self._bridge_status = status
         if status == BridgeStatus.GREEN:
             self.restart_bridge_button.setVisible(False)
+            # Clear any RED/AMBER styling so a later re-show starts clean.
+            self.restart_bridge_button.setStyleSheet("")
         else:
             self.restart_bridge_button.setVisible(True)
             if status == BridgeStatus.RED:
@@ -409,6 +433,98 @@ class MainWindow(QMainWindow):
 
         self._rewire_fs_watcher()
 
+    def _on_open_module(self) -> None:
+        """File > Open Module… — let the user pick a .pvtproject directory.
+
+        Uses the same ``load_module`` + ``self.load_module`` code path as
+        the ``--module`` CLI argument in ``simkit.gui.app``.
+        """
+        from simkit.gui.loaders import load_module
+
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Open Module — select the .pvtproject directory",
+            str(Path.home()),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not chosen:
+            return  # user cancelled
+        module_dir = Path(chosen).expanduser().resolve()
+        # getExistingDirectory returns the directory; load_module expects
+        # the .pvtproject *file* inside it.
+        pvtproject_path = (
+            module_dir if module_dir.name == ".pvtproject"
+            else module_dir / ".pvtproject"
+        )
+        if not pvtproject_path.is_file():
+            self._warn(
+                "不是 simkit 模块",
+                f"{module_dir}\n\n该目录下没有 .pvtproject 文件，"
+                f"不是一个 simkit 模块。",
+            )
+            self.append_log(f"[open-module] no .pvtproject under {module_dir}")
+            return
+        try:
+            loaded = load_module(pvtproject_path)
+        except Exception as exc:  # noqa: BLE001
+            self._warn(
+                "Could not open module",
+                f"{pvtproject_path}\n\n{exc}",
+            )
+            self.append_log(f"[open-module] failed: {exc}")
+            return
+        self.load_module(loaded)
+        self.append_log(f"[open-module] loaded {pvtproject_path}")
+
+    def _on_sync_maestro_history(self) -> None:
+        """File > Sync Maestro History — ingest history entries this
+        module's DB does not have yet (Problem #2: simkit history shows
+        empty next to Maestro's full history list).
+        """
+        if not self._can_dispatch_bridge("sync-history"):
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn_session_required()
+            return
+        module = self._loaded_module
+        self._queue_op(
+            "mirror_maestro_history",
+            on_ok=self._on_sync_maestro_history_done,
+            kwargs={
+                "pvtproject_path": module.project_path,
+                "session": session,
+            },
+        )
+        self.append_log("[sync-history] queued — collecting Maestro history…")
+
+    def _on_sync_maestro_history_done(self, result: object) -> None:
+        if not isinstance(result, dict):
+            self.append_log(f"[sync-history] unexpected result: {result!r}")
+            return
+        mirrored = result.get("mirrored", [])
+        skipped = result.get("skipped", [])
+        failed = result.get("failed", [])
+        self.append_log(
+            f"[sync-history] {len(mirrored)} mirrored / "
+            f"{len(skipped)} already present / {len(failed)} failed"
+        )
+        for entry in failed:
+            self.append_log(
+                f"[sync-history]   FAILED {entry.get('history')}: "
+                f"{entry.get('error')}"
+            )
+        if mirrored and self._loaded_module is not None:
+            from simkit.gui.loaders import load_module
+            try:
+                self._loaded_module = load_module(
+                    self._loaded_module.project_path
+                )
+                self._tree_model.populate(self._loaded_module)
+                self.left_tree.expandAll()
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[sync-history] tree refresh failed: {exc}")
+
     def _rewire_fs_watcher(self) -> None:
         """(Re-)install QFileSystemWatcher on the project's sidecar dirs.
 
@@ -445,12 +561,38 @@ class MainWindow(QMainWindow):
         if self._fs_watcher and dir_path not in self._fs_watcher.directories():
             self._fs_watcher.addPath(dir_path)
 
-    def restore_session(self, session_name: Optional[str], baseline: Optional[str]) -> None:
+    def restore_session(
+        self,
+        session_name: Optional[str],
+        baseline: Optional[str],
+        last_review: Optional[str] = None,
+    ) -> None:
         """Apply persisted ModuleSession bits to the live UI."""
         if session_name:
             self.session_input.setText(session_name)
         if baseline:
             self.results_tab.set_baseline(baseline)
+        if last_review and self._loaded_module is not None:
+            for review in self._loaded_module.reviews:
+                if str(review.review_path) == last_review:
+                    self._select_review(review)
+                    self._select_review_in_tree(review)
+                    break
+
+    def _select_review_in_tree(self, review: LoadedReview) -> None:
+        """Highlight ``review``'s node in the left tree (best effort)."""
+        model = self._tree_model
+        for g in range(model.rowCount()):
+            gi = model.index(g, 0)
+            for r in range(model.rowCount(gi)):
+                ci = model.index(r, 0, gi)
+                if (
+                    model.node_kind(ci) == ProjectTreeModel.NODE_KIND_REVIEW
+                    and model.node_payload(ci) is review
+                ):
+                    self.left_tree.setCurrentIndex(ci)
+                    self.left_tree.scrollTo(ci)
+                    return
 
     def _auto_detect_session(self) -> None:
         """Probe Maestro for the currently-focused session; prefill if empty.
@@ -493,8 +635,7 @@ class MainWindow(QMainWindow):
         kind = self._tree_model.node_kind(index)
         payload = self._tree_model.node_payload(index)
         if kind == ProjectTreeModel.NODE_KIND_REVIEW and isinstance(payload, LoadedReview):
-            self.results_tab.set_review_path(str(payload.review_path))
-            self.append_log(f"[tree] selected review {payload.review_name}")
+            self._select_review(payload)
         elif kind == ProjectTreeModel.NODE_KIND_HISTORY and isinstance(
             payload, LoadedHistoryRun
         ):
@@ -503,6 +644,29 @@ class MainWindow(QMainWindow):
             self._load_bundle_from_disk(payload.bundle_path)
             self.right_panel.setCurrentWidget(self.measures_editor)
             self.append_log(f"[tree] loaded bundle {payload.bundle_name}")
+
+    def _select_review(self, payload: LoadedReview) -> None:
+        """Bind a review node: enable Run (unless parse-broken), show a
+        summary in the Results header, remember it for session restore."""
+        review_path = str(payload.review_path)
+        self._selected_review_path = review_path
+        runnable = not payload.parse_error
+        self.results_tab.set_review_path(review_path, runnable=runnable)
+        self.results_tab.show_review_summary(
+            payload.review_name, payload.item_count, payload.parse_error,
+        )
+        if payload.parse_error:
+            self.append_log(
+                f"[tree] review {payload.review_name} 解析失败，无法运行: "
+                f"{payload.parse_error}"
+            )
+        else:
+            self.append_log(f"[tree] selected review {payload.review_name}")
+
+    def current_review_path(self) -> Optional[str]:
+        """The review last selected in the tree — persisted by app.py so
+        the next launch can restore it (spec A4)."""
+        return self._selected_review_path
 
     def _on_corners_table_context_menu(self, pos: QPoint) -> None:
         """Right-click on a corner row → Duplicate / Delete shortcuts."""
@@ -548,12 +712,17 @@ class MainWindow(QMainWindow):
             return
         if kind == ProjectTreeModel.NODE_KIND_REVIEW and isinstance(payload, LoadedReview):
             a_run = menu.addAction("Run this review…")
+            if payload.parse_error:
+                # A review that doesn't parse can't be run — disable the
+                # action so the user can't dispatch a doomed pvt run.
+                a_run.setEnabled(False)
+                a_run.setText("Run this review…  (解析失败)")
             a_open = menu.addAction("Open .review.json")
             menu.addSeparator()
             a_del = menu.addAction("Delete .review.json")
             chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
             if chosen is a_run:
-                self.results_tab.set_review_path(str(payload.review_path))
+                self._select_review(payload)
                 self._on_run_requested(str(payload.review_path))
             elif chosen is a_open:
                 self._open_in_editor(payload.review_path)
@@ -660,6 +829,7 @@ class MainWindow(QMainWindow):
         self.left_tree.expandAll()
         # Auto-bind the review so Run button activates immediately
         self.results_tab.set_review_path(str(out_path))
+        self._selected_review_path = str(out_path)
         # Open the file in $EDITOR so user can flesh it out
         self._open_in_editor(out_path)
 
@@ -893,7 +1063,7 @@ class MainWindow(QMainWindow):
     def _on_run_cancelled(self) -> None:
         self.append_log("[run] cancelled (SIGKILL fired)")
         if self._run_progress is not None:
-            self._run_progress.set_running(False)
+            self._run_progress.mark_cancelled()
 
     def _on_run_controller_error(self, msg: str) -> None:
         self.append_log(f"[run] controller error: {msg}")
@@ -1178,6 +1348,14 @@ class MainWindow(QMainWindow):
     # BridgeWorker dispatch + error rendering
     # ----------------------------------------------------------------
 
+    #: A bridge op still pending after this many ms is almost certainly
+    #: stuck — the SKILL bridge wedges (Maestro modal dialog, or socket
+    #: left in a bad state after a prior axlRunAllTests). _dispatch then
+    #: blocks the worker thread forever, so op_complete/op_failed never
+    #: arrive and the heartbeat (skipped while busy) can't flip the dot.
+    #: Surface it so the user isn't left staring at a silent "queued".
+    BRIDGE_OP_STALL_MS = 60_000
+
     def _queue_op(
         self,
         func_name: str,
@@ -1190,7 +1368,25 @@ class MainWindow(QMainWindow):
             raise RuntimeError("queue_op called before set_bridge_worker")
         req = self._worker.queue_op(func_name, **(kwargs or {}))
         self._pending_ops[req] = {"on_ok": on_ok, "on_err": on_err, "func": func_name}
+        QTimer.singleShot(
+            self.BRIDGE_OP_STALL_MS, lambda: self._warn_if_op_stalled(req)
+        )
         return req
+
+    def _warn_if_op_stalled(self, request_id: int) -> None:
+        """Log a hint if a queued op is still unfinished — see
+        :pyattr:`BRIDGE_OP_STALL_MS`. Harmless once the op has completed
+        (it is no longer in ``_pending_ops``)."""
+        info = self._pending_ops.get(request_id)
+        if info is None:
+            return  # completed (or failed) normally — nothing to warn about
+        secs = self.BRIDGE_OP_STALL_MS // 1000
+        self.append_log(
+            f"[bridge] 操作 '{info.get('func')}' 已 {secs}s 未返回 —— "
+            f"SKILL bridge 可能卡住（常见：Maestro 弹出了模态对话框，"
+            f"或上一次仿真后 bridge 滞留）。请检查 Maestro 是否有待处理"
+            f"弹窗，或点顶部 Restart bridge 重新探测。"
+        )
 
     def _on_op_complete(self, request_id: int, result: object) -> None:
         info = self._pending_ops.pop(request_id, None)
@@ -1322,6 +1518,20 @@ def _sanitize_history_prefix(name: str) -> str:
     return cleaned or "run"
 
 
+def _model_to_jsonable(m: Any) -> dict[str, Any]:
+    """One model entry in .union.json shape. `_file_abs` carries the absolute
+    path push feeds to axlSetModelFile; omitted when unknown."""
+    d: dict[str, Any] = {
+        "file": m.file,
+        "block": m.block,
+        "test": m.test,
+        "section": list(m.section),
+    }
+    if getattr(m, "file_abs", None):
+        d["_file_abs"] = m.file_abs
+    return d
+
+
 def _serialize_union(u: Any) -> str:
     """JSON-serialize a Union back into the .union.json on-disk shape."""
     rows_out = []
@@ -1330,15 +1540,7 @@ def _serialize_union(u: Any) -> str:
         if r.vars:
             row_dict["vars"] = {k: list(v) for k, v in r.vars.items()}
         if r.models:
-            row_dict["models"] = [
-                {
-                    "file": m.file,
-                    "block": m.block,
-                    "test": m.test,
-                    "section": list(m.section),
-                }
-                for m in r.models
-            ]
+            row_dict["models"] = [_model_to_jsonable(m) for m in r.models]
         if not r.enabled:
             row_dict["enabled"] = False
         rows_out.append(row_dict)

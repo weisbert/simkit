@@ -51,11 +51,11 @@ class ModelEntry:
     block: str
     test: str
     section: tuple[str, ...]
-    # Absolute model-file path (informational; `_`-prefixed in JSON per spec
-    # §4.2 so it does not participate in round-trip). Populated by
-    # SKILL pull from axlGetModelFile; required by `pvt corners build`
-    # to emit Maestro-importable CSV. `None` for sidecars that predate
-    # the 2026-05-13 pull extension.
+    # Absolute model-file path. `_`-prefixed in JSON (`_file_abs`) per spec
+    # §4.2. Populated by SKILL pull from axlGetModelFile; consumed by
+    # `pvt corners build` (CSV) and by push, which feeds it to
+    # axlSetModelFile so Spectre does not emit `include ""` (SFE-73).
+    # `None` for sidecars that predate the 2026-05-13 pull extension.
     file_abs: str | None = None
 
 
@@ -300,9 +300,10 @@ def _validate_model_entry(
             f"{where}: '_file_abs' must be a string if present (got "
             f"{type(file_abs).__name__})"
         )
-    # Empty string is treated as "not resolved" — the SKILL pull side leaves
-    # _file_abs blank for multi-section rows it can't disambiguate, and a
-    # missing absolute path is informational, not a load blocker.
+    # Empty string is treated as "not resolved": a union hand-written or
+    # produced before _file_abs was populated may carry "" or omit the key.
+    # A missing absolute path is not a load blocker, but push then cannot
+    # call axlSetModelFile and Spectre may emit `include ""` (SFE-73).
     if file_abs == "":
         file_abs = None
 

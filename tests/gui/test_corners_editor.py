@@ -22,6 +22,7 @@ from PyQt5.QtCore import Qt  # noqa: E402
 
 from simkit.gui.views.corners_editor import (  # noqa: E402
     COL_ENABLE,
+    COL_MODEL_FILE,
     COL_PROCESS,
     COL_ROW_NAME,
     COL_TEMPERATURE,
@@ -140,6 +141,47 @@ def test_duplicate_row_no_selection_is_noop(editor):
     # whatever the platform decides, row count is bounded: equal or one
     # more, but never two more.)
     assert editor._model.rowCount() in (2, 3)
+
+
+def test_duplicate_row_preserves_model_file(editor):
+    """Duplicated row must carry the source row's model_file (SFE-73)."""
+    editor.load_union(_sample_rows())
+    editor.table.selectRow(0)
+    editor.duplicate_row()
+    assert editor._model.rowCount() == 3
+    # The new row (index 2) must have the same model_file as row 0.
+    src_model_file = editor._model.item(0, COL_MODEL_FILE).text()
+    dup_model_file = editor._model.item(2, COL_MODEL_FILE).text()
+    assert src_model_file == "rf018.scs"
+    assert dup_model_file == "rf018.scs", (
+        f"Duplicated row lost model_file: got {dup_model_file!r}"
+    )
+
+
+def test_add_row_inherits_model_file_from_existing_rows(editor):
+    """add_row must copy model_file from the first existing row (SFE-73).
+
+    When a corner already has rows that share a model file, a newly
+    added blank row should pre-fill model_file so the user doesn't
+    accidentally push a corner with ``include ""`` to Spectre.
+    """
+    editor.load_union(_sample_rows())
+    editor.add_row()
+    new_row_index = editor._model.rowCount() - 1
+    new_model_file = editor._model.item(new_row_index, COL_MODEL_FILE).text()
+    assert new_model_file == "rf018.scs", (
+        f"add_row left model_file blank; got {new_model_file!r}"
+    )
+
+
+def test_add_row_no_existing_rows_model_file_stays_empty(editor):
+    """add_row with no existing rows must not crash; model_file stays blank."""
+    assert editor._model.rowCount() == 0
+    editor.add_row()
+    assert editor._model.rowCount() == 1
+    model_file = editor._model.item(0, COL_MODEL_FILE).text()
+    # No rows to inherit from — empty string is fine.
+    assert model_file == ""
 
 
 def test_delete_row_removes_from_model(editor):

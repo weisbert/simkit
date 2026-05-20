@@ -571,7 +571,7 @@
   ;; Push one parsed JSON row table into the SDB. Returns (pvtOk t) on
   ;; success or pvtErr on failure.
   (prog (rowName varsObj modelsList ch varKeys mh
-         mFile mBlock mTest mSection)
+         mFile mFileAbs mBlock mTest mSection)
     (setq rowName (_pvtCornersExtractJsonField rowObj "row_name"))
     (cond
       ((or (null rowName) (not (stringp rowName)))
@@ -608,6 +608,7 @@
           (cond
             ((tablep mEntry)
               (setq mFile    (_pvtCornersExtractJsonField mEntry "file"))
+              (setq mFileAbs (_pvtCornersExtractJsonField mEntry "_file_abs"))
               (setq mBlock   (_pvtCornersExtractJsonField mEntry "block"))
               (setq mTest    (_pvtCornersExtractJsonField mEntry "test"))
               (setq mSection (_pvtCornersExtractJsonField mEntry "section"))
@@ -618,6 +619,16 @@
                   (cond
                     ((and mh (car mh) (not (equal (car mh) 0)))
                       (setq mh (car mh))
+                      ;; axlPutModel only registers the model NAME; the file
+                      ;; PATH must be set separately or Spectre emits
+                      ;; `include ""` (SFE-73). Ref: adexlSKILLref.pdf p.221
+                      ;; (axlSetModelFile) + p.217 example. `_file_abs` carries
+                      ;; the absolute path captured at pull time.
+                      (cond
+                        ((and (stringp mFileAbs)
+                              (not (equal mFileAbs PVT_JSON_ABSENT))
+                              (not (equal mFileAbs "")))
+                          (errset (axlSetModelFile mh mFileAbs) nil)))
                       (cond
                         ((and (stringp mBlock)
                               (not (equal mBlock PVT_JSON_ABSENT)))

@@ -206,3 +206,14 @@ def test_failed_item_uses_fail_glyph(widget):
     text = widget.items_list.item(0).text()
     # Fail status should surface in the row tally.
     assert "3 fail" in text
+
+
+def test_mark_cancelled_updates_header_and_disables_cancel(widget):
+    """After cancel the header must no longer read 'Running:' — a stale
+    'Running:' falsely implies the run is still in flight."""
+    widget.reset("my_review", total_items=3)
+    assert "Running:" in widget.header_label.text()
+    widget.mark_cancelled()
+    assert "CANCELLED" in widget.header_label.text()
+    assert "Running:" not in widget.header_label.text()
+    assert widget.cancel_button.isEnabled() is False

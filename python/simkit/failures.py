@@ -115,10 +115,13 @@ def auto_retry_corners(failed: Iterable[FailedCorner]) -> tuple[str, ...]:
 
 
 def _classify(status, spec_status, output) -> str | None:
+    # eval_err must be checked BEFORE spec_status so that a row whose calc
+    # expression errored (and whose spec_status therefore cannot be trusted)
+    # is never mis-classified as a genuine spec failure.
+    if status == "eval_err" and output != "__sim_status__":
+        return REASON_EVAL
     if spec_status == "fail":
         return REASON_SPEC
     if output == "__sim_status__" and status in ("failed", "no_convergence"):
         return REASON_SIM
-    if status == "eval_err" and output != "__sim_status__":
-        return REASON_EVAL
     return None

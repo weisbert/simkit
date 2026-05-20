@@ -1,75 +1,81 @@
-# Handoff — 2026-05-20 session
+# Handoff — 2026-05-20 (session 3)
 
-For the next conversation window. Read this first.
+For the next conversation window. This session was **GUI scenario
+testing + bug fixing**. Read this first.
 
-## Branch
+## Branch & state
 
 `overnight-2026-05-19` (cut from `main`; nothing pushed, nothing merged).
-Commits on it, oldest → newest:
 
-```
-f5b6a3e gui: fix stuck-pending + surface rename failures   ← see "WRONG claims" below
-2154513 gui: add visible "Restart bridge" button (A5)
-ffb4392 gui: populate cross-module 24h status strip (B1)
-76e6b2f gui: enable milestone tagging (cap #6)
-7a16249 docs: overnight report + dogfood logs + screenshots ← see "WRONG claims"
-a70245d test: streaming test for the -u change
-1be3f71 fix: pvt_runner_run idle detection ← THE real fix this session
-```
+**Everything is UNCOMMITTED.** The working tree now holds TWO layers of
+uncommitted work, intermingled:
+- **Prior (session 2)** items A–E — corner model-path round-trip,
+  Sync Maestro History, `find_failed_corners` eval_err fix. Touched
+  `failures.py`, `gui/loaders.py`, `skill_bridge.py`, `union.py`,
+  `skill/pvtCorners.il`, `history_mirror.py` (+ its test), and parts of
+  `gui/main_window.py` / `gui/views/corners_editor.py` / their tests.
+- **This session (3)** — 8 GUI bug fixes (see below). Touched
+  `gui/app.py`, `gui/main_window.py` (added to), `gui/diff_model.py`,
+  `gui/views/results_tab.py`, `gui/views/run_progress.py`,
+  `skill/pvtCollect.il`, and 4 test files.
 
-## The user's 4 reported problems — current status
+Commit decision still pending — user has not split/bundled yet.
 
-| # | Problem | Status |
-|---|---------|--------|
-| 4 | Run stuck at "pending" forever | ✅ FIXED — `1be3f71`. Root cause: `pvt_runner_run` idle detection required `axlGetRunStatus==(0,0)`, but this Maestro (`fnxSession0`) returns `(24,24)`/`(18,18)`/`(0,14)` even when idle. Now trusts `count_running` (rdb content). Verified e2e: run completes in 16s. |
-| 3 | Maestro history named "Interactive.N" not our name | ✅ FIXED — downstream of #4. Rename only fires post-completion; once completion is detected the rename works. Verified: history became `orch_Test_basic_1779240708_1`. |
-| 2 | simkit history empty vs full Maestro history | ⚠️ PARTIAL — a *completed* run now ingests into DuckDB and shows (the `runs` table went 0→1 rows after the e2e run). But simkit still does NOT mirror *pre-existing* Maestro history. Item D below. |
-| 1 | "No open-module menu" | ❌ NOT FIXED — the GUI has no menu bar at all; module opens only via `--module` CLI arg or last-visited restore. Item C below. |
+Tests: full suite **1583 passed, 93 subtests, 0 failed** (was 1571).
 
-Plus a 5th issue found mid-session: **corner empty model file** (Spectre SFE-73 `include ""`). The user MANUALLY fixed the 3 live corners in Maestro. The underlying pull/push code bug is NOT fixed — item A below.
+## What this session did
 
-## WRONG claims to correct
+Ran GUI scenario testing: two role-play "user" agents drove the real
+PyQt5 GUI through 14 scenarios (first launch → load → results → run →
+diff → corner/measure edit → milestone → sync → bridge). They reported
+10 issues. All 10 were addressed; a third agent re-tested the fixes
+**8/8 PASS** (live, end-to-end).
 
-`OVERNIGHT_CHARTER.md` and `OVERNIGHT_REPORT.md` (+ commit `f5b6a3e` message) claim "Bug #1 fixed via `-u`". **This is wrong.** The `-u` change addressed a mis-diagnosed stdout-buffering hypothesis that was never the bug. The real bug #1 fix is `1be3f71`. The `-u` flag is harmless and left in place. The next session should correct OVERNIGHT_REPORT.md's Bug #1 section.
+### 8 real bugs — fixed & verified
 
-## Remaining work (user to prioritize; A recommended first)
+| # | Bug | Fix |
+|---|-----|-----|
+| 1 | `File > Open Module…` menu always failed — `getExistingDirectory` returns a dir, `load_module` needs the `.pvtproject` file | `_on_open_module` resolves `<dir>/.pvtproject`; clear warning if absent |
+| 4 | 2nd launch didn't restore the selected review | `_selected_review_path` tracked; `restore_session(last_review=)` rebinds + tree-selects; app.py persists it |
+| 5 | Cancelling a run left the kanban header reading "Running:" | new `RunProgressWidget.mark_cancelled()` → header "CANCELLED:" |
+| 6 | `prepFailed` Maestro histories re-failed every Sync (validator I12 rejects the raw status) | `pvtCollect.il` PASS 2 maps `prepFailed`/`aborted`/`killed` → sentinel `"failed"` |
+| 7 | A parse-broken review could still be Run | `set_review_path(runnable=)` + right-click Run action disabled for broken reviews |
+| 8 | Clicking a review node left Results blank / stale | new `ResultsTab.show_review_summary()` — header summary, clears stale run table |
+| 9 | Cold-start showed only `[Module: -]` placeholder, no guidance | module label default → `未打开模块 — File ▸ Open Module… (Ctrl+O)` |
+| 10 | diff cells showed `-0`; bridge button kept stale style | `_format_cell` collapses IEEE `-0.0`; GREEN clears button stylesheet |
 
-| # | Task | Why it matters |
-|---|------|----------------|
-| A | Corner pull/push: preserve the model file PATH for multi-section corners. Today `pvtCorners.il` push does `axlPutModel ch <basename>` and never calls `axlSetModelFile`; the pull blanks `_file_abs` for multi-section rows (`union.py:303` comment admits it). | Corners only work now because the user hand-fixed the live Maestro corners. A GUI edit + push, or a fresh multi-section corner, re-breaks them → SFE-73. |
-| B | GUI corner editor: carry the model path on add-row / duplicate-row. | Likely the original source of the empty `_file_abs` in `baseline.union.json`. |
-| C | GUI: add an "open module" affordance (menu bar or button). | Problem 1. Small, independent. |
-| D | Import/mirror existing Maestro history into simkit's DuckDB. | Problem 2 deep fix. |
-| E | `find_failed_corners` counts `eval_err` from inapplicable measurements as a corner failure → a clean PSS-only run reports "6 corners failed" (the `Rtime_clkout` transient measure eval-errs under PSS). Cosmetic noise; user said acceptable. | Low priority. |
+### 2 reported bugs that were NOT real app bugs
 
-## Key environment facts
+- **Exit `core dump`** and **`corner push` "permanent hang"** were
+  reported high-severity but did NOT reproduce. `app.main()`'s exit path
+  ran 6× cleanly (incl. heartbeat active + a bridge op in flight at
+  close); `pvt_corners_push` returned in 0.01s and the BridgeWorker
+  delivered `op_complete` in 0.10s. Both were **artifacts of the scenario
+  agent driving the GUI in-process via pytest-qt** — its harness teardown
+  ≠ the real shutdown, and a bridge wedged by an earlier scenario step
+  (`axlRunAllTests`) bled into a later one. See memory
+  `reproduce-before-fix`. **Do not re-investigate these as app bugs.**
+- The push investigation did surface a genuine adjacent gap: a wedged
+  bridge makes `_dispatch` block forever with no user feedback (heartbeat
+  skips while busy → dot stays GREEN). Fixed minimally: `_queue_op` arms
+  a 60s stall-warning timer (`BRIDGE_OP_STALL_MS`) that logs a hint.
 
-- User's project: `/home/yusheng/cadence_work/Test/workarea/simkit_1AXX/` — project `1AXX`, DB at `.db/simkit.duckdb`, live Maestro session `fnxSession0`.
-- Reviews: `reviews/sanity_check.review.json` (test `Test`, PSS) — this is the known-good e2e test review.
-- skillbridge socket `/tmp/skill-server-default.sock`; bridge tool at `../skill_tools/skillbridge/`.
-- venv: `.venv/` — use `.venv/bin/python` (system python3 lacks PyQt5).
-- `axlGetRunStatus` on this Maestro is unreliable — never (0,0); `count_running` (rdb walk) is the authority.
-- The 3 live corners (`TT`, `TT_pvt`, `TT_2p5G`) currently have correct model file paths (user fixed them). Don't assume they survive a fresh GUI corner-edit until item A is done.
+## Verification done
 
-## How to verify a run e2e (the real dogfood — do NOT substitute unit tests)
+- Full pytest 1583/0; **+13 new regression tests** locking the 8 fixes
+  (these bugs shipped originally because nothing tested them).
+- SKILL #6: `pvtCollect.il` skillbridge-load-verified; collecting the
+  real `Interactive.0/.1` prepFailed histories now yields
+  `status='failed'` run.json (ingests cleanly).
+- Re-test agent: 8/8 PASS via real UI interactions, incl. live V6
+  (real `pvt run` + cancel) and V7 (live Sync on a scratch DB copy →
+  `11 mirrored / 0 failed`).
 
-```
-cd .../simkit_1AXX
-.venv/bin/python -u -m simkit.cli run reviews/sanity_check.review.json \
-    --session fnxSession0 --gui-jsonl
-```
-Expect: `item_started` → ~16s → `item_completed` → `review_done`. History renamed
-`orch_Test_basic_*`. `runs` table gets a row (query with `CAST(timestamp AS VARCHAR)`
-— raw TIMESTAMPTZ triggers a missing-pytz import error).
+## What's left / not touched
 
-## Process discipline (the hard lesson of this session)
-
-Two rounds of "fixes" shipped for bugs that were never reproduced — diagnoses from
-sub-agents were treated as findings. RULE for next session: **reproduce the bug live
-first, fix, then confirm on the same live reproduction.** A unit test or a synthetic
-subprocess is necessary but NOT a substitute for the real end-to-end run. If the
-environment blocks real verification, the task is BLOCKED, not done.
-
-## Open tasks in the tracker
-
-All current tasks (#9–#14) are completed. Items A–E above are not yet tracked.
+- **Commit decision** — 2 layers of uncommitted work to split or bundle.
+- 8-cap Tier-1 **Cap#7 (copy-edit review)** and **Cap#8 (from-scratch
+  wizard)** still entirely unimplemented (scenario I skipped — known gap).
+- No live side effects left behind: Maestro corner set unchanged, real
+  `simkit_1AXX/.db/simkit.duckdb` untouched (orphan collection dirs from
+  verification were cleaned), `gui_state.json` restored.

@@ -276,5 +276,13 @@ class DiffResultsModelHelperTests(unittest.TestCase):
         self.assertIsNone(m.diff_row_at(-1))
 
 
+def test_format_cell_collapses_negative_zero():
+    """A zero-magnitude delta must render '0', never IEEE '-0'."""
+    from simkit.gui.diff_model import _format_cell
+
+    assert _format_cell(-0.0) == "0"
+    assert _format_cell(0.0) == "0"
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

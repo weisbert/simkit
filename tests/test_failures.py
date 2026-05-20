@@ -88,6 +88,38 @@ class FindFailedCornersTests(unittest.TestCase):
                     status="eval_err")
         self.assertEqual(find_failed_corners(self.con, _RID), ())
 
+    def test_eval_err_with_spec_fail_not_reported_by_default(self):
+        # Regression: eval_err row where spec_status also='fail' (can happen
+        # when the spec evaluator processes an errored row).  The corner must
+        # NOT appear as failed — an errored calc cannot violate a spec.
+        _insert_row(self.con, corner="TT", test="t1", output="Rtime_clkout",
+                    status="eval_err", spec_status="fail")
+        _insert_row(self.con, corner="TT", test="t1", output="__sim_status__",
+                    status="ok")
+        self.assertEqual(find_failed_corners(self.con, _RID), ())
+
+    def test_eval_err_with_spec_fail_surfaced_when_opted_in(self):
+        # Same eval_err+spec_fail row — when include_eval_err=True the corner
+        # should appear with reason REASON_EVAL (not REASON_SPEC).
+        _insert_row(self.con, corner="TT", test="t1", output="Rtime_clkout",
+                    status="eval_err", spec_status="fail")
+        out = find_failed_corners(self.con, _RID, include_eval_err=True)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].corner, "TT")
+        self.assertEqual(out[0].reasons, frozenset({REASON_EVAL}))
+
+    def test_genuine_fail_alongside_eval_err_still_reported(self):
+        # A corner with a real spec fail on one output AND eval_err on another
+        # must still be reported as failed (for the spec fail reason).
+        _insert_row(self.con, corner="TT", test="t1", output="Rtime_clkout",
+                    status="eval_err", spec_status="fail")
+        _insert_row(self.con, corner="TT", test="t1", output="vout",
+                    status="ok", spec_status="fail")
+        out = find_failed_corners(self.con, _RID)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0].corner, "TT")
+        self.assertEqual(out[0].reasons, frozenset({REASON_SPEC}))
+
     def test_eval_err_surfaced_when_opted_in(self):
         _insert_row(self.con, corner="TT", test="t1", output="vout",
                     status="eval_err")

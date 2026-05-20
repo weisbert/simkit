@@ -38,6 +38,11 @@ from typing import Any, Optional
 
 from simkit.project import PvtProject
 
+# Re-exported so the GUI BridgeWorker can dispatch it by name (it resolves
+# ops via getattr on this module). The orchestration itself lives in
+# history_mirror.py, which imports this module lazily to avoid a cycle.
+from simkit.history_mirror import mirror_maestro_history  # noqa: F401
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SKILL_DIR = _REPO_ROOT / "skill"
 _PRODUCTION_SKILL_FILES = (

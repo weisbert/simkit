@@ -209,13 +209,45 @@ class ResultsTab(QWidget):
         text = "  ·  ".join(parts) if parts else "(no run selected)"
         self.header_label.setText(text)
 
-    def set_review_path(self, path: Optional[str]) -> None:
+    def set_review_path(
+        self, path: Optional[str], *, runnable: bool = True,
+    ) -> None:
         """Bind the "Run this review" button to ``path``.
 
         ``None`` or empty string disables the button (no review selected).
+        ``runnable=False`` keeps the button disabled even with a valid
+        path — used for reviews that fail to parse, where dispatching a
+        ``pvt run`` would just fail downstream.
         """
         self._review_path = path or None
-        self.run_button.setEnabled(self._review_path is not None)
+        self.run_button.setEnabled(self._review_path is not None and runnable)
+
+    def show_review_summary(
+        self,
+        review_name: str,
+        item_count: int,
+        parse_error: Optional[str] = None,
+    ) -> None:
+        """Show a selected review's summary in the header.
+
+        Selecting a review node picks a *review*, not a *run* — there is
+        no result set to show. Make the header say so (and drop any
+        stale run table) instead of leaving the previous run's text and
+        rows, which looked like they belonged to the review.
+        """
+        if parse_error:
+            self.header_label.setText(
+                f"Review: {review_name}  ·  解析失败: {parse_error}"
+            )
+        else:
+            self.header_label.setText(
+                f"Review: {review_name}  ·  {item_count} 个 item  ·  "
+                f"选 History 里的一次运行查看结果，或点 Run this review"
+            )
+        self._model = None
+        self._proxy.setSourceModel(None)
+        self._current_run_id = None
+        self.compare_button.setEnabled(False)
 
     def set_baseline(self, run_id: Optional[str]) -> None:
         """Pin (or unpin, with ``None``) a baseline run for diff workflows.

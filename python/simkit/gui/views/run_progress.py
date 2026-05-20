@@ -92,6 +92,23 @@ class RunProgressWidget(QWidget):
         """Toggle Cancel-button enabled state directly."""
         self.cancel_button.setEnabled(bool(running))
 
+    def mark_cancelled(self) -> None:
+        """Run was cancelled by the user.
+
+        Updates the header so it no longer reads "Running:" (which would
+        otherwise persist and falsely imply the run is still going), and
+        disables the Cancel button.
+        """
+        done = sum(
+            1 for s in self._items.values()
+            if s.get("status") in ("done", "fail")
+        )
+        self.header_label.setText(
+            f"CANCELLED: {self._review_name}  "
+            f"({done} / {self._total_items} items)"
+        )
+        self.cancel_button.setEnabled(False)
+
     def handle_event(self, event: dict) -> None:
         """Consume one JSONL event dict per spec §9.2."""
         kind = event.get("event") if isinstance(event, dict) else None

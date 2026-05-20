@@ -393,7 +393,10 @@ def union_to_editor_rows(union: Union) -> list[dict]:
         section_for_process = ""
         if row.models:
             first = row.models[0]
-            model_file_text = first.file
+            # Show the absolute path (what the sim actually loads and what
+            # the model_file existence check resolves). `file` alone is a
+            # bare model name and would lose the path on round-trip (SFE-73).
+            model_file_text = first.file_abs or first.file
             if first.section:
                 section_for_process = ",".join(first.section)
             if len(row.models) > 1:
@@ -483,12 +486,19 @@ def editor_rows_to_union_rows(
             # string (legacy behavior — Maestro will use whatever default the
             # model file ships with).
             section = process_sections if process_sections else ("",)
+            # `model_file` is the absolute path the user sees in the editor.
+            # `file` must stay a bare model name (axlPutModel keys on it);
+            # `file_abs` carries the path push needs for axlSetModelFile so
+            # Spectre does not emit `include ""` (SFE-73). A bare basename
+            # has no path to preserve, so file_abs stays None there.
+            has_path = "/" in model_file
             models = (
                 ModelEntry(
-                    file=model_file,
+                    file=Path(model_file).name if has_path else model_file,
                     block="Global",
                     test="All",
                     section=section,
+                    file_abs=model_file if has_path else None,
                 ),
             )
 
