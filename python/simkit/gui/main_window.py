@@ -30,6 +30,7 @@ from PyQt5.QtCore import Qt, QModelIndex, QPoint, QFileSystemWatcher, QTimer
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -73,6 +74,8 @@ from simkit.gui.views.corners_editor import CornersEditor
 from simkit.gui.views.diff_tab import DiffTab
 from simkit.gui.views.measures_editor import MeasuresEditor
 from simkit.gui.views.results_tab import ResultsTab
+from simkit.gui.views.review_editor import ReviewEditorDialog
+from simkit.gui.views.review_wizard import ReviewWizard
 from simkit.gui.views.run_progress import RunProgressWidget
 from simkit.union import load_union
 
@@ -698,12 +701,12 @@ class MainWindow(QMainWindow):
             kind == ProjectTreeModel.NODE_KIND_GROUP
             and payload == ProjectTreeModel.GROUP_REVIEWS
         ):
-            a_new = menu.addAction("+ New Review…")
+            a_new = menu.addAction("+ New Review (wizard)…")
             menu.addSeparator()
             a_refresh = menu.addAction("Refresh tree (rescan reviews/)")
             chosen = menu.exec_(self.left_tree.viewport().mapToGlobal(pos))
             if chosen is a_new:
-                self._new_review_dialog()
+                self._new_review_wizard()
             elif chosen is a_refresh:
                 self._on_project_dir_changed(
                     str(self._loaded_module.project_root / "reviews")
@@ -717,6 +720,7 @@ class MainWindow(QMainWindow):
                 # action so the user can't dispatch a doomed pvt run.
                 a_run.setEnabled(False)
                 a_run.setText("Run this review…  (解析失败)")
+            a_copy = menu.addAction("Copy as…  (edit a duplicate)")
             a_open = menu.addAction("Open .review.json")
             menu.addSeparator()
             a_del = menu.addAction("Delete .review.json")
@@ -724,6 +728,8 @@ class MainWindow(QMainWindow):
             if chosen is a_run:
                 self._select_review(payload)
                 self._on_run_requested(str(payload.review_path))
+            elif chosen is a_copy:
+                self._copy_edit_review(payload)
             elif chosen is a_open:
                 self._open_in_editor(payload.review_path)
             elif chosen is a_del:
@@ -759,79 +765,54 @@ class MainWindow(QMainWindow):
             elif chosen is a_clear_ms:
                 self._apply_milestone(payload.run_id, None)
 
-    def _new_review_dialog(self) -> None:
-        """MVP 'New Review' creation flow (proper wizard is Stage 4 §14).
-
-        Asks for review name, defaults the item to (name='item1',
-        tests=['Test'], union=first available). Writes the .review.json,
-        refreshes the tree, selects the new node.
-        """
+    def _new_review_wizard(self) -> None:
+        """From-scratch review creation — spec §14.2, Tier-1 capability #8."""
         if self._loaded_module is None:
-            self._warn("没有 module 加载", "先用 --module 启动一个工程")
-            return
-        name, ok = QInputDialog.getText(
-            self,
-            "simkit — 新建 Review",
-            "Review 名 (字母/数字/下划线/连字符):",
-            QLineEdit.Normal,
-            "new_review",
-        )
-        if not ok or not name.strip():
-            return
-        name = name.strip()
-        # Validate: only [A-Za-z0-9_-] (mirror review.py's regex)
-        if not _is_valid_review_name(name):
             self._warn(
-                "名称非法",
-                f"Review 名 {name!r} 含非法字符（只能 字母/数字/下划线/连字符）",
+                "没有 module 加载", "先打开一个工程 (File ▸ Open Module…)"
             )
             return
-        out_path = (
-            self._loaded_module.project_root / "reviews" / f"{name}.review.json"
+        wizard = ReviewWizard(
+            self._loaded_module.project_root,
+            self._loaded_module.project_name,
+            parent=self,
         )
-        if out_path.exists():
-            self._warn("已存在", f"{out_path.name} 已经在 reviews/ 下，换个名字")
+        if wizard.exec_() == QDialog.Accepted and wizard.saved_path is not None:
+            self._after_review_written(wizard.saved_path)
+
+    def _copy_edit_review(self, payload: LoadedReview) -> None:
+        """Copy-edit an existing review — spec §14.1, Tier-1 capability #7."""
+        if self._loaded_module is None:
             return
-        # Pick a sane default union
-        union_default = self._loaded_module.union_default
-        if union_default is not None:
-            union_rel = "../" + union_default.relative_to(
-                self._loaded_module.project_root
-            ).as_posix()
-        else:
-            union_rel = "../unions/baseline.union.json"
         import json as _json
 
-        review = {
-            "_doc": f"Created from GUI on {Path(__file__).name} — edit items as needed.",
-            "review_schema_version": 1,
-            "name": name,
-            "project": self._loaded_module.project_name,
-            "items": [
-                {
-                    "name": "item1",
-                    "tests": ["Test"],
-                    "union": union_rel,
-                }
-            ],
-        }
         try:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(_json.dumps(review, indent=2), encoding="utf-8")
+            source = _json.loads(
+                payload.review_path.read_text(encoding="utf-8")
+            )
         except Exception as exc:  # noqa: BLE001
-            self._warn("写入失败", f"{out_path}: {exc}")
+            self._warn("无法读取", f"{payload.review_path.name}: {exc}")
             return
-        self.append_log(f"[review] created {out_path.name}")
-        # Reload module so the new review shows in the tree
+        dialog = ReviewEditorDialog(
+            self._loaded_module.project_root,
+            self._loaded_module.project_name,
+            source_review=source,
+            default_name=f"{payload.review_name}_copy",
+            parent=self,
+        )
+        if dialog.exec_() == QDialog.Accepted and dialog.saved_path is not None:
+            self._after_review_written(dialog.saved_path)
+
+    def _after_review_written(self, path: Path) -> None:
+        """Rescan the module + auto-bind a freshly-written .review.json."""
+        self.append_log(f"[review] saved {path.name}")
         from simkit.gui.loaders import load_module
+
         self._loaded_module = load_module(self._loaded_module.project_path)
         self._tree_model.populate(self._loaded_module)
         self.left_tree.expandAll()
-        # Auto-bind the review so Run button activates immediately
-        self.results_tab.set_review_path(str(out_path))
-        self._selected_review_path = str(out_path)
-        # Open the file in $EDITOR so user can flesh it out
-        self._open_in_editor(out_path)
+        self.results_tab.set_review_path(str(path))
+        self._selected_review_path = str(path)
 
     def _open_in_editor(self, path: Path) -> None:
         """Launch the user's $EDITOR on a file (falls back to xdg-open)."""
@@ -1494,14 +1475,6 @@ class MainWindow(QMainWindow):
         self.measures_editor.set_available_signal_groups(signals)
         self.measures_editor.load_bundle(raw)
         self.append_log(f"[measures] loaded bundle {bundle_path.name}")
-
-
-def _is_valid_review_name(name: str) -> bool:
-    """Mirror review.py's _REVIEW_NAME_RE (lower-case only — review/union/
-    bundle file basenames need filesystem-portable lowercase per Phase 2 design
-    decision; project-id is the loosened one per DECISIONS #79)."""
-    import re
-    return bool(re.match(r"^[a-zA-Z0-9_-]+$", name))
 
 
 def _sanitize_history_prefix(name: str) -> str:
