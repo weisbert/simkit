@@ -124,10 +124,10 @@ def _insert_minimal_run(con, run_id: str = "r1") -> None:
 
 
 class SchemaV4MigrationTests(unittest.TestCase):
-    """Phase 4 §9a / §15.2 — schema v3 → v4 bumps runs with milestone +
-    partial_run. Tests cover fresh bootstrap, chained upgrades from each
-    historical version, idempotency, forward-compat refusal, and a
-    round-trip insert/read of the new columns.
+    """Schema migration tests — milestone/partial_run (v4) and provenance
+    (v5). Cover fresh bootstrap, chained upgrades from each historical
+    version, idempotency, forward-compat refusal, and round-trip of the
+    new columns.
     """
 
     def setUp(self):
@@ -141,10 +141,31 @@ class SchemaV4MigrationTests(unittest.TestCase):
         row = self.con.execute(
             "SELECT value FROM simkit_meta WHERE key = 'db_schema_version'"
         ).fetchone()
-        self.assertEqual(row[0], "4")
+        self.assertEqual(row[0], "5")
         cols = _runs_columns(self.con)
         self.assertIn("milestone", cols)
         self.assertIn("partial_run", cols)
+        self.assertIn("provenance", cols)
+
+    def test_v4_db_migrates_to_v5_adds_provenance(self):
+        # Stand up a v4-shaped DB, drop the v5 column, rewind meta to 4,
+        # then re-bootstrap to exercise V5_MIGRATION_DDL.
+        bootstrap(self.con)
+        self.con.execute("ALTER TABLE runs DROP COLUMN provenance")
+        _insert_minimal_run(self.con, run_id="pre-v5")
+        self.con.execute(
+            "UPDATE simkit_meta SET value = '4' WHERE key = 'db_schema_version'"
+        )
+        bootstrap(self.con)
+        row = self.con.execute(
+            "SELECT value FROM simkit_meta WHERE key = 'db_schema_version'"
+        ).fetchone()
+        self.assertEqual(row[0], "5")
+        self.assertIn("provenance", _runs_columns(self.con))
+        prov = self.con.execute(
+            "SELECT provenance FROM runs WHERE run_id = 'pre-v5'"
+        ).fetchone()
+        self.assertIsNone(prov[0])
 
     def test_v3_db_migrates_to_v4_backfills_defaults(self):
         # Stand up a v3-shaped DB: full bootstrap, then rewind the
@@ -163,7 +184,7 @@ class SchemaV4MigrationTests(unittest.TestCase):
         row = self.con.execute(
             "SELECT value FROM simkit_meta WHERE key = 'db_schema_version'"
         ).fetchone()
-        self.assertEqual(row[0], "4")
+        self.assertEqual(row[0], "5")
         # New columns exist and the pre-existing row backfilled to the
         # spec'd DEFAULTs (NULL milestone, FALSE partial_run).
         cols = _runs_columns(self.con)
@@ -225,7 +246,7 @@ class SchemaV4MigrationTests(unittest.TestCase):
         row = self.con.execute(
             "SELECT value FROM simkit_meta WHERE key = 'db_schema_version'"
         ).fetchone()
-        self.assertEqual(row[0], "4")
+        self.assertEqual(row[0], "5")
 
     def test_v4_db_rebootstrap_is_idempotent(self):
         # A DB already at v4 must round-trip through bootstrap without
@@ -237,19 +258,19 @@ class SchemaV4MigrationTests(unittest.TestCase):
         row = self.con.execute(
             "SELECT value FROM simkit_meta WHERE key = 'db_schema_version'"
         ).fetchone()
-        self.assertEqual(row[0], "4")
+        self.assertEqual(row[0], "5")
         keep = self.con.execute(
             "SELECT run_id FROM runs WHERE run_id = 'r-keep'"
         ).fetchone()
         self.assertIsNotNone(keep)
 
-    def test_v5_db_refused_by_forward_compat_guard(self):
+    def test_future_db_refused_by_forward_compat_guard(self):
         # Forward-compat error path still triggers when the DB is marked
-        # at a version > DB_SCHEMA_VERSION — proves bumping to v4 didn't
+        # at a version > DB_SCHEMA_VERSION — proves bumping to v5 didn't
         # accidentally widen the guard.
         bootstrap(self.con)
         self.con.execute(
-            "UPDATE simkit_meta SET value = '5' WHERE key = 'db_schema_version'"
+            "UPDATE simkit_meta SET value = '6' WHERE key = 'db_schema_version'"
         )
         with self.assertRaisesRegex(RuntimeError, "newer than this simkit"):
             bootstrap(self.con)

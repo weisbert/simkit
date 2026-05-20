@@ -28,12 +28,14 @@ from simkit.trend import (  # noqa: E402
 _QAPP = QApplication.instance() or QApplication(sys.argv)
 
 
-def _col(display, run_id="rrrrrrrr-0000-0000-0000-000000000000", milestone=None):
+def _col(display, run_id="rrrrrrrr-0000-0000-0000-000000000000",
+         milestone=None, provenance=None):
     # label defaults to display so TrendColumn.display resolves to it
     # when no milestone is given (mirrors a label-resolved slice).
     return TrendColumn(
         identifier=display, run_id=run_id, label=display,
         milestone=milestone, timestamp="2026-05-01 00:00:00+08",
+        provenance=provenance,
     )
 
 
@@ -164,6 +166,39 @@ class TrendTabTests(unittest.TestCase):
         tab = TrendTab(_result([_col("a"), _col("b")], []))
         self.assertTrue(tab.empty_label.isVisible() or tab.model.rowCount() == 0)
         self.assertEqual(tab.model.rowCount(), 0)
+
+
+class TrendTabConsistencyStripTests(unittest.TestCase):
+    """G-5 — the cross-run condition-consistency strip."""
+
+    def test_strip_hidden_when_provenance_matches(self):
+        prov = {"host": "h", "pdk_version": "v1", "model_files": []}
+        res = _result(
+            [_col("PDR", provenance=dict(prov)),
+             _col("CDR", provenance=dict(prov))],
+            [_row("gain", [1.0, 2.0])],
+        )
+        tab = TrendTab(res)
+        self.assertTrue(tab.consistency_label.isHidden())
+
+    def test_strip_shown_on_host_mismatch(self):
+        res = _result(
+            [_col("PDR", provenance={"host": "deskA", "model_files": []}),
+             _col("CDR", provenance={"host": "farmB", "model_files": []})],
+            [_row("gain", [1.0, 2.0])],
+        )
+        tab = TrendTab(res)
+        self.assertFalse(tab.consistency_label.isHidden())
+        self.assertIn("条件不一致", tab.consistency_label.text())
+
+    def test_strip_shown_when_a_run_lacks_provenance(self):
+        res = _result(
+            [_col("PDR", provenance={"host": "h", "model_files": []}),
+             _col("CDR", provenance=None)],
+            [_row("gain", [1.0, 2.0])],
+        )
+        tab = TrendTab(res)
+        self.assertFalse(tab.consistency_label.isHidden())
 
 
 if __name__ == "__main__":  # pragma: no cover

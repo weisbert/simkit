@@ -35,7 +35,11 @@ from __future__ import annotations
 # Phase 4 §9a bump: schema_version 3 → 4. Migration adds
 # ``runs.milestone`` (VARCHAR, free-string DR tag; §15.2) and
 # ``runs.partial_run`` (BOOLEAN, cancel-mid-run flag; §9.3).
-DB_SCHEMA_VERSION = 4
+# G-5 bump: schema_version 4 → 5. Migration adds ``runs.provenance``
+# (VARCHAR holding a JSON object: host / captured_at / pdk_version /
+# model_files) so a signoff number can be proved against the conditions
+# it was produced under (FDR-5, E-3, E-5).
+DB_SCHEMA_VERSION = 5
 
 
 RUNS_DDL = """
@@ -54,7 +58,8 @@ CREATE TABLE IF NOT EXISTS runs (
   ingested_at     TIMESTAMPTZ NOT NULL,
   starred         BOOLEAN DEFAULT FALSE,
   milestone       VARCHAR DEFAULT NULL,
-  partial_run     BOOLEAN DEFAULT FALSE
+  partial_run     BOOLEAN DEFAULT FALSE,
+  provenance      VARCHAR DEFAULT NULL
 )
 """.strip()
 
@@ -105,6 +110,13 @@ V3_MIGRATION_DDL = (
 V4_MIGRATION_DDL = (
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS milestone VARCHAR DEFAULT NULL",
     "ALTER TABLE runs ADD COLUMN IF NOT EXISTS partial_run BOOLEAN DEFAULT FALSE",
+)
+# G-5 — migration steps for v4 → v5. ``provenance`` is a JSON object
+# serialised to a VARCHAR (host / captured_at / pdk_version /
+# model_files). Nullable: NULL = a run ingested before provenance
+# capture, or a manual PvtSave that bypassed the orchestrator.
+V5_MIGRATION_DDL = (
+    "ALTER TABLE runs ADD COLUMN IF NOT EXISTS provenance VARCHAR DEFAULT NULL",
 )
 # NOTE: spec writes ``run_id ... REFERENCES runs(run_id)`` but DuckDB
 # enforces FKs per-statement (no within-transaction relaxation), so a

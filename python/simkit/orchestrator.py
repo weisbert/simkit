@@ -327,6 +327,29 @@ class ExecuteReport:
     snapshot_restored: bool
 
 
+def _inject_provenance(run_dir, item, pvtproject_path, notes: list) -> None:
+    """Stamp run-condition provenance into a saved run.json (G-5).
+
+    Best-effort wrapper around :func:`simkit.provenance.inject_run_provenance`
+    — ``item.union`` is the ``.union.json`` the run used, so its model
+    files get fingerprinted. Any failure is recorded in ``notes`` and
+    swallowed; provenance must never abort a run's ingest.
+    """
+    from simkit.provenance import inject_run_provenance
+
+    union_path = getattr(item, "union", None)
+    try:
+        ok = inject_run_provenance(
+            Path(run_dir),
+            union_path=union_path,
+            pvtproject_path=Path(pvtproject_path),
+        )
+        if not ok:
+            notes.append("provenance: not stamped (see log)")
+    except Exception as exc:  # noqa: BLE001 — defensive; helper already guards
+        notes.append(f"provenance error: {exc}")
+
+
 def _default_ingest(run_json_path: Path, pvtproject_path: Path) -> None:
     """Default ingest_cb: open the project DB, ingest one run.json file.
 
@@ -479,6 +502,11 @@ def _execute_batch_item(
         notes.append(f"PvtSave error: {exc}")
         print(f"           ! PvtSave errored: {exc}")
         return (histories, run_dirs, completed)
+
+    # G-5 — stamp run-condition provenance into run.json before ingest
+    # so a signoff number can be proved against its host / PDK /
+    # model-file revision. Best-effort: never aborts the run.
+    _inject_provenance(run_dirs[0], item, pvtproject_path, notes)
 
     try:
         if ingest_cb is None:
@@ -832,6 +860,9 @@ def _execute_ic_chained_item(
                 notes.append(f"PvtSave error: {exc}")
                 print(f"           ! PvtSave errored: {exc}")
             else:
+                _inject_provenance(
+                    run_dirs[0], item, pvtproject_path, notes,
+                )
                 try:
                     if ingest_cb is None:
                         _default_ingest(Path(run_dirs[0]), pvtproject_path)

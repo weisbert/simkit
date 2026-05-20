@@ -49,11 +49,13 @@ Top-level structure:
   "run":         { ... run-level metadata ... },
   "results":     [ ... per-result records ... ],
   "artifacts":   [ ... initial artifact records written at dump time ... ],
-  "output_specs": { ... v2-only per-(test, output) spec strings ... }
+  "output_specs": { ... v2-only per-(test, output) spec strings ... },
+  "provenance":  { ... optional run-condition record; see §2.5 ... }
 }
 ```
 
 `output_specs` is the only v1 → v2 addition; v1 envelopes omit it entirely. See §2.4.
+`provenance` is an optional top-level key injected by the orchestrator; see §2.5.
 
 ### 2.1 Run-level metadata (`run` object)
 
@@ -144,6 +146,31 @@ Artifacts attached at dump time (auto-captured waveforms, screenshots, logs) app
 | `source` | str enum | `auto` (written by collector) \| `manual` (added later via `pvt attach`). (#9) |
 | `created_at` | str | ISO 8601 with offset. For `auto`, equal to the run's `timestamp`; for `manual`, the attach time. |
 
+### 2.5 Provenance (`provenance` object) — optional, v5
+
+G-5 addition. Records the conditions a run was produced under so a signoff number can be proved against its origin (FDR-5, E-3, E-5). **Not** written by the collector — the `pvt run` orchestrator injects this top-level key into `run.json` just before ingest (`simkit.provenance.inject_run_provenance`). A manual `PvtSave` that bypasses the orchestrator omits it; the ingester then leaves `runs.provenance` `NULL`.
+
+```json
+"provenance": {
+  "host":        "rhel7-farm-03",
+  "captured_at": "2026-05-20T22:14:05+08:00",
+  "pdk_version": "rf018_v1.9",
+  "model_files": [
+    {"path": "/pdk/rf018.scs", "exists": true,
+     "size": 184320, "mtime": "2026-04-02T09:11:00+08:00"}
+  ]
+}
+```
+
+| Field | Type | Notes |
+|---|---|---|
+| `host` | str | Hostname of the machine that ran the orchestrator (= the sim host; the skillbridge socket is local). |
+| `captured_at` | str | ISO 8601 with offset — when provenance was stamped. |
+| `pdk_version` | str \| null | From the `PVT_PDK_VERSION` env var, else a `pdk_version` field in `.pvtproject`, else `null`. No clean programmatic accessor exists, so this is best-effort. |
+| `model_files` | array | One `{path, exists, size, mtime}` record per distinct model file the run's union references. `size`/`mtime` are the fingerprint used to detect a model-file revision change between two runs. |
+
+The ingester stores the whole object verbatim (JSON-serialised) in `runs.provenance`. `simkit.provenance.compare_provenance` diffs two runs' provenance — the GUI Trend tab uses it to flag a cross-milestone trend whose columns ran under mismatched conditions.
+
 ---
 
 ## 3. DuckDB tables
@@ -166,7 +193,8 @@ runs(
   ingested_at     TIMESTAMPTZ NOT NULL,
   starred         BOOLEAN DEFAULT FALSE,  -- v3 (DECISIONS #65)
   milestone       VARCHAR DEFAULT NULL,   -- v4 (Phase 4 §15.2); free-string DR tag
-  partial_run     BOOLEAN DEFAULT FALSE   -- v4 (Phase 4 §9.3); cancel-mid-run flag
+  partial_run     BOOLEAN DEFAULT FALSE,  -- v4 (Phase 4 §9.3); cancel-mid-run flag
+  provenance      VARCHAR DEFAULT NULL    -- v5 (G-5); JSON: host/PDK/model fingerprints
 )
 
 results(
@@ -197,6 +225,7 @@ artifacts(
 
 **Column notes.**
 
+- `runs.provenance` (v5, G-5): JSON object recording the conditions a run was produced under — `host`, `captured_at`, `pdk_version` (nullable), and a `model_files` list of `{path, exists, size, mtime}` fingerprints. Written by the `pvt run` orchestrator, which injects a top-level `provenance` block into `run.json` just before ingest (see §2.5). `NULL` for a run ingested before v5 or from a manual `PvtSave` that bypassed the orchestrator.
 - `runs.label`: `NULL` = draft run (GC-eligible); non-NULL = slice (retained permanently). (#11)
 - `runs.ingested_at` vs. `runs.timestamp`: `timestamp` is when the sim was dumped from Virtuoso; `ingested_at` is when Python loaded the JSON into DuckDB. Both are needed — one for history reasoning, one for "what did I load today."
 - `results.value_num` / `results.value_str`: the JSON `value` union is split on load so numeric queries (aggregations, thresholds, cross-corner min/max) stay SQL-native without JSON unwrap. At most one of the two is non-NULL per row; both NULL when `status != ok`.

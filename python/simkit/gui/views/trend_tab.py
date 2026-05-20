@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (
 )
 
 from simkit.gui.trend_model import TrendTableModel
-from simkit.trend import TrendResult
+from simkit.trend import TrendResult, provenance_consistency
 
 
 class _TrendFilterProxy(QSortFilterProxyModel):
@@ -139,12 +139,34 @@ class TrendTab(QWidget):
         self.empty_label.setStyleSheet("color: #888;")
         self.empty_label.setVisible(not trend_result.rows)
 
+        # --- condition-consistency strip (G-5) ----------------------------
+        # The dangerous review failure is a margin trend whose columns
+        # quietly came from different model files / PDK / hosts. Flag it
+        # here, before the review, rather than after silicon.
+        mismatches = provenance_consistency(trend_result.columns)
+        self.consistency_label = QLabel(self)
+        self.consistency_label.setObjectName("trendConsistencyLabel")
+        self.consistency_label.setWordWrap(True)
+        if mismatches:
+            self.consistency_label.setText(
+                "⚠ 运行条件不一致 —— 这些里程碑不是在同一套条件下跑的:\n"
+                + "\n".join(f"  • {m}" for m in mismatches)
+            )
+            self.consistency_label.setStyleSheet(
+                "QLabel#trendConsistencyLabel { background: #fff3a3; "
+                "border: 1px solid #d4b500; padding: 4px 8px; }"
+            )
+            self.consistency_label.setVisible(True)
+        else:
+            self.consistency_label.setVisible(False)
+
         # --- assemble ------------------------------------------------------
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         v.addWidget(self.header)
         v.addLayout(controls)
+        v.addWidget(self.consistency_label)
         v.addWidget(self.empty_label)
         v.addWidget(self.table, stretch=1)
 

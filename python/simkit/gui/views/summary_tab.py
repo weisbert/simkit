@@ -31,7 +31,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from simkit.gui.run_summary import RunHealth, margin_rollup, run_health
+from simkit.gui.run_summary import (
+    RunHealth,
+    margin_rollup,
+    read_run_provenance,
+    run_health,
+)
 
 
 _MISSING = "—"
@@ -118,6 +123,46 @@ class MarginRollupModel(QAbstractTableModel):
         return list(self._rows)
 
 
+def provenance_line(prov: Optional[dict]) -> str:
+    """One-line summary of a run's recorded conditions (G-5).
+
+    ``None`` → an explicit "not recorded" line, because an unprovable
+    run is itself the thing a reviewer needs to notice.
+    """
+    if not prov:
+        return "运行条件: 未记录(此 run 早于可追溯性功能,或为手动 PvtSave)"
+    host = prov.get("host") or "?"
+    pdk = prov.get("pdk_version") or "未知"
+    models = prov.get("model_files") or []
+    captured = (prov.get("captured_at") or "")[:19].replace("T", " ")
+    parts = [f"host={host}", f"PDK={pdk}", f"{len(models)} 个 model 文件"]
+    if captured:
+        parts.append(f"采集于 {captured}")
+    return "运行条件: " + "  ·  ".join(parts)
+
+
+def provenance_tooltip(prov: Optional[dict]) -> str:
+    """Multi-line model-file detail for the provenance label's tooltip."""
+    if not prov:
+        return (
+            "没有 provenance 记录,无法证明这组数字用的是哪一版 model / "
+            "哪台机器。"
+        )
+    models = prov.get("model_files") or []
+    if not models:
+        return "未记录任何 model 文件。"
+    lines = ["model 文件:"]
+    for m in models:
+        path = m.get("path", "?")
+        if not m.get("exists", False):
+            lines.append(f"  {path}  (未找到)")
+        else:
+            mtime = (m.get("mtime") or "")[:19].replace("T", " ")
+            size = m.get("size")
+            lines.append(f"  {path}  ({size} bytes, mtime {mtime})")
+    return "\n".join(lines)
+
+
 def health_line(health: RunHealth) -> str:
     """Render a :class:`RunHealth` as the one-line summary string."""
     parts = [f"{health.total_rows} 行"]
@@ -142,6 +187,13 @@ class SummaryTab(QWidget):
         self.health_label.setObjectName("summaryHealthLabel")
         self.health_label.setWordWrap(True)
 
+        # G-5 — run-condition provenance line (host / PDK / model files).
+        self.provenance_label = QLabel("", self)
+        self.provenance_label.setObjectName("summaryProvenanceLabel")
+        self.provenance_label.setWordWrap(True)
+        self.provenance_label.setStyleSheet("color: #555;")
+        self.provenance_label.setVisible(False)
+
         self.table = QTableView(self)
         self.table.setObjectName("marginRollupTable")
         self.table.setSortingEnabled(True)
@@ -160,6 +212,7 @@ class SummaryTab(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(8, 6, 8, 6)
         v.addWidget(self.health_label)
+        v.addWidget(self.provenance_label)
         v.addWidget(self.table, stretch=1)
 
     def set_run(self, run_id: str, con: duckdb.DuckDBPyConnection) -> None:
@@ -167,6 +220,16 @@ class SummaryTab(QWidget):
         health = run_health(con, run_id)
         self.health_label.setText(health_line(health))
         self._style_health(health)
+        prov = read_run_provenance(con, run_id)
+        self.provenance_label.setText(provenance_line(prov))
+        self.provenance_label.setToolTip(provenance_tooltip(prov))
+        # Amber when conditions are unknown — an unprovable run is a risk.
+        self.provenance_label.setStyleSheet(
+            "color: #555;" if prov
+            else "QLabel#summaryProvenanceLabel { background: #fff3a3; "
+                 "border: 1px solid #d4b500; padding: 2px 8px; }"
+        )
+        self.provenance_label.setVisible(True)
         self._model = MarginRollupModel(margin_rollup(con, run_id), parent=self)
         self._proxy.setSourceModel(self._model)
 
@@ -174,6 +237,8 @@ class SummaryTab(QWidget):
         """Drop the table + reset the health line (no run selected)."""
         self.health_label.setText("(no run selected)")
         self.health_label.setStyleSheet("")
+        self.provenance_label.setText("")
+        self.provenance_label.setVisible(False)
         self._model = None
         self._proxy.setSourceModel(None)
 

@@ -31,6 +31,7 @@ import duckdb
 
 from simkit.diff import _load_results_keyed, resolve_slice
 from simkit.errors import SliceNotFoundError
+from simkit.provenance import compare_provenance, load_provenance
 
 _Key = Tuple[str, str, int, str]  # (test, corner, point, output)
 
@@ -44,6 +45,10 @@ class TrendColumn:
     label: Optional[str]
     milestone: Optional[str]
     timestamp: str  # ISO-ish string, already CAST to VARCHAR by the query
+    # G-5 — the run's recorded conditions (host / PDK / model files), or
+    # None for a run with no provenance. Lets the Trend tab flag when
+    # milestones were compared across mismatched conditions.
+    provenance: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -179,17 +184,21 @@ def _column_for_run(
     con: duckdb.DuckDBPyConnection, identifier: str, run_id: str,
 ) -> TrendColumn:
     row = con.execute(
-        "SELECT label, milestone, CAST(timestamp AS VARCHAR) "
+        "SELECT label, milestone, CAST(timestamp AS VARCHAR), provenance "
         "FROM runs WHERE run_id = ?",
         [run_id],
     ).fetchone()
-    label, milestone, ts = (None, None, "") if row is None else row
+    if row is None:
+        label, milestone, ts, prov_raw = (None, None, "", None)
+    else:
+        label, milestone, ts, prov_raw = row
     return TrendColumn(
         identifier=identifier,
         run_id=run_id,
         label=label,
         milestone=milestone,
         timestamp="" if ts is None else str(ts),
+        provenance=load_provenance(prov_raw),
     )
 
 
@@ -272,3 +281,21 @@ def compute_trend(
         ))
 
     return TrendResult(columns=columns, rows=tuple(rows))
+
+
+def provenance_consistency(columns: Tuple[TrendColumn, ...]) -> List[str]:
+    """Flag where the trended runs ran under mismatched conditions (G-5).
+
+    Compares every column's provenance against the first one — the
+    classic FDR/E-3/E-5 trap is a margin trend whose rows quietly came
+    from different model files / PDK / hosts. Returns human-readable
+    mismatch lines (empty when all columns are consistent).
+    """
+    if len(columns) < 2:
+        return []
+    base = columns[0]
+    out: List[str] = []
+    for col in columns[1:]:
+        for diff in compare_provenance(base.provenance, col.provenance):
+            out.append(f"{base.display} ↔ {col.display}: {diff}")
+    return out

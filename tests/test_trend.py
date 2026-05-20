@@ -26,8 +26,10 @@ from simkit.ingest import ingest_run_json  # noqa: E402
 from simkit.label import set_run_label  # noqa: E402
 from simkit.milestone import set_run_milestone  # noqa: E402
 from simkit.trend import (  # noqa: E402
+    TrendColumn,
     TrendRow,
     compute_trend,
+    provenance_consistency,
     resolve_trend_column,
 )
 
@@ -262,6 +264,64 @@ class ComputeTrendTests(TrendTestBase):
         sentinels = [r for r in result.rows if r.is_sentinel]
         self.assertEqual(len(sentinels), 1)
         self.assertEqual(sentinels[0].output, "__sim_status__")
+
+
+class ComputeTrendProvenanceTests(TrendTestBase):
+    """G-5 — compute_trend reads runs.provenance into each TrendColumn."""
+
+    def test_column_carries_provenance(self):
+        self._ingest(
+            _RUN_1, [_row("T", "TT", 1, "g", 10.0)],
+            timestamp="2026-05-01T00:00:00+08:00",
+        )
+        self._ingest(
+            _RUN_2, [_row("T", "TT", 1, "g", 11.0)],
+            timestamp="2026-05-05T00:00:00+08:00",
+        )
+        self.con.execute(
+            "UPDATE runs SET provenance = ? WHERE run_id = ?",
+            ['{"host": "farm-1"}', _RUN_1],
+        )
+        result = compute_trend(self.con, slices=[_RUN_1[:8], _RUN_2[:8]])
+        self.assertEqual(result.columns[0].provenance, {"host": "farm-1"})
+        self.assertIsNone(result.columns[1].provenance)
+
+
+def _tc(display, provenance=None):
+    return TrendColumn(
+        identifier=display, run_id=display + "-id", label=display,
+        milestone=None, timestamp="2026-05-01 00:00:00+08",
+        provenance=provenance,
+    )
+
+
+class ProvenanceConsistencyTests(unittest.TestCase):
+    """G-5 — provenance_consistency flags cross-run condition mismatch."""
+
+    def test_all_consistent_returns_empty(self):
+        prov = {"host": "h", "pdk_version": "v1", "model_files": []}
+        cols = (_tc("PDR", prov), _tc("CDR", dict(prov)))
+        self.assertEqual(provenance_consistency(cols), [])
+
+    def test_host_mismatch_flagged(self):
+        cols = (
+            _tc("PDR", {"host": "h1", "model_files": []}),
+            _tc("CDR", {"host": "h2", "model_files": []}),
+        )
+        diffs = provenance_consistency(cols)
+        self.assertEqual(len(diffs), 1)
+        self.assertIn("PDR", diffs[0])
+        self.assertIn("CDR", diffs[0])
+
+    def test_missing_provenance_flagged_as_unprovable(self):
+        cols = (_tc("PDR", {"host": "h", "model_files": []}), _tc("CDR", None))
+        diffs = provenance_consistency(cols)
+        self.assertTrue(any("没有 provenance" in d for d in diffs))
+
+    def test_single_column_returns_empty(self):
+        self.assertEqual(
+            provenance_consistency((_tc("PDR", {"host": "h"}),)), [],
+        )
 
 
 _ABSENT = object()

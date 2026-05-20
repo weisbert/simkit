@@ -181,7 +181,18 @@ def ingest_run_json(
         else:
             action = "inserted"
 
-        _insert_run_row(con, run, ingested_at, dump["schema_version"])
+        # G-5 — optional top-level provenance object, serialised to a
+        # JSON string for the runs.provenance column. Absent on a manual
+        # PvtSave that bypassed the orchestrator → column stays NULL.
+        provenance = dump.get("provenance")
+        provenance_json = (
+            json.dumps(provenance, sort_keys=True)
+            if isinstance(provenance, dict) and provenance
+            else None
+        )
+        _insert_run_row(
+            con, run, ingested_at, dump["schema_version"], provenance_json,
+        )
         _insert_results(con, run_id, results, output_specs)
         _insert_artifacts(con, run_id, artifacts)
 
@@ -399,14 +410,16 @@ def _insert_run_row(
     run: dict,
     ingested_at: str,
     schema_version: int,
+    provenance_json: Optional[str] = None,
 ) -> None:
     con.execute(
         """
         INSERT INTO runs (
           run_id, project_id, testbench_id, testbench_alias,
           timestamp, author, label, note,
-          netlist_path, history_name, schema_version, ingested_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          netlist_path, history_name, schema_version, ingested_at,
+          provenance
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
             run["run_id"],
@@ -421,6 +434,7 @@ def _insert_run_row(
             run["history_name"],
             schema_version,
             ingested_at,
+            provenance_json,
         ],
     )
 

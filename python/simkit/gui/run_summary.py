@@ -17,10 +17,11 @@ without a display server.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import duckdb
 
+from simkit.provenance import load_provenance
 from simkit.spec_eval import spec_margin
 
 
@@ -118,6 +119,22 @@ def run_health(con: duckdb.DuckDBPyConnection, run_id: str) -> RunHealth:
         sim_fail_corners=int(sim_fail[0]) if sim_fail else 0,
         partial_run=bool(partial[0]) if partial else False,
     )
+
+
+def read_run_provenance(
+    con: duckdb.DuckDBPyConnection, run_id: str
+) -> Optional[Dict[str, Any]]:
+    """Return the parsed ``runs.provenance`` object for ``run_id`` (G-5).
+
+    ``None`` when the run has no provenance — it predates the feature,
+    or came from a manual PvtSave that bypassed the orchestrator.
+    """
+    row = con.execute(
+        "SELECT provenance FROM runs WHERE run_id = ?", [run_id],
+    ).fetchone()
+    if row is None:
+        return None
+    return load_provenance(row[0])
 
 
 def _verdict(spec_statuses: list[str]) -> str:

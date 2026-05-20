@@ -97,7 +97,10 @@ VALID_ARTIFACT_SOURCES = frozenset({"auto", "manual"})
 # v1.4: schema_version 2 adds optional top-level ``output_specs`` (a
 # {test: {output: spec_string}} nested object). v1 envelopes omit it.
 _TOP_LEVEL_KEYS_REQUIRED = frozenset({"schema_version", "run", "results", "artifacts"})
-_TOP_LEVEL_KEYS_OPTIONAL = frozenset({"output_specs"})
+# G-5 adds optional top-level ``provenance`` (host / captured_at /
+# pdk_version / model_files). Injected by the orchestrator before
+# ingest; absent on a manual PvtSave.
+_TOP_LEVEL_KEYS_OPTIONAL = frozenset({"output_specs", "provenance"})
 _TOP_LEVEL_KEYS = _TOP_LEVEL_KEYS_REQUIRED | _TOP_LEVEL_KEYS_OPTIONAL
 
 # Schema versions this validator accepts. Kept in sync with
@@ -244,6 +247,12 @@ def _check_top_level(dump: dict, violations: List[Violation]) -> None:
             "I24", "error", "artifacts",
             f"'artifacts' must be a JSON array, got "
             f"{type(dump['artifacts']).__name__}",
+        ))
+    if "provenance" in dump and not isinstance(dump["provenance"], dict):
+        violations.append(Violation(
+            "I24", "error", "provenance",
+            f"'provenance' must be a JSON object, got "
+            f"{type(dump['provenance']).__name__}",
         ))
 
 

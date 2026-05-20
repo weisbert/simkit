@@ -26,6 +26,8 @@ from simkit.gui.views.summary_tab import (  # noqa: E402
     MarginRollupModel,
     SummaryTab,
     health_line,
+    provenance_line,
+    provenance_tooltip,
 )
 
 _QAPP = QApplication.instance() or QApplication(sys.argv)
@@ -170,6 +172,87 @@ class SummaryTabTests(unittest.TestCase):
         self.assertEqual(tab.health_label.text(), "(no run selected)")
         self.assertEqual(tab._proxy.rowCount(), 0)
         self.assertEqual(tab.health_label.styleSheet(), "")
+
+
+_PROV_JSON = (
+    '{"host": "rhel7-farm-03", "captured_at": "2026-05-20T22:14:05+08:00", '
+    '"pdk_version": "rf018_v1.9", '
+    '"model_files": [{"path": "/pdk/rf018.scs", "exists": true, '
+    '"size": 184320, "mtime": "2026-04-02T09:11:00+08:00"}]}'
+)
+
+
+class ProvenanceLineTests(unittest.TestCase):
+    """G-5 — the run-condition provenance line."""
+
+    def test_none_says_not_recorded(self):
+        line = provenance_line(None)
+        self.assertIn("未记录", line)
+
+    def test_with_data_lists_host_and_pdk(self):
+        prov = {
+            "host": "farm-03", "pdk_version": "v1.9",
+            "captured_at": "2026-05-20T22:14:05+08:00",
+            "model_files": [{"path": "/m.scs"}],
+        }
+        line = provenance_line(prov)
+        self.assertIn("farm-03", line)
+        self.assertIn("v1.9", line)
+        self.assertIn("1 个 model", line)
+
+    def test_tooltip_lists_model_files(self):
+        prov = {
+            "host": "h", "model_files": [
+                {"path": "/pdk/x.scs", "exists": True,
+                 "size": 100, "mtime": "2026-01-01T00:00:00"},
+            ],
+        }
+        self.assertIn("/pdk/x.scs", provenance_tooltip(prov))
+
+    def test_tooltip_none_explains_risk(self):
+        self.assertIn("无法证明", provenance_tooltip(None))
+
+
+class SummaryTabProvenanceTests(unittest.TestCase):
+    """G-5 — SummaryTab.set_run wires the provenance label."""
+
+    def test_run_without_provenance_shows_amber_not_recorded(self):
+        tab = SummaryTab()
+        con = _con()
+        try:
+            tab.set_run("R1", con)
+        finally:
+            con.close()
+        self.assertTrue(tab.provenance_label.isVisibleTo(tab))
+        self.assertIn("未记录", tab.provenance_label.text())
+        # Amber treatment when conditions are unknown.
+        self.assertIn("fff3a3", tab.provenance_label.styleSheet())
+
+    def test_run_with_provenance_shows_host(self):
+        tab = SummaryTab()
+        con = _con()
+        try:
+            con.execute(
+                "UPDATE runs SET provenance = ? WHERE run_id = 'R1'",
+                [_PROV_JSON],
+            )
+            tab.set_run("R1", con)
+        finally:
+            con.close()
+        self.assertIn("rhel7-farm-03", tab.provenance_label.text())
+        self.assertIn("rf018_v1.9", tab.provenance_label.text())
+        # No amber when provenance is present.
+        self.assertNotIn("fff3a3", tab.provenance_label.styleSheet())
+
+    def test_clear_hides_provenance_label(self):
+        tab = SummaryTab()
+        con = _con()
+        try:
+            tab.set_run("R1", con)
+        finally:
+            con.close()
+        tab.clear()
+        self.assertFalse(tab.provenance_label.isVisibleTo(tab))
 
 
 if __name__ == "__main__":  # pragma: no cover
