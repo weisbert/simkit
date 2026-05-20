@@ -764,7 +764,7 @@ def pvt_runner_run(
     timeout_sec: float = 1800.0,
     idle_confirm_reads: int = 2,
     dispatch_grace_reads: int = 2,
-    initial_wait_sec: float = 0.0,
+    initial_wait_sec: float = 3.0,
     post_idle_quiesce_sec: float = 0.0,
     min_running_observed: int = 0,
     workspace: Any = None,
@@ -815,12 +815,14 @@ def pvt_runner_run(
             in-flight rows, the loop ignores grace and waits for them
             to clear.
         initial_wait_sec: extra sleep AFTER submit and BEFORE the first
-            poll. Use when the session's ``axlGetRunStatus`` is unable
-            to report in-flight state and the loop would otherwise
-            exit via dispatch_grace before Spectre has even started.
-            Set to e.g. 30-60s for sessions where post-completion
-            destructive ops are seen to hit ASSEMBLER-2423 (DECISIONS
-            #54 / #55). Default 0 keeps the cached-path fast.
+            poll. v1.6 default is 3.0: the idle test is now content-based
+            (count_running walks the rdb), so the first poll must happen
+            AFTER Maestro has scaffolded the rdb — otherwise an empty rdb
+            reads as count_running==0 and the dispatch_grace path could
+            false-exit on a run that has not started. 3s comfortably
+            covers rdb scaffolding for typical netlists. Bump higher
+            (30-60s) for sessions where post-completion destructive ops
+            hit ASSEMBLER-2423 (DECISIONS #54 / #55).
         post_idle_quiesce_sec: extra sleep AFTER the loop reports
             idle, BEFORE pvtRunnerRename fires. Lets Maestro release
             the setupdb lock; mirrors the ASSEMBLER-2423 mitigation.
@@ -869,17 +871,27 @@ def pvt_runner_run(
         elapsed += poll_interval
         code, sub = pvt_runner_get_status(session=session, workspace=ws)
         last_code, last_sub = code, sub
-        # v1.5 F2: second, content-based signal. Counts test/corner rows
-        # in the CURRENT history whose status is still pending/running.
-        # 0 == nothing observably in flight from the rdb's perspective.
+        # Completion is decided by ONE signal: pvt_runner_count_running.
+        #
+        # v1.6 (2026-05-20): axlGetRunStatus is NOT trustworthy as an
+        # idle gate. On fnxSession0 it returns (24,24)/(18,18)/(12,12)/
+        # (0,14) when the run is genuinely complete — every rdb row
+        # 'done — and only reaches (0,0) on some Maestro versions. The
+        # prior code AND-ed `status == (0,0)` with the count signal, so
+        # a session that never reports (0,0) made this loop poll until
+        # timeout_sec (30 min) on a run that finished in ~10 s. That was
+        # the real "stuck pending" bug (mis-diagnosed twice before).
+        #
+        # pvt_runner_count_running walks the CURRENT history's rdb and
+        # counts rows still pending/running; 0 == every row reached a
+        # terminal status. That is the authority. axlGetRunStatus is now
+        # kept only for the timeout diagnostic string.
         count_running = pvt_runner_count_running(session=session, workspace=ws)
         if count_running > max_running_seen:
             max_running_seen = count_running
         if count_running > 0:
             saw_running = True
-        status_idle = (code == 0 and sub == 0)
-        count_idle = (count_running == 0)
-        is_idle = status_idle and count_idle
+        is_idle = (count_running == 0)
         # min_running_observed gate (v1.5 F2): when set, never declare
         # done until we've actually observed count_running >= threshold.
         gate_satisfied = saw_running or (min_running_observed <= 0)
@@ -890,7 +902,9 @@ def pvt_runner_run(
             if (not saw_non_idle) and idle_streak >= dispatch_grace_reads:
                 break  # never observed non-idle: cached / no-op completion
         else:
-            # Either status or count says something is in flight; reset.
+            # Reached when count says rows are in flight, OR when idle
+            # but the min_running_observed gate isn't satisfied yet.
+            # Only the former is a real "saw work in flight" observation.
             if not is_idle:
                 saw_non_idle = True
             idle_streak = 0

@@ -462,16 +462,42 @@ class TestPvtRunnerRunStateMachine(unittest.TestCase):
         ws._table["pvtRunnerRename"].assert_called_once_with("s", "h")
 
     def test_real_run_path_waits_for_non_idle_then_idle(self):
-        """Saw non-idle then [0,0]; one idle confirm is enough by default."""
-        ws = _runner_ws([(5, 9), (5, 9), (5, 9), (0, 0)])
+        """count_running non-zero for 3 polls then 0; one idle confirm
+        is enough. axlGetRunStatus is deliberately junk (24,24) the whole
+        time — the v1.6 fix means the loop ignores it and trusts the
+        content-based count_running signal."""
+        ws = _runner_ws(
+            [(24, 24)] * 8,
+            count_running_sequence=[6, 6, 6, 0],
+        )
         code, sub, name = pvt_runner_run(
             "myhist", session="sess", workspace=ws,
             poll_interval=0, dispatch_grace_reads=99,  # disable grace path
-            idle_confirm_reads=1,
+            idle_confirm_reads=1, initial_wait_sec=0,
             _sleep=lambda _t: None,
         )
-        self.assertEqual((code, sub, name), (0, 0, "hist_renamed"))
+        self.assertEqual(name, "hist_renamed")
         self.assertEqual(ws._calls["n"], 4)
+
+    def test_completes_when_axlGetRunStatus_never_reaches_zero(self):
+        """Regression for the 2026-05-20 stuck-pending bug: on fnxSession0
+        axlGetRunStatus returns (24,24)/(18,18)/(0,14) even when the run
+        is genuinely complete. The loop must still finish — driven purely
+        by count_running dropping to 0 — not poll to timeout_sec."""
+        ws = _runner_ws(
+            [(12, 12), (24, 24), (18, 18), (0, 14), (24, 24)],
+            count_running_sequence=[7, 7, 3, 0, 0],
+        )
+        code, sub, name = pvt_runner_run(
+            "h", session="s", workspace=ws,
+            poll_interval=1, timeout_sec=1000, dispatch_grace_reads=99,
+            idle_confirm_reads=2, initial_wait_sec=0,
+            _sleep=lambda _t: None,
+        )
+        self.assertEqual(name, "hist_renamed")
+        # 4th poll: count hits 0 (streak 1). 5th poll: 0 again (streak 2,
+        # >= idle_confirm_reads) -> break. Never reached the timeout.
+        self.assertEqual(ws._count_calls["n"], 5)
 
     def test_handle_zero_runtime_error_is_treated_as_idle(self):
         """The uncatchable 'handle 0' fatal from axlGetRunStatus must
@@ -529,19 +555,24 @@ class TestPvtRunnerRunStateMachine(unittest.TestCase):
         ws._table["pvtRunnerSubmit"].assert_not_called()
 
     def test_idle_confirm_requires_consecutive_reads(self):
-        """A single transient [0,0] in the middle of a run should NOT
-        be enough to declare 'done' when idle_confirm_reads > 1."""
-        # Non-idle, transient idle, non-idle, then sustained idle.
-        ws = _runner_ws([(5, 9), (0, 0), (5, 9), (0, 0), (0, 0)])
+        """A single transient count_running==0 in the middle of a run
+        should NOT be enough to declare 'done' when idle_confirm_reads>1.
+        Models the rdb momentarily reading 0 (mid-write) between two
+        non-zero reads."""
+        # in-flight, transient 0, in-flight, then sustained 0,0.
+        ws = _runner_ws(
+            [(24, 24)] * 7,
+            count_running_sequence=[6, 0, 6, 0, 0],
+        )
         code, sub, name = pvt_runner_run(
             "h", session="s", workspace=ws,
             poll_interval=0, dispatch_grace_reads=99,
-            idle_confirm_reads=2,
+            idle_confirm_reads=2, initial_wait_sec=0,
             _sleep=lambda _t: None,
         )
-        self.assertEqual((code, sub), (0, 0))
-        # 5 status reads consumed
-        self.assertEqual(ws._calls["n"], 5)
+        self.assertEqual(name, "hist_renamed")
+        # 5 count reads consumed: the transient 0 at read 2 must not break.
+        self.assertEqual(ws._count_calls["n"], 5)
 
     # --- v1.5 F2: count_running second signal ----------------------------
 
