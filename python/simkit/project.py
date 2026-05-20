@@ -34,6 +34,11 @@ _KNOWN_FIELDS = frozenset({
     "measurementsDir",
     # Phase 3A §1 (DECISIONS #50) — review-suite sidecar dir.
     "reviewsDir",
+    # Phase 5 §1 — corner-manager model + library sidecar dirs.
+    "cornerModelsDir",
+    "cornerLibsDir",
+    # Phase 5 Stage 6 — PVT profile sidecar dir.
+    "pvtProfilesDir",
 })
 
 

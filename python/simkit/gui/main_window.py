@@ -70,6 +70,7 @@ from simkit.gui.loaders import (
     union_to_editor_rows,
 )
 from simkit.gui.tree_model import ProjectTreeModel
+from simkit.gui.views.corner_manager import CornerManagerView
 from simkit.gui.views.corners_editor import CornersEditor
 from simkit.gui.views.diff_tab import DiffTab
 from simkit.gui.views.trend_tab import TrendTab
@@ -133,6 +134,14 @@ class MainWindow(QMainWindow):
         )
         self._open_module_action.triggered.connect(self._on_open_module)
         file_menu.addAction(self._open_module_action)
+        self._open_corner_model_action = QAction("Open Corner Model…", self)
+        self._open_corner_model_action.setToolTip(
+            "Browse for a .cornermodel.json to open in the Corner Manager"
+        )
+        self._open_corner_model_action.triggered.connect(
+            self._on_open_corner_model
+        )
+        file_menu.addAction(self._open_corner_model_action)
         self._sync_history_action = QAction("Sync Maestro History", self)
         self._sync_history_action.setToolTip(
             "Ingest Maestro history entries not yet in this module's database"
@@ -523,6 +532,112 @@ class MainWindow(QMainWindow):
             return
         self.load_module(loaded)
         self.append_log(f"[open-module] loaded {pvtproject_path}")
+
+    # --- Phase 5 Corner Manager -----------------------------------------
+
+    def _on_open_corner_model(self) -> None:
+        """File > Open Corner Model… — pick a .cornermodel.json sidecar."""
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, "Open Corner Model — select a .cornermodel.json",
+            str(Path.home()), "Corner model (*.cornermodel.json)",
+        )
+        if chosen:
+            self.open_corner_model(Path(chosen))
+
+    def open_corner_model(self, path: Path) -> Optional[CornerManagerView]:
+        """Load a ``.cornermodel.json`` into a new Corner Manager tab.
+
+        Returns the view (or ``None`` on load failure). Separate from the
+        QFileDialog handler so it is testable without a modal.
+        """
+        from simkit.corner_model import CornerModelError, load_cornermodel
+        try:
+            cm = load_cornermodel(path)
+        except CornerModelError as exc:
+            self._warn("Could not open corner model", f"{path}\n\n{exc}")
+            self.append_log(f"[corner-model] load failed: {exc}")
+            return None
+        profile = self._load_bound_profile(cm, Path(path))
+        view = CornerManagerView(cm, profile)
+        view.push_requested.connect(
+            lambda model, v=view: self._on_corner_model_push(model, v.profile())
+        )
+        view.pull_requested.connect(self._on_corner_model_pull)
+        idx = self.right_panel.addTab(view, f"Corner: {cm.name}")
+        self.right_panel.setCurrentIndex(idx)
+        self.append_log(f"[corner-model] opened {path}")
+        return view
+
+    def _load_bound_profile(self, cm: object, cm_path: Path) -> object:
+        """Stage 6 — if the cornermodel names a ``pvt_profile``, find and load
+        ``<name>.pvtprofile.json`` next to it or in a ``pvt_profiles/`` dir.
+        Returns the PvtProfile, or None (the GUI then flags missing_profile)."""
+        name = getattr(cm, "pvt_profile", None)
+        if not name:
+            return None
+        from simkit.corner_model import CornerModelError, load_pvtprofile
+        fname = f"{name}.pvtprofile.json"
+        candidates = [
+            cm_path.parent / fname,
+            cm_path.parent / "pvt_profiles" / fname,
+            cm_path.parent.parent / "pvt_profiles" / fname,
+        ]
+        for cand in candidates:
+            if cand.is_file():
+                try:
+                    return load_pvtprofile(cand)
+                except CornerModelError as exc:
+                    self.append_log(f"[corner-model] profile load failed: {exc}")
+                    return None
+        self.append_log(
+            f"[corner-model] bound profile {name!r} not found near {cm_path}"
+        )
+        return None
+
+    def _on_corner_model_push(self, cm: object, profile: object = None) -> None:
+        """Materialise the cornermodel to a union and push it to Maestro —
+        mirrors :meth:`_on_corners_push_requested` (spec §4.1)."""
+        from simkit.corner_model import materialize
+        self.append_log("[corner-model] push requested")
+        if not self._can_dispatch_bridge("corner-model push"):
+            return
+        session = self.current_session_name()
+        if not session:
+            self._warn_session_required()
+            return
+        module = self._loaded_module
+        if module is None:
+            self.append_log("[corner-model] push: no module loaded")
+            return
+        try:
+            u = materialize(cm, profile)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[corner-model] push rejected: {exc}")
+            return
+        out_path = self._scratch_path("cornermodel_push", ".union.json")
+        out_path.write_text(_serialize_union(u), encoding="utf-8")
+        self._queue_op(
+            "pvt_corners_push",
+            on_ok=lambda result: self.append_log(
+                f"[corner-model] pushed: {result}"
+            ),
+            kwargs={
+                "union_json_path": str(out_path),
+                "pvtproject_path": module.project_path,
+                "session": session,
+                "replace": True,
+            },
+        )
+        self.append_log("[corner-model] push queued (--replace)")
+
+    def _on_corner_model_pull(self) -> None:
+        """Pull-into-cornermodel reconciliation (spec §6) routes a Maestro
+        pull through ``classify_pull``. Full interactive GUI wiring is
+        deferred — logged honestly rather than silently doing nothing."""
+        self.append_log(
+            "[corner-model] pull not yet wired — pull via the Corners tab, "
+            "then reconcile per spec §6 (deferred)"
+        )
 
     def _on_sync_maestro_history(self) -> None:
         """File > Sync Maestro History — ingest history entries this

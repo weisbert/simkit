@@ -559,3 +559,38 @@ def test_warn_if_op_stalled_silent_when_op_completed(qtbot):
     before = w.bottom_log.toPlainText()
     w._warn_if_op_stalled(4242)  # never registered → already done
     assert w.bottom_log.toPlainText() == before
+
+
+def test_open_corner_model_adds_tab(qtbot, tmp_path):
+    import json
+
+    from simkit.gui.views.corner_manager import CornerManagerView
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    cm_path = tmp_path / "demo.cornermodel.json"
+    cm_path.write_text(json.dumps({
+        "cornermodel_schema_version": 1,
+        "name": "demo",
+        "project": "1AXX",
+        "testbench_id": "sim_yusheng/Test/maestro",
+        "modes": {"M": {"vars": {"d_en": "1"}}},
+        "columns": [{"mode": "M", "pvt_label": "TT", "enabled": True,
+                     "pvt_vars": {"temperature": "55"}}],
+    }), encoding="utf-8")
+
+    view = w.open_corner_model(cm_path)
+    assert isinstance(view, CornerManagerView)
+    titles = [w.right_panel.tabText(i) for i in range(w.right_panel.count())]
+    assert "Corner: demo" in titles
+    assert w.right_panel.currentWidget() is view
+
+
+def test_open_corner_model_bad_file_logs_and_returns_none(qtbot, tmp_path):
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._warn = lambda *a, **k: None  # a real QMessageBox blocks offscreen Qt
+    bad = tmp_path / "broken.cornermodel.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert w.open_corner_model(bad) is None
+    assert "[corner-model] load failed" in w.bottom_log.toPlainText()

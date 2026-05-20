@@ -15,6 +15,7 @@ import sys
 from typing import List, Optional
 
 from simkit.cli import attach as attach_cmd
+from simkit.cli import corner_model as corner_model_cmd
 from simkit.cli import corners as corners_cmd
 from simkit.cli import diff as diff_cmd
 from simkit.cli import gui as gui_cmd
@@ -45,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     diff_cmd.add_subparser(sub)
     trend_cmd.add_subparser(sub)
     corners_cmd.add_subparser(sub)
+    corner_model_cmd.add_subparser(sub)
     measure_cmd.add_subparser(sub)
     run_cmd.add_subparser(sub)
     star_cmd.add_subparser(sub)

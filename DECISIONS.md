@@ -2555,3 +2555,86 @@ Quoting user verbatim: "我觉得我们开发流程可能出了问题，有太�
 - No end-to-end live verification (Stage 3 smoke verified signal dispatch only, didn't run QProcess to confirm slot connect didn't crash).
 
 Discussion target next session: a checklist + mandates that catch this class of bug at agent-dispatch time so they don't surface during user dogfood.
+
+---
+
+## #80 — Phase 5 Corner Manager: process mandates + full 5-stage build
+_Date: 2026-05-20 (continuation of #79)_
+
+**Context:** Two parts. (a) The process-improvement discussion #79 D13 asked for —
+held; outcome is `docs/dispatch_mandates.md`. (b) The user then said "把 Phase 5
+全部做完，无需我确认" — an explicit autonomous-run grant to build the entire
+Corner Manager.
+
+### D1 — Process mandates (`docs/dispatch_mandates.md`)
+
+Diagnosis: the 3 root causes behind #79 D13's 7 leaks each already had a memory
+recorded *before* the leak. Failure was enforcement, not knowledge — memories
+are soft, and subagents are cold-start (never see memories). Fix = mechanical
+gates + injecting mandates into every agent-dispatch prompt. Four mandates:
+M1 live-shape fixtures / M2 view-render test (hard gate `test_view_coverage.py`)
+/ M3 controller connect-path test / M4 Definition-of-Done checklist. User
+decisions: M2 hard-fail no-whitelist; M4 allows "NOT live-verified" if marked;
+mandates apply Phase 5 onward only (11 Phase 4 views grandfathered).
+
+### D2 — Phase 5 built in one autonomous run, all 5 stages
+
+All work done by the orchestrator directly (no subagents) — the data layer is a
+dependency spine the GUI/CLI build on, not parallelisable. Per-stage: §1 spec →
+data model in `corner_model.py` → GUI in `corner_manager.py` → tests. Stages:
+1 modes+global-edit, 2 PVT-templates+aggregation+correlated-axes, 3 variants+
+3-layer fallback, 4 run-sets+column-filter, 5 row-filter/drag+validation+library.
+`corner_model.py` is the whole model layer (~1500 LOC); `corner_manager.py` is
+one view that grew per stage; `main_window.py` got File→Open Corner Model + a
+tab + push wired through BridgeWorker. Python 1769 → 1882.
+
+### D3 — Key design decisions (elaborating the locked plan)
+
+- `.cornermodel.json` is the truth; Phase 2 `.union.json` 下沉 as the
+  materialisation target (plan D2). One column → one *or more* UnionRows: a
+  correlated-axis column expands the bundle cross-product here (Maestro has no
+  correlated concept) while independent PVT sweeps stay as Phase 2 sweeps.
+  痛色 h: `[proc+CT]×[VDD]×[temp+s5p]` = 45 points, not 405 — verified offline.
+- 3-layer override fallback `手改 > 变体 > 模式base`; D1 red-flag computed
+  against the layer directly below the override.
+- Auto-name derived (`<variant-or-mode>_<pvt_label>`), never stored.
+- mode→column membership authored in the sidecar, never inferred from name
+  prefixes (plan §6).
+
+### D4 — What is NOT done (the honest boundary)
+
+`corner_manager_plan.md §4` defines each Stage's completion as a real Maestro
+round-trip dogfood — that needs the user + a running Virtuoso and was NOT done
+(Virtuoso down). **The whole of Phase 5 is offline-verified only — NOT
+live-verified (M4 mark).** Punch list in `docs/phase5_dogfood_checklist.md`.
+Also deferred: corner-model GUI pull + interactive reconciliation (data layer
+done), CLI push/pull, cornermodel auto-discovery + left-tree group.
+
+### D5 — Two modal-hang bugs caught during the build
+
+Twice a GUI test hung (timeout, not failure) because a real `QMessageBox` /
+`QInputDialog` blocks forever under offscreen Qt with nothing to click
+(same class as #78 D5). Root causes were real bugs: (a) `_refresh_templates_panel`
+cleared the list selection so the next action hit a "nothing selected" warning;
+fixed by preserving selection. (b) a test exercised the bad-file path that calls
+`MainWindow._warn`. Defence: GUI test setUp now stubs `QMessageBox.warning`.
+
+### D6 — Stage 6 added: PVT Profile semantic-mapping layer
+
+Before smoke-testing, the user spotted that Stage 2/5's "reusable template" /
+"cross-project library" were hollow: process section names (`tt` vs
+`TOP_TT_RFTYP`), voltage var names (`VDD` vs `LDO_VSET`) and values differ per
+project, and templates carried only literal strings (worse — `apply_template`
+dropped `models` entirely, so templates couldn't even express process). Not an
+implementation bug — the locked plan never had a mapping layer.
+
+Fix = Stage 6 PVT Profile (`docs/phase5_stage6_spec.md`): a per-project
+`.pvtprofile.json` declaring open, extensible **axes** (process/voltage/
+temperature, user-addable), each an open dict of semantic **levels**. Unified
+form: a level resolves to `{vars?, models?}` — voltage levels give vars,
+process levels give per-model section assignments (handles split corners like
+`ssMOS_ffRC` → mos:ss + rc:ff), temperature `drift` gives a sweep. Templates/
+columns reference `axis_levels` tokens; `materialize(model, profile)` resolves
+them. Cross-project port = swap the profile, templates unchanged. Backward
+compatible: no profile / no axis_levels → Stage 1-5 literal behaviour.
+Python 1882 → 1902. Whole of Stage 6 offline-only, NOT live-verified.

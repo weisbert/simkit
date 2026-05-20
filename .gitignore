@@ -37,6 +37,10 @@ panic.log.*
 simulation/
 li.log*
 
+# Cadence tooling cache + personal run logs (not source)
+.cadence/
+logs_yusheng/
+
 # OS
 .DS_Store
 Thumbs.db
