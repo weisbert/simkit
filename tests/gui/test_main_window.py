@@ -261,6 +261,46 @@ def test_restart_bridge_button_click_without_worker_is_safe(qtbot):
     assert "restart requested before worker" in w.bottom_log.toPlainText().lower()
 
 
+# --- G-15: explanatory bridge status tooltips --------------------------------
+
+def test_bridge_status_dot_tooltip_explains_each_state(qtbot):
+    from simkit.gui.bridge_worker import BridgeStatus
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.set_bridge_status(BridgeStatus.RED)
+    red_tip = w.status_dot.toolTip()
+    assert "断开" in red_tip and "Restart bridge" in red_tip
+    w.set_bridge_status(BridgeStatus.GREEN)
+    assert "已连接" in w.status_dot.toolTip()
+    w.set_bridge_status(BridgeStatus.AMBER)
+    assert "未确认" in w.status_dot.toolTip()
+
+
+# --- G-7: vocabulary tooltips + glossary -------------------------------------
+
+def test_session_input_has_explanatory_tooltip(qtbot):
+    w = MainWindow()
+    qtbot.addWidget(w)
+    tip = w.session_input.toolTip()
+    assert "session" in tip.lower()
+    assert tip != ""
+
+
+def test_help_menu_opens_glossary(qtbot):
+    from unittest import mock as _mock
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    # The action exists and is wired; exec_ is patched so the modal does
+    # not block the test.
+    with _mock.patch(
+        "simkit.gui.main_window.GlossaryDialog"
+    ) as fake_dialog:
+        w._glossary_action.trigger()
+    fake_dialog.assert_called_once()
+
+
 def test_sanitize_history_prefix_drops_punctuation():
     from simkit.gui.main_window import _sanitize_history_prefix
 

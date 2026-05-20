@@ -79,7 +79,12 @@ class _NamePage(QWizardPage):
 
 
 class _ItemsPage(QWizardPage):
-    """Step 2 — at least one review item."""
+    """Step 2 — at least one *complete* review item.
+
+    Guardrail (G-8): Next stays disabled until every row has a name, a
+    test list, and a union — so an empty item can't reach Finish and only
+    fail there.
+    """
 
     def __init__(self, wizard: "ReviewWizard") -> None:
         super().__init__()
@@ -91,14 +96,30 @@ class _ItemsPage(QWizardPage):
         layout = QVBoxLayout(self)
         self.items_table = wizard.items_table
         layout.addWidget(self.items_table)
-        self.items_table.changed.connect(self.completeChanged)
+        self.hint_label = QLabel("")
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet("color: #b00020;")
+        layout.addWidget(self.hint_label)
+        self.items_table.changed.connect(self._on_changed)
+
+    def _on_changed(self) -> None:
+        self._refresh_hint()
+        self.completeChanged.emit()
+
+    def _refresh_hint(self) -> None:
+        problems = self.items_table.item_problems()
+        self.hint_label.setText("；  ".join(problems))
 
     def initializePage(self) -> None:  # noqa: N802 (Qt override)
         if self.items_table.row_count() == 0:
             self.items_table.add_item()
+        self._refresh_hint()
 
     def isComplete(self) -> bool:  # noqa: N802 (Qt override)
-        return self.items_table.row_count() > 0
+        return (
+            self.items_table.row_count() > 0
+            and not self.items_table.item_problems()
+        )
 
 
 class _FailurePage(QWizardPage):
@@ -115,8 +136,31 @@ class _FailurePage(QWizardPage):
         layout.addStretch(1)
 
 
+def _review_summary(review_dict: dict[str, Any]) -> str:
+    """Plain-language recap of an assembled review (G-8 — the raw JSON
+    alone is not a confirmation a designer can sanity-check)."""
+    items = review_dict.get("items") or []
+    lines = [
+        f"评审「{review_dict.get('name', '?')}」 — {len(items)} 个 item",
+    ]
+    for i, item in enumerate(items, start=1):
+        tests = "、".join(item.get("tests") or []) or "(无测试)"
+        union = item.get("union") or "(无角组)"
+        bundle = item.get("bundle") or "(无测量包)"
+        lines.append(
+            f"  {i}. {item.get('name', '?')}  ·  测试 {tests}  ·  "
+            f"角组 {union}  ·  测量包 {bundle}"
+        )
+    on_failure = review_dict.get("on_failure") or {}
+    default = on_failure.get("default", "skip")
+    strategies = on_failure.get("strategies") or []
+    retry = strategies[0].get("name") if strategies else "无"
+    lines.append(f"失败处理: 默认 {default}  ·  重试策略 {retry}")
+    return "\n".join(lines)
+
+
 class _ReviewPage(QWizardPage):
-    """Step 4 — preview the assembled JSON, then Finish writes it."""
+    """Step 4 — a plain-language recap + the assembled JSON, then Finish."""
 
     def __init__(self, wizard: "ReviewWizard") -> None:
         super().__init__()
@@ -124,6 +168,15 @@ class _ReviewPage(QWizardPage):
         self.setTitle("Step 4 — Review & save")
         self.setSubTitle("Confirm the assembled review, then click Finish.")
         layout = QVBoxLayout(self)
+        self.summary_label = QLabel("")
+        self.summary_label.setObjectName("reviewSummaryLabel")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet(
+            "QLabel#reviewSummaryLabel { background: #eef4ff; "
+            "border: 1px solid #b9c9e8; padding: 6px 8px; }"
+        )
+        layout.addWidget(self.summary_label)
+        layout.addWidget(QLabel("完整 JSON（高级用户参考）:"))
         self.preview = QPlainTextEdit()
         self.preview.setReadOnly(True)
         layout.addWidget(self.preview)
@@ -134,6 +187,7 @@ class _ReviewPage(QWizardPage):
 
     def initializePage(self) -> None:  # noqa: N802 (Qt override)
         review_dict = self._wizard.build_dict()
+        self.summary_label.setText(_review_summary(review_dict))
         self.preview.setPlainText(json.dumps(review_dict, indent=2))
         self.error_label.setText("")
 

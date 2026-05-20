@@ -75,7 +75,14 @@ def test_items_page_seeds_a_row_and_gates_on_it(qtbot, tmp_path):
     assert w.currentId() == 1
     items_page = w.page(1)
     assert w.items_table.row_count() == 1  # initializePage seeded one
+    # G-8: a seeded but empty row is NOT enough to advance.
+    assert not items_page.isComplete()
+    assert items_page.hint_label.text() != ""
+    # Filling name + tests + union completes it.
+    _fill_first_item(w)
     assert items_page.isComplete()
+    assert items_page.hint_label.text() == ""
+    # Removing the only row drops back to incomplete.
     w.items_table.table.selectRow(0)
     w.items_table.remove_selected()
     assert not items_page.isComplete()
@@ -102,6 +109,11 @@ def test_wizard_end_to_end_writes_loadable_review(qtbot, tmp_path):
     preview = w.page(3).preview.toPlainText()
     assert "brand_new" in preview
     assert "item1" in preview
+    # G-8: Step 4 also carries a plain-language recap, not just JSON.
+    summary = w.page(3).summary_label.text()
+    assert "评审「brand_new」" in summary
+    assert "item1" in summary
+    assert "1 个 item" in summary
 
     assert w.page(3).validatePage() is True
     assert w.saved_path == root / "reviews" / "brand_new.review.json"

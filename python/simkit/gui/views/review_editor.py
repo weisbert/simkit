@@ -241,33 +241,46 @@ class ReviewItemsTable(QWidget):
         """Append a row seeded from ``source`` (a parsed item dict)."""
         src = dict(source) if source else {}
         row = self.table.rowCount()
-        self.table.insertRow(row)
-        self._sources.insert(row, src)
+        # Block the table's itemChanged→changed relay while the row is
+        # half-built — otherwise a `changed` listener (e.g. the wizard's
+        # completeness hint) calls to_items() before the cell widgets
+        # exist and hits a None cellWidget. One explicit emit follows.
+        self.table.blockSignals(True)
+        try:
+            self.table.insertRow(row)
+            self._sources.insert(row, src)
 
-        self.table.setItem(row, 0, QTableWidgetItem(str(src.get("name", ""))))
-        tests = src.get("tests") or []
-        self.table.setItem(
-            row, 1, QTableWidgetItem(", ".join(str(t) for t in tests))
-        )
+            self.table.setItem(
+                row, 0, QTableWidgetItem(str(src.get("name", "")))
+            )
+            tests = src.get("tests") or []
+            self.table.setItem(
+                row, 1, QTableWidgetItem(", ".join(str(t) for t in tests))
+            )
 
-        union_combo = self._make_combo(
-            [""] + self._unions, str(src.get("union", "") or "")
-        )
-        self.table.setCellWidget(row, 2, union_combo)
+            union_combo = self._make_combo(
+                [""] + self._unions, str(src.get("union", "") or "")
+            )
+            self.table.setCellWidget(row, 2, union_combo)
 
-        bundle_combo = self._make_combo(
-            [""] + self._bundles, str(src.get("bundle", "") or "")
-        )
-        self.table.setCellWidget(row, 3, bundle_combo)
+            bundle_combo = self._make_combo(
+                [""] + self._bundles, str(src.get("bundle", "") or "")
+            )
+            self.table.setCellWidget(row, 3, bundle_combo)
 
-        policy_combo = QComboBox()
-        policy_combo.addItems(list(_POLICY_CHOICES))
-        item_policy = ((src.get("on_failure") or {}).get("item_policy"))
-        policy_combo.setCurrentText(
-            item_policy if item_policy in _POLICY_CHOICES else _POLICY_INHERIT
-        )
-        policy_combo.currentTextChanged.connect(lambda _t: self.changed.emit())
-        self.table.setCellWidget(row, 4, policy_combo)
+            policy_combo = QComboBox()
+            policy_combo.addItems(list(_POLICY_CHOICES))
+            item_policy = ((src.get("on_failure") or {}).get("item_policy"))
+            policy_combo.setCurrentText(
+                item_policy if item_policy in _POLICY_CHOICES
+                else _POLICY_INHERIT
+            )
+            policy_combo.currentTextChanged.connect(
+                lambda _t: self.changed.emit()
+            )
+            self.table.setCellWidget(row, 4, policy_combo)
+        finally:
+            self.table.blockSignals(False)
 
         self.changed.emit()
         return row
@@ -291,6 +304,26 @@ class ReviewItemsTable(QWidget):
 
     def row_count(self) -> int:
         return self.table.rowCount()
+
+    def item_problems(self) -> list[str]:
+        """Per-row completeness problems — empty list means ready to advance.
+
+        An item needs a name, at least one test, and a union; the bundle
+        is optional. Used by the wizard to gate the Step-2 → Step-3 move
+        so an empty item can't slip through to Finish (G-8).
+        """
+        problems: list[str] = []
+        for i, item in enumerate(self.to_items(), start=1):
+            missing: list[str] = []
+            if not item.get("name"):
+                missing.append("名称")
+            if not item.get("tests"):
+                missing.append("测试")
+            if not item.get("union"):
+                missing.append("角组 (union)")
+            if missing:
+                problems.append(f"第 {i} 行缺少: {'、'.join(missing)}")
+        return problems
 
     def to_items(self) -> list[dict[str, Any]]:
         """Build item dicts, overlaying edits onto each row's source dict."""

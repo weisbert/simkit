@@ -26,6 +26,27 @@ from simkit.gui.loaders import (
 _NODE_DATA_ROLE = Qt.UserRole + 1
 
 
+# Hover help for each top-level group (G-7 — the labels alone don't tell
+# a new user what a "review" or "bundle" is).
+_GROUP_TOOLTIPS = {
+    "Reviews": (
+        "Review = 一份 .review.json，把测试 + 角组 + 测量包打包成一次"
+        "可重复的批量仿真。右键可新建 / 复制 / 运行。"
+    ),
+    "Bundles": (
+        "Bundle = 一份 .measure.json，定义要从仿真里取哪些输出量。"
+    ),
+    "Milestones": (
+        "里程碑 = 给某次运行打的标签（如 PDR / CDR / FDR），"
+        "方便事后按阶段查结果。"
+    ),
+    "History": (
+        "History = 这个模块跑过的每一次运行。点开任意一次查看 Results "
+        "与 Summary。"
+    ),
+}
+
+
 class ProjectTreeModel(QStandardItemModel):
     """Tree model for the left-panel module browser."""
 
@@ -168,6 +189,9 @@ class ProjectTreeModel(QStandardItemModel):
 def _group_item(label: str, n: int) -> QStandardItem:
     item = QStandardItem(f"{label} ({n})")
     item.setEditable(False)
+    tip = _GROUP_TOOLTIPS.get(label)
+    if tip:
+        item.setToolTip(tip)
     return item
 
 

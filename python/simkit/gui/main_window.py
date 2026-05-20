@@ -73,6 +73,7 @@ from simkit.gui.tree_model import ProjectTreeModel
 from simkit.gui.views.corners_editor import CornersEditor
 from simkit.gui.views.diff_tab import DiffTab
 from simkit.gui.views.measures_editor import MeasuresEditor
+from simkit.gui.views.glossary_dialog import GlossaryDialog
 from simkit.gui.views.results_tab import ResultsTab
 from simkit.gui.views.summary_tab import SummaryTab
 from simkit.gui.views.review_editor import ReviewEditorDialog
@@ -88,6 +89,26 @@ _DOT_COLORS = {
     BridgeStatus.GREEN: "#2ecc71",
     BridgeStatus.AMBER: "#f1c40f",
     BridgeStatus.RED: "#e74c3c",
+}
+
+# Per-state explanation for the bridge status dot (G-15). "Bridge: amber"
+# alone told a new user nothing — these say what the colour means and
+# what, if anything, to do about it.
+_BRIDGE_TOOLTIPS = {
+    BridgeStatus.GREEN: (
+        "Bridge 已连接 — 与 Cadence Virtuoso 的 SKILL 通信正常，"
+        "Pull / Run / Apply 可用。"
+    ),
+    BridgeStatus.AMBER: (
+        "Bridge 未确认 — 正在探测 Cadence SKILL 连接。"
+        "短暂出现属正常；若持续琥珀色，点「Restart bridge」强制重探。"
+    ),
+    BridgeStatus.RED: (
+        "Bridge 断开 — 连不上 Cadence SKILL，所有实时操作不可用。"
+        "点「Restart bridge」；若仍为红色，说明 Virtuoso 端 pyServer "
+        "没起，在 CIW 里运行 "
+        "(pyKillServer)(pyStartServer ?python \"/usr/bin/python3\") 后再点。"
+    ),
 }
 
 
@@ -119,6 +140,14 @@ class MainWindow(QMainWindow):
             self._on_sync_maestro_history
         )
         file_menu.addAction(self._sync_history_action)
+
+        help_menu = menu_bar.addMenu("&Help")
+        self._glossary_action = QAction("术语表 (Glossary)…", self)
+        self._glossary_action.setToolTip(
+            "解释 module / session / review / union / bundle 等术语"
+        )
+        self._glossary_action.triggered.connect(self._on_show_glossary)
+        help_menu.addAction(self._glossary_action)
 
         # --- live state (populated lazily) ------------------------------
         self._loaded_module: Optional[LoadedModule] = None
@@ -153,6 +182,10 @@ class MainWindow(QMainWindow):
         top_bar_layout.addWidget(QLabel("Session:"))
         self.session_input = QLineEdit(objectName="sessionInput")
         self.session_input.setPlaceholderText("e.g. fnxSession0")
+        self.session_input.setToolTip(
+            "Maestro session — 一个已打开的 Maestro 仿真窗口的名字。"
+            "Pull / Run / Apply 都对这个 session 操作；留空则无法运行。"
+        )
         self.session_input.setFixedWidth(160)
         top_bar_layout.addWidget(self.session_input)
 
@@ -279,7 +312,9 @@ class MainWindow(QMainWindow):
         self.status_dot.setStyleSheet(
             f"background-color: {color}; border-radius: 7px;"
         )
-        self.status_dot.setToolTip(f"Bridge: {status.value}")
+        self.status_dot.setToolTip(
+            _BRIDGE_TOOLTIPS.get(status, f"Bridge: {status.value}")
+        )
         # Spec A5: button is hidden when GREEN (no need to restart),
         # visible + plain on AMBER (something flickering, user can probe
         # early), and prominent on RED (clearly broken, one-click rescue).
@@ -300,6 +335,10 @@ class MainWindow(QMainWindow):
                 self.restart_bridge_button.setStyleSheet(
                     "QPushButton { padding: 2px 8px; }"
                 )
+
+    def _on_show_glossary(self) -> None:
+        """Help ▸ 术语表 — open the vocabulary glossary dialog (G-7)."""
+        GlossaryDialog(self).exec_()
 
     def _on_restart_bridge_clicked(self) -> None:
         """Spec A5: user-initiated bridge re-probe.

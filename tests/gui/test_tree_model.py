@@ -83,6 +83,17 @@ def test_populate_creates_four_groups():
     assert "History" in model.item(3).text()
 
 
+def test_group_nodes_have_explanatory_tooltips():
+    # G-7: the group labels alone don't tell a new user what a "review"
+    # or "bundle" is — each carries hover help.
+    model = ProjectTreeModel()
+    model.populate(_sample_module())
+    for row in range(4):
+        tip = model.item(row).toolTip()
+        assert tip != "", f"group row {row} has no tooltip"
+    assert ".review.json" in model.item(0).toolTip()  # Reviews
+
+
 def test_node_kind_group_for_top_level():
     model = ProjectTreeModel()
     model.populate(_sample_module())
