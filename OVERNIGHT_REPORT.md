@@ -4,19 +4,31 @@
 
 (or `pvt gui` if you have the simkit entry on `$PATH`).
 
+> **CORRECTION (2026-05-20) — read this first.**
+> The "Bug #1" claim in this report is **WRONG**. The overnight `-u` change
+> addressed a mis-diagnosed stdout-buffering hypothesis that was never the
+> actual cause of "stuck pending". The real cause — `pvt_runner_run`'s idle
+> detection requiring `axlGetRunStatus == (0,0)`, which this Maestro never
+> returns — was reproduced live and fixed the next day in commit `1be3f71`.
+> "Bug #2" (Interactive.N naming) is real but its fix only takes effect once
+> completion is detected, i.e. it also depended on `1be3f71`. See `HANDOFF.md`
+> for the full, corrected picture. The GUI-gap work below (A5 / B1 / Cap#6)
+> stands and is unaffected.
+
 ## TL;DR
 
-Three reported bugs fixed and three GUI gaps closed. Branch
-`overnight-2026-05-19` has 6 commits; tests went from 1512 → 1549.
+Three GUI gaps closed (A5 / B1 / Cap#6) and two bug *attempts* made — one
+(`-u`) later found to be a mis-diagnosis, see the correction above. Branch
+`overnight-2026-05-19`; tests went from 1512 → 1549.
 Out of scope: 8-cap Tier-1 caps #7 (Copy-edit) and #8 (Wizard) — these
 are wholly absent and not part of "大差不差".
 
-## Bugs fixed
+## Bugs — corrected status (see correction banner above)
 
-| # | Symptom | Root cause | Fix |
-|---|---------|-----------|-----|
-| 1 | GUI stuck on "pending" while sim already ran | `RunController` spawned `python -m simkit.cli run` without `-u`; CPython block-buffered stdout (~8KB) so `item_started`/`item_completed` arrived together at subprocess exit | Added `-u` to argv. Verified by `test_unbuffered_subprocess_streams_before_exit` — proves first event arrives BEFORE subprocess exits. |
-| 2 | Maestro showed "Interactive.0" not the GUI's chosen name | `pvtRunnerRename` wrapped `axlSetHistoryName` in `errset/nil`, swallowing failures. Combined with #1, the rename hadn't fired yet when the user looked. | Drop the errset swallow; readback `axlGetHistoryName` to confirm Maestro accepted the value. Live skillbridge probe against your `fnxSession0` confirmed rename works. |
+| # | Symptom | Actual root cause | Real fix |
+|---|---------|-------------------|----------|
+| 1 | GUI stuck on "pending" while sim already ran | **NOT stdout buffering.** `pvt_runner_run`'s poll-to-idle loop required `axlGetRunStatus == (0,0)`; this Maestro returns `(24,24)`/`(18,18)`/`(0,14)` even when idle, so a 10s run polled to the 1800s timeout. | Commit `1be3f71` (2026-05-20): idle detection now trusts `count_running` (rdb content). The overnight `-u` change is harmless but did not fix this. |
+| 2 | Maestro showed "Interactive.N" not the GUI's chosen name | The rename was correct but only fires *after* completion is detected — which never happened because of bug #1. The `errset/nil` swallow was a real latent issue but not the user-visible cause. | The errset-removal (commit `f5b6a3e`) is kept; the user-visible symptom is resolved by `1be3f71`. Verified e2e: history renamed `orch_Test_basic_*`. |
 | 3 | Real-env (公司 Command + alps) compat | n/a — audit verdict | **A: equivalent to manual click.** No `axlSetMainSimulator`/`axlPutRunMode`/host/queue overrides anywhere in the dispatch. One narrow caveat: `ic_from:` items use Spectre-flavored `+nodeset/+ic` in `additionalArgs` — alps compat with those flags unknown. Common batch path is engine-agnostic. |
 
 ## GUI gaps closed
@@ -76,7 +88,14 @@ No skips, no flakes, no warnings I introduced.
 
 ## Known gaps / what I didn't touch
 
-- **Live end-to-end dogfood** of bugs #1 + #2 against a real `pvt run` was not done — the example review's items don't match your live session's tests, so running it would fail at corner-push, not at the buffering/rename layers I changed. The unit-level + skillbridge-level evidence is in `logs_yusheng/overnight_dogfood/bugs_1_and_2.md`. Your morning try-it #3 (click Run on a real review) will be the missing test.
+- **Live end-to-end dogfood was skipped overnight — and that is exactly why
+  bug #1 was mis-diagnosed.** It was done properly on 2026-05-20: a real
+  `pvt run` of `sanity_check.review.json` reproduced the hang, root-caused it
+  to idle detection, and confirmed the `1be3f71` fix (run completes in 16s).
+  Lesson recorded in `HANDOFF.md` and memory.
 - **B3 right-click-Compare on History rows** — not added; existing Compare button in Results header still works.
 - **Caps #7-8** — out of scope.
 - **Real-env (alps) `ic_from:` codepath** — needs a one-time probe on the real-env host. Common batch path is safe.
+- **Corner pull/push** for multi-section corners loses the model file path
+  (caused a separate SFE-73 the next day; user hand-fixed the live corners).
+  Tracked as item A in `HANDOFF.md`.
