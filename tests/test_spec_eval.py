@@ -29,6 +29,7 @@ from simkit.spec_eval import (  # noqa: E402
     SpecParseError,
     evaluate_spec,
     parse_spec,
+    spec_margin,
 )
 
 
@@ -311,6 +312,45 @@ class EnumInvariantTests(unittest.TestCase):
                           f"{got!r} not in enum for ({spec!r}, {value!r})")
             self.assertEqual(got, expected,
                              f"({spec!r}, {value!r}): expected {expected!r}, got {got!r}")
+
+
+# --- spec_margin — signed distance to the spec limit -----------------------
+
+
+class SpecMarginTests(unittest.TestCase):
+
+    def test_ge_margin_is_positive_when_passing(self):
+        # >= 20 @ 25 → 5 of room.
+        self.assertEqual(spec_margin(">= 20", 25), 5.0)
+
+    def test_ge_margin_is_negative_when_violating(self):
+        self.assertEqual(spec_margin(">= 20", 18), -2.0)
+
+    def test_le_margin_room_is_limit_minus_value(self):
+        self.assertEqual(spec_margin("<= 5", 3), 2.0)
+        self.assertEqual(spec_margin("<= 5", 7), -2.0)
+
+    def test_minimize_and_maximize_match_le_ge(self):
+        self.assertEqual(spec_margin("minimize 100", 80), 20.0)
+        self.assertEqual(spec_margin("maximize 100", 120), 20.0)
+
+    def test_range_margin_is_distance_to_nearer_bound(self):
+        # range 1 5 @ 4.5 → nearer bound is 5, distance 0.5.
+        self.assertEqual(spec_margin("range 1 5", 4.5), 0.5)
+        # @ 1.2 → nearer bound is 1, distance 0.2.
+        self.assertAlmostEqual(spec_margin("range 1 5", 1.2), 0.2)
+        # outside the range → negative.
+        self.assertEqual(spec_margin("range 1 5", 6), -1.0)
+
+    def test_margin_none_for_no_spec_or_no_value(self):
+        self.assertIsNone(spec_margin(None, 5))
+        self.assertIsNone(spec_margin("", 5))
+        self.assertIsNone(spec_margin(">= 20", None))
+        self.assertIsNone(spec_margin(">= 20", float("nan")))
+
+    def test_margin_none_for_unparseable_or_tolerance(self):
+        self.assertIsNone(spec_margin("garbage", 5))
+        self.assertIsNone(spec_margin("tolerance 0.05", 5))
 
 
 if __name__ == "__main__":

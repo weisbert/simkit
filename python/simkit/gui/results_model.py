@@ -10,9 +10,10 @@ This module ships two things:
   run's results pane. Columns match spec §6.1 / §10.2 vocabulary:
   ``corner``, ``test``, ``output``, ``value``, ``status``, ``spec``,
   ``spec_status``. ``BackgroundRole`` paints a light-red brush on any
-  row where ``status == 'fail'`` or ``spec_status`` is one of
-  ``{'fail', 'eval_err'}`` — the two ways the per-row verdict surfaces
-  (raw simulator status vs spec-evaluated verdict; see DECISIONS #47).
+  row whose raw ``status`` is a problem value (``fail`` / ``eval_err`` /
+  ``failed`` / ``no_convergence`` / ``sim_err``) or whose ``spec_status``
+  is one of ``{'fail', 'eval_err'}`` — the two ways the per-row verdict
+  surfaces (raw simulator status vs spec-evaluated verdict; DECISIONS #47).
 
 * :func:`load_rows_for_run` — pure DuckDB read for ``run_id``. Returns
   list-of-dicts keyed identically to ``ResultsModel.COLUMNS`` so the
@@ -58,8 +59,16 @@ _FAIL_BRUSH = QBrush(QColor(255, 220, 220))
 
 
 # spec_status values that should highlight a row as failed in addition
-# to the raw ``status == 'fail'`` check.
+# to the raw ``status`` check.
 _FAIL_SPEC_STATUSES = frozenset({"fail", "eval_err"})
+
+# Raw ``results.status`` values that mark a row as needing attention —
+# a spec violation, a calc-expression error, or a Spectre failure. Used
+# both for the red row tint and the Results tab "failed-only" filter so
+# the two stay consistent (G-4: surface eval_err / convergence rows).
+_PROBLEM_STATUSES = frozenset(
+    {"fail", "eval_err", "failed", "no_convergence", "sim_err"}
+)
 
 
 # Display placeholder for missing/None cell values. Matches the spec
@@ -160,7 +169,7 @@ def _format_cell(value: Any) -> str:
 def _is_fail_row(record: dict) -> bool:
     """True if this row should be highlighted as failing."""
     status = record.get("status")
-    if isinstance(status, str) and status == "fail":
+    if isinstance(status, str) and status in _PROBLEM_STATUSES:
         return True
     spec_status = record.get("spec_status")
     if isinstance(spec_status, str) and spec_status in _FAIL_SPEC_STATUSES:

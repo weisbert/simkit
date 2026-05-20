@@ -39,6 +39,7 @@ only ever carry e-notation.
 Public API:
     parse_spec(s: str) -> tuple                 — (kind, *values) or raises SpecParseError
     evaluate_spec(spec, value) -> str           — returns enum string spec_status
+    spec_margin(spec, value) -> Optional[float] — signed margin to the spec limit
     SPEC_STATUS_ENUM                            — frozenset of valid enum values
 """
 
@@ -215,3 +216,37 @@ def evaluate_spec(spec: Optional[str], value: Union[None, int, float]) -> str:
         return "unsupported"
     # Defensive fallthrough: parse_spec only ever produces the kinds above.
     return "parse_err"
+
+
+def spec_margin(
+    spec: Optional[str], value: Union[None, int, float]
+) -> Optional[float]:
+    """Signed margin of ``value`` against ``spec``, in the output's own units.
+
+    Positive → the value satisfies the spec with room to spare; negative →
+    it violates the spec; zero → exactly on the limit. For a ``range`` spec
+    the margin is the distance to the *nearer* bound.
+
+    Returns ``None`` when a margin is not computable: no spec, missing /
+    non-numeric value, an unparseable spec, or the ``tolerance`` form
+    (whose target isn't carried in the spec string). Never raises.
+    """
+    if spec is None or (isinstance(spec, str) and spec.strip() == ""):
+        return None
+    if not isinstance(value, (int, float)) or (
+        isinstance(value, float) and math.isnan(value)
+    ):
+        return None
+    try:
+        parsed = parse_spec(spec)
+    except SpecParseError:
+        return None
+    kind = parsed[0]
+    if kind in ("lt", "le", "minimize"):
+        return float(parsed[1] - value)
+    if kind in ("gt", "ge", "maximize"):
+        return float(value - parsed[1])
+    if kind == "range":
+        return float(min(value - parsed[1], parsed[2] - value))
+    # tolerance — target not in the spec string, so no margin.
+    return None

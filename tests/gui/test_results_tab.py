@@ -388,3 +388,68 @@ def test_set_spec_dialog_empty_is_allowed_as_clear():
     # Empty == "clear the spec"; OK must stay enabled.
     assert d._buttons.button(QDialogButtonBox.Ok).isEnabled() is True
     assert d.spec_text() == ""
+
+
+# --- G-4: failed-only filter ---------------------------------------------
+
+
+def test_failed_only_filter_hides_passing_rows():
+    t = ResultsTab()
+    con = _con_with_two_rows()  # 1 pass (TT) + 1 spec-fail (SS)
+    try:
+        t.set_run("R1", con)
+    finally:
+        con.close()
+    assert t._proxy.rowCount() == 2
+    t.failed_only_check.setChecked(True)
+    # Only the SS row (spec_status='fail') survives.
+    assert t._proxy.rowCount() == 1
+
+
+def test_failed_only_filter_restores_all_rows_when_unchecked():
+    t = ResultsTab()
+    con = _con_with_two_rows()
+    try:
+        t.set_run("R1", con)
+    finally:
+        con.close()
+    t.failed_only_check.setChecked(True)
+    assert t._proxy.rowCount() == 1
+    t.failed_only_check.setChecked(False)
+    assert t._proxy.rowCount() == 2
+
+
+def test_failed_only_filter_catches_eval_err_status_rows():
+    # G-4: a status='eval_err' row is a problem even with no spec failure.
+    con = connect(":memory:")
+    bootstrap(con)
+    con.execute(
+        """
+        INSERT INTO runs(
+          run_id, project_id, testbench_id, timestamp,
+          author, history_name, schema_version, ingested_at
+        ) VALUES
+          ('RE', 'p', 't', TIMESTAMPTZ '2026-05-19 12:00:00+00',
+           'a', 'h', 4, TIMESTAMPTZ '2026-05-19 12:00:00+00')
+        """
+    )
+    con.execute(
+        """
+        INSERT INTO results(
+          run_id, point, corner, test, output,
+          value_num, value_str, status, sweep, corner_vars,
+          test_note, spec, spec_status
+        ) VALUES
+          ('RE', 0, 'TT', 't', 'x',
+           1.0, NULL, 'ok', '{}', '{}', NULL, NULL, 'no_spec'),
+          ('RE', 0, 'SS', 't', 'x',
+           NULL, NULL, 'eval_err', '{}', '{}', NULL, NULL, 'no_spec')
+        """
+    )
+    t = ResultsTab()
+    try:
+        t.set_run("RE", con)
+    finally:
+        con.close()
+    t.failed_only_check.setChecked(True)
+    assert t._proxy.rowCount() == 1  # the eval_err row

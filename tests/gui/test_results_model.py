@@ -184,6 +184,21 @@ class ResultsModelBackgroundRoleTests(unittest.TestCase):
         self.assertIsInstance(brush, QBrush)
         self.assertEqual(brush.color(), QColor(255, 220, 220))
 
+    def test_status_eval_err_row_gets_light_red_brush(self):
+        # status="eval_err" — a calc-expression error. G-4: this is a
+        # problem row even though spec_status is not fail.
+        rows = [
+            {
+                "corner": "TT", "test": "pn", "output": "x",
+                "value": None, "status": "eval_err",
+                "spec": None, "spec_status": "no_spec",
+            },
+        ]
+        model = ResultsModel(rows)
+        brush = self._bg(model, 0)
+        self.assertIsInstance(brush, QBrush)
+        self.assertEqual(brush.color(), QColor(255, 220, 220))
+
     def test_passing_row_has_default_background(self):
         # Row 0: status=pass, spec_status=pass — no highlight.
         model = ResultsModel(_FIXTURE_ROWS)

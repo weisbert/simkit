@@ -34,6 +34,7 @@ import duckdb
 
 from PyQt5.QtCore import QSortFilterProxyModel, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -50,7 +51,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from simkit.gui.results_model import ResultsModel, load_rows_for_run
+from simkit.gui.results_model import (
+    _PROBLEM_STATUSES,
+    ResultsModel,
+    load_rows_for_run,
+)
 from simkit.spec_eval import SpecParseError, parse_spec
 
 
@@ -75,6 +80,43 @@ _COL_WIDTHS: dict[str, int] = {
     "spec": 180,
     "spec_status": 90,
 }
+
+
+class _FailedRowProxy(QSortFilterProxyModel):
+    """Sort/filter proxy that can hide all but the failing result rows (G-4).
+
+    A row "fails" the same way :func:`results_model._is_fail_row` paints it
+    red: a problem ``status`` (fail / eval_err / sim failures) or a
+    ``spec_status`` in ``{fail, eval_err}``.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._only_failed = False
+
+    def set_only_failed(self, on: bool) -> None:
+        if on != self._only_failed:
+            self._only_failed = on
+            self.invalidateFilter()
+
+    def filterAcceptsRow(self, source_row: int, source_parent) -> bool:
+        if not self._only_failed:
+            return True
+        model = self.sourceModel()
+        if model is None:
+            return True
+        cols = getattr(model, "COLUMNS", ())
+
+        def cell(name: str) -> str:
+            if name not in cols:
+                return ""
+            idx = model.index(source_row, cols.index(name))
+            return model.data(idx, Qt.DisplayRole) or ""
+
+        return (
+            cell("status") in _PROBLEM_STATUSES
+            or cell("spec_status") in ("fail", "eval_err")
+        )
 
 
 class ResultsTab(QWidget):
@@ -133,6 +175,13 @@ class ResultsTab(QWidget):
         self.baseline_label.mousePressEvent = self._on_baseline_clicked  # type: ignore[assignment]
         header_layout.addWidget(self.baseline_label, stretch=0)
 
+        # Failed-only filter (G-4) — hide everything but failing rows so a
+        # 240-corner sweep collapses to just the problems. Wired to the
+        # proxy below, once it exists.
+        self.failed_only_check = QCheckBox("只看失败行", self.header)
+        self.failed_only_check.setObjectName("failedOnlyCheck")
+        header_layout.addWidget(self.failed_only_check, stretch=0)
+
         # "Compare to…" — disabled until set_run() establishes a current run.
         self.compare_button = QPushButton("Compare to…", self.header)
         self.compare_button.setObjectName("compareToButton")
@@ -179,10 +228,11 @@ class ResultsTab(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
 
         # Proxy in front of the model so sort/filter never copies the
-        # underlying data (A3).
-        self._proxy = QSortFilterProxyModel(self)
+        # underlying data (A3). The failed-row proxy adds the G-4 filter.
+        self._proxy = _FailedRowProxy(self)
         self._proxy.setSortRole(Qt.DisplayRole)
         self.table.setModel(self._proxy)
+        self.failed_only_check.toggled.connect(self._proxy.set_only_failed)
 
         # Right-click → "Set spec for this output…" (G-1b).
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)

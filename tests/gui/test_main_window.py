@@ -1,12 +1,12 @@
 """MainWindow integration tests — Stage 2 wiring.
 
 Pins the contract between :class:`simkit.gui.main_window.MainWindow` and
-the three right-panel tab widgets (``ResultsTab`` / ``CornersEditor`` /
-``MeasuresEditor``) so future refactors of either side surface as test
-failures rather than silent UX regressions.
+the right-panel tab widgets (``ResultsTab`` / ``SummaryTab`` /
+``CornersEditor`` / ``MeasuresEditor``) so future refactors of either
+side surface as test failures rather than silent UX regressions.
 
 Scope (Stage 2 — log-only handlers): we only verify that:
-  * the three tabs are present + in the documented order;
+  * the static tabs are present + in the documented order;
   * every outbound signal from a tab routes into the bottom log panel
     (the Stage-3-replaceable handler).
 
@@ -33,22 +33,25 @@ from simkit.gui.main_window import MainWindow  # noqa: E402
 from simkit.gui.views.corners_editor import CornersEditor  # noqa: E402
 from simkit.gui.views.measures_editor import MeasuresEditor  # noqa: E402
 from simkit.gui.views.results_tab import ResultsTab  # noqa: E402
+from simkit.gui.views.summary_tab import SummaryTab  # noqa: E402
 
 
-def test_right_panel_has_three_tabs_in_documented_order(qtbot):
+def test_right_panel_has_four_tabs_in_documented_order(qtbot):
     w = MainWindow()
     qtbot.addWidget(w)
     tabs = w.right_panel
-    assert tabs.count() == 3
+    assert tabs.count() == 4
     assert tabs.tabText(0) == "Results"
-    assert tabs.tabText(1) == "Corners"
-    assert tabs.tabText(2) == "Measures"
+    assert tabs.tabText(1) == "Summary"
+    assert tabs.tabText(2) == "Corners"
+    assert tabs.tabText(3) == "Measures"
 
 
 def test_tab_widgets_are_the_right_classes(qtbot):
     w = MainWindow()
     qtbot.addWidget(w)
     assert isinstance(w.results_tab, ResultsTab)
+    assert isinstance(w.summary_tab, SummaryTab)
     assert isinstance(w.corners_editor, CornersEditor)
     assert isinstance(w.measures_editor, MeasuresEditor)
 

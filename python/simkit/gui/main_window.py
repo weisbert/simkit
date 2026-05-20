@@ -74,6 +74,7 @@ from simkit.gui.views.corners_editor import CornersEditor
 from simkit.gui.views.diff_tab import DiffTab
 from simkit.gui.views.measures_editor import MeasuresEditor
 from simkit.gui.views.results_tab import ResultsTab
+from simkit.gui.views.summary_tab import SummaryTab
 from simkit.gui.views.review_editor import ReviewEditorDialog
 from simkit.gui.views.review_wizard import ReviewWizard
 from simkit.gui.views.run_progress import RunProgressWidget
@@ -212,6 +213,7 @@ class MainWindow(QMainWindow):
         self.right_panel.setTabsClosable(False)
 
         self.results_tab = ResultsTab()
+        self.summary_tab = SummaryTab()
         self.corners_editor = CornersEditor()
         self.measures_editor = MeasuresEditor()
 
@@ -223,6 +225,7 @@ class MainWindow(QMainWindow):
         )
 
         self.right_panel.addTab(self.results_tab, "Results")
+        self.right_panel.addTab(self.summary_tab, "Summary")
         self.right_panel.addTab(self.corners_editor, "Corners")
         self.right_panel.addTab(self.measures_editor, "Measures")
 
@@ -663,6 +666,9 @@ class MainWindow(QMainWindow):
         self.results_tab.show_review_summary(
             payload.review_name, payload.item_count, payload.parse_error,
         )
+        # Selecting a review picks no run — the Summary rollup has nothing
+        # to show until a History run is opened.
+        self.summary_tab.clear()
         if payload.parse_error:
             self.append_log(
                 f"[tree] review {payload.review_name} 解析失败，无法运行: "
@@ -964,6 +970,7 @@ class MainWindow(QMainWindow):
                 timestamp=run.timestamp,
                 milestone=run.milestone or "",
             )
+            self.summary_tab.set_run(run.run_id, con)
             self.right_panel.setCurrentWidget(self.results_tab)
         finally:
             con.close()
@@ -994,9 +1001,10 @@ class MainWindow(QMainWindow):
             return
         try:
             n = apply_spec_to_output(con, run_id, output, spec_clean)
-            # Refresh the table on the same connection so the new
+            # Refresh the table + rollup on the same connection so the new
             # spec_status is visible without a re-run.
             self.results_tab.set_run(run_id, con)
+            self.summary_tab.set_run(run_id, con)
         finally:
             con.close()
 
