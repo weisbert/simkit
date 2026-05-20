@@ -529,6 +529,98 @@ _MAESTRO_TO_COLUMN = {
 }
 
 
+def editor_row_to_union_row(raw: dict, *, where: str = "row") -> UnionRow:
+    """Translate a single flat editor row dict into a :class:`UnionRow`.
+
+    Single source of truth for the flat-row → union semantics:
+
+    * ``process`` is a comma-separated model.section sweep (``tt,ss,ff``);
+    * ``temperature`` / ``vdd`` are single-valued named vars;
+    * ``extra_vars`` (``K=v1,v2; K2=v``) becomes one var each, a
+      comma-list value being a sweep axis.
+
+    Used both by :func:`editor_rows_to_union_rows` (push) and by the
+    Corners-editor expansion preview (G-9), so the two cannot drift.
+    Raises :class:`UnionValidationError` on a row that can't be a union row.
+    """
+    row_name = (raw.get("row_name") or "").strip()
+    if not row_name:
+        raise UnionValidationError(f"{where}: missing row_name")
+    vars_dict: dict[str, tuple[str, ...]] = {}
+    # Process column maps to model.section, not to a `process` var —
+    # this is how Maestro actually encodes process variation. Comma-
+    # separated input (e.g. "tt,ss,ff") becomes a multi-section sweep.
+    process_raw = (raw.get("process") or "").strip()
+    process_sections: tuple[str, ...] = ()
+    if process_raw:
+        process_sections = tuple(
+            p.strip() for p in process_raw.split(",") if p.strip()
+        )
+    temperature = (raw.get("temperature") or "").strip()
+    if temperature:
+        vars_dict["temp"] = (temperature,)
+    vdd = (raw.get("vdd") or "").strip()
+    if vdd:
+        vars_dict["vdd"] = (vdd,)
+    extras_text = raw.get("extra_vars") or ""
+    for extra in parse_extra_vars(extras_text):
+        k, values = extra
+        # Skip the synthetic "models[1..]" / "model[N].section" hints —
+        # those are presentation-only echos from union_to_editor_rows.
+        if k.startswith("models[") or k.startswith("model["):
+            continue
+        vars_dict[k] = values
+
+    model_file = (raw.get("model_file") or "").strip()
+    models: tuple[ModelEntry, ...] = ()
+    if model_file:
+        # If the editor put a section in the process column, carry it
+        # into the model entry. Otherwise leave section as a single empty
+        # string (legacy behavior — Maestro will use whatever default the
+        # model file ships with).
+        section = process_sections if process_sections else ("",)
+        # `model_file` is the absolute path the user sees in the editor.
+        # `file` must stay a bare model name (axlPutModel keys on it);
+        # `file_abs` carries the path push needs for axlSetModelFile so
+        # Spectre does not emit `include ""` (SFE-73). A bare basename
+        # has no path to preserve, so file_abs stays None there.
+        has_path = "/" in model_file
+        models = (
+            ModelEntry(
+                file=Path(model_file).name if has_path else model_file,
+                block="Global",
+                test="All",
+                section=section,
+                file_abs=model_file if has_path else None,
+            ),
+        )
+
+    if not vars_dict and not models:
+        raise UnionValidationError(
+            f"{where}: row {row_name!r} has no vars and no model_file"
+        )
+
+    # Derive the sweep flags from value cardinality. On the push path
+    # these are re-computed at .union.json load time (a multi-value cell
+    # round-trips as a JSON array), but an in-memory UnionRow needs them
+    # set explicitly so simkit.union.explode names sub-corners correctly.
+    sweep_var_keys = frozenset(
+        k for k, v in vars_dict.items() if len(v) > 1
+    )
+    sweep_model_indices = frozenset(
+        i for i, m in enumerate(models) if len(m.section) > 1
+    )
+
+    return UnionRow(
+        row_name=row_name,
+        vars=vars_dict,
+        models=models,
+        sweep_var_keys=sweep_var_keys,
+        sweep_model_indices=sweep_model_indices,
+        enabled=bool(raw.get("_enabled", True)),
+    )
+
+
 def editor_rows_to_union_rows(
     rows: list[dict],
     *,
@@ -542,75 +634,9 @@ def editor_rows_to_union_rows(
 
     union_rows: list[UnionRow] = []
     for i, raw in enumerate(rows):
-        row_name = (raw.get("row_name") or "").strip()
-        if not row_name:
-            raise UnionValidationError(
-                f"editor_rows_to_union_rows: row {i + 1} missing row_name"
-            )
-        vars_dict: dict[str, tuple[str, ...]] = {}
-        # Process column maps to model.section, not to a `process` var —
-        # this is how Maestro actually encodes process variation. Comma-
-        # separated input (e.g. "tt,ss,ff") becomes a multi-section sweep.
-        process_raw = (raw.get("process") or "").strip()
-        process_sections: tuple[str, ...] = ()
-        if process_raw:
-            process_sections = tuple(
-                p.strip() for p in process_raw.split(",") if p.strip()
-            )
-        temperature = (raw.get("temperature") or "").strip()
-        if temperature:
-            vars_dict["temp"] = (temperature,)
-        vdd = (raw.get("vdd") or "").strip()
-        if vdd:
-            vars_dict["vdd"] = (vdd,)
-        extras_text = raw.get("extra_vars") or ""
-        for extra in _parse_extra_vars(extras_text):
-            k, values = extra
-            # Skip the synthetic "models[1..]" / "model[N].section" hints —
-            # those are presentation-only echos from union_to_editor_rows.
-            if k.startswith("models[") or k.startswith("model["):
-                continue
-            vars_dict[k] = values
-
-        model_file = (raw.get("model_file") or "").strip()
-        models: tuple[ModelEntry, ...] = ()
-        if model_file:
-            # If the editor put a section in the process column, carry it
-            # into the model entry. Otherwise leave section as a single empty
-            # string (legacy behavior — Maestro will use whatever default the
-            # model file ships with).
-            section = process_sections if process_sections else ("",)
-            # `model_file` is the absolute path the user sees in the editor.
-            # `file` must stay a bare model name (axlPutModel keys on it);
-            # `file_abs` carries the path push needs for axlSetModelFile so
-            # Spectre does not emit `include ""` (SFE-73). A bare basename
-            # has no path to preserve, so file_abs stays None there.
-            has_path = "/" in model_file
-            models = (
-                ModelEntry(
-                    file=Path(model_file).name if has_path else model_file,
-                    block="Global",
-                    test="All",
-                    section=section,
-                    file_abs=model_file if has_path else None,
-                ),
-            )
-
-        if not vars_dict and not models:
-            raise UnionValidationError(
-                f"editor_rows_to_union_rows: row {row_name!r} has no "
-                f"vars and no model_file"
-            )
-
-        enabled = bool(raw.get("_enabled", True))
-        union_rows.append(
-            UnionRow(
-                row_name=row_name,
-                vars=vars_dict,
-                models=models,
-                enabled=enabled,
-            )
-        )
+        union_rows.append(editor_row_to_union_row(
+            raw, where=f"editor_rows_to_union_rows: row {i + 1}",
+        ))
 
     seen: set[str] = set()
     for r in union_rows:
@@ -629,7 +655,7 @@ def editor_rows_to_union_rows(
     )
 
 
-def _parse_extra_vars(text: str) -> list[tuple[str, tuple[str, ...]]]:
+def parse_extra_vars(text: str) -> list[tuple[str, tuple[str, ...]]]:
     """Parse the editor's ``extra_vars`` semi-colon list back into pairs."""
     out: list[tuple[str, tuple[str, ...]]] = []
     for piece in (text or "").split(";"):

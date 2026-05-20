@@ -34,7 +34,13 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QKeySequence, QStandardItem, QStandardItemModel
+from PyQt5.QtGui import QBrush, QColor, QKeySequence, QStandardItem, QStandardItemModel
+
+from simkit.gui.corner_expand import (
+    coherence_warnings as _row_coherence_warnings,
+    expansion_count,
+    expansion_tooltip,
+)
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QComboBox,
@@ -58,6 +64,9 @@ COL_TEMPERATURE = 3
 COL_VDD = 4
 COL_MODEL_FILE = 5
 COL_EXTRA_VARS = 6
+# G-9: read-only computed column — how many sub-corners this row expands
+# to. Makes a "secretly 6 corners" process-sweep row visually obvious.
+COL_EXPANDS = 7
 
 _HEADERS = [
     "Enable",
@@ -67,7 +76,30 @@ _HEADERS = [
     "vdd",
     "model_file",
     "extra_vars",
+    "expands to",
 ]
+
+# Header tooltips (G-9) — explain the corner model so the user is not
+# left guessing why supply lives in two places or what a comma means.
+_HEADER_TOOLTIPS = {
+    COL_PROCESS: (
+        "工艺角。逗号分隔即多 process 扫描:\n"
+        "  tt,ss,ff  →  这一行展开为 3 个 sub-corner"
+    ),
+    COL_VDD: (
+        "供电电压。供电请统一写在这一列,\n"
+        "不要藏在 extra_vars 的自由文本里。"
+    ),
+    COL_TEMPERATURE: "温度 (°C)。下拉是常用值,可自由输入其它温度。",
+    COL_EXTRA_VARS: (
+        "其它 corner 变量,形如  K=v; K2=a,b\n"
+        "值用逗号分隔即扫描。供电变量应放回 vdd 列。"
+    ),
+    COL_EXPANDS: (
+        "这一行实际展开成多少个 sub-corner(只读,自动计算)。\n"
+        "鼠标悬停可看到每个 sub-corner 的名字与变量组合。"
+    ),
+}
 
 # Per-cell dropdown vocabularies (spec §11.1 "Per-cell dropdown for
 # known-value cells").
@@ -133,6 +165,11 @@ class CornersEditor(QWidget):
         # (Phase 4 Stage 3 §11.3). None unbinds — validation falls back to
         # the row_name / duplicate checks only.
         self._project_root: Optional[Path] = None
+
+        # Reentrancy guard (G-9): _refresh_coherence writes the computed
+        # "expands to" cells + tooltips, which itself fires itemChanged.
+        # Without this flag that would recurse into _refresh_push_enabled.
+        self._refreshing = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -221,6 +258,26 @@ class CornersEditor(QWidget):
         self._errors.setVisible(False)
         root.addWidget(self._errors)
 
+        # --- coherence-warning strip (G-9) ------------------------------
+        # Amber, distinct from the red error strip: these are advisories
+        # (supply split across vdd column / extra_vars) — they never
+        # disable push, they just nudge the user toward a tidy corner
+        # model.
+        self._warnings = QFrame(self, objectName="cornerWarnStrip")
+        self._warnings.setFrameShape(QFrame.StyledPanel)
+        self._warnings.setStyleSheet(
+            "QFrame#cornerWarnStrip { background: #fff3a3; "
+            "border: 1px solid #d4b500; }"
+        )
+        warn_layout = QHBoxLayout(self._warnings)
+        warn_layout.setContentsMargins(6, 4, 6, 4)
+        self.warnings_label = QLabel("", self._warnings)
+        self.warnings_label.setObjectName("cornerWarnLabel")
+        self.warnings_label.setWordWrap(True)
+        warn_layout.addWidget(self.warnings_label, stretch=1)
+        self._warnings.setVisible(False)
+        root.addWidget(self._warnings)
+
         # --- center table (spec §11 affordances + A3 model layer) -------
         # We use QStandardItemModel here (not a custom QAbstractTableModel)
         # because the editor mutates rows freely (add/dup/delete) and the
@@ -231,6 +288,12 @@ class CornersEditor(QWidget):
         # editor table is the explicit exception.
         self._model = QStandardItemModel(0, len(_HEADERS), self)
         self._model.setHorizontalHeaderLabels(_HEADERS)
+        # G-9 — header tooltips explain the corner model (process comma
+        # sweep, vdd-vs-extra_vars, the computed expands column).
+        for col, tip in _HEADER_TOOLTIPS.items():
+            header_item = self._model.horizontalHeaderItem(col)
+            if header_item is not None:
+                header_item.setToolTip(tip)
         # Recompute validation + push-enabled on any cell edit.
         self._model.itemChanged.connect(self._on_item_changed)
 
@@ -239,7 +302,9 @@ class CornersEditor(QWidget):
         self.table.setModel(self._model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table.horizontalHeader().setStretchLastSection(True)
+        # extra_vars (free text) is the column worth stretching, not the
+        # narrow computed expands column that now sits last (G-9).
+        self.table.horizontalHeader().setStretchLastSection(False)
         # Explicit row height — Qt's auto-section-size can resolve to 0 px on
         # some plugin/platform combos (observed on the 1AXX dogfood host:
         # log says "pulled 3 rows" but the table is visually empty because
@@ -250,6 +315,11 @@ class CornersEditor(QWidget):
         vh.setDefaultSectionSize(24)
         vh.setMinimumSectionSize(20)
         vh.setSectionResizeMode(QHeaderView.Fixed)
+        # Stretch the free-text extra_vars column; the trailing computed
+        # expands column stays at its (narrow) content width (G-9).
+        self.table.horizontalHeader().setSectionResizeMode(
+            COL_EXTRA_VARS, QHeaderView.Stretch
+        )
 
         # Per-cell dropdowns for the known-value columns (spec §11.1).
         # editable=True so the user can type comma-separated values for
@@ -529,6 +599,13 @@ class CornersEditor(QWidget):
                 value = ""
             items.append(QStandardItem(str(value)))
 
+        # COL_EXPANDS — read-only computed cell (G-9). Filled in by
+        # _refresh_coherence; created here so the column is never None.
+        expands_item = QStandardItem("")
+        expands_item.setEditable(False)
+        expands_item.setTextAlignment(Qt.AlignCenter)
+        items.append(expands_item)
+
         self._model.appendRow(items)
 
     def _on_item_changed(self, _item: QStandardItem) -> None:
@@ -536,6 +613,12 @@ class CornersEditor(QWidget):
         # Either can affect validation outcomes (row_name edits) or the
         # dump_union payload (checkstate); push-enabled depends only on
         # validation. Cheap to recompute either way.
+        #
+        # Reentrancy guard: _refresh_coherence writes the computed
+        # expands cells + tooltips, which re-fires itemChanged. Bail out
+        # so that cosmetic write does not recurse.
+        if self._refreshing:
+            return
         self._refresh_push_enabled()
 
     def _on_push_clicked(self) -> None:
@@ -567,6 +650,75 @@ class CornersEditor(QWidget):
                 if not has_rows
                 else "Send the current corner set to the live Maestro session."
             )
+        self._refresh_coherence()
+
+    def coherence_warnings(self) -> list[str]:
+        """Non-blocking supply-coherence advisories across all rows (G-9).
+
+        Distinct from :meth:`validation_errors`: these never disable
+        push. They flag the friction-#2 split where supply is hidden in
+        ``extra_vars`` or defined in both the ``vdd`` column and there.
+        """
+        out: list[str] = []
+        for r in range(self._model.rowCount()):
+            out.extend(_row_coherence_warnings(self._row_to_dict(r)))
+        return out
+
+    def _refresh_coherence(self) -> None:
+        """Recompute the expands column, process tooltips + warning strip.
+
+        Writes computed model cells, so it runs under the
+        :pyattr:`_refreshing` guard to keep :meth:`_on_item_changed`
+        from recursing.
+        """
+        self._refreshing = True
+        try:
+            for r in range(self._model.rowCount()):
+                flat = self._row_to_dict(r)
+                self._update_expands_cell(r, flat)
+                self._update_process_tooltip(r)
+        finally:
+            self._refreshing = False
+
+        warnings = self.coherence_warnings()
+        if warnings:
+            self.warnings_label.setText(
+                "供电定义不一致 — " + "; ".join(warnings)
+            )
+            self._warnings.setVisible(True)
+        else:
+            self._warnings.setVisible(False)
+            self.warnings_label.setText("")
+
+    def _update_expands_cell(self, r: int, flat: dict) -> None:
+        item = self._model.item(r, COL_EXPANDS)
+        if item is None:
+            item = QStandardItem("")
+            item.setEditable(False)
+            item.setTextAlignment(Qt.AlignCenter)
+            self._model.setItem(r, COL_EXPANDS, item)
+        count = expansion_count(flat)
+        item.setText("—" if count == 0 else f"× {count}")
+        item.setToolTip(expansion_tooltip(flat))
+        # Tint rows that are secretly multi-corner so a process sweep is
+        # not mistaken for a single corner.
+        item.setBackground(
+            QBrush(QColor(0xE6, 0xF0, 0xFF)) if count > 1 else QBrush()
+        )
+
+    def _update_process_tooltip(self, r: int) -> None:
+        item = self._model.item(r, COL_PROCESS)
+        if item is None:
+            return
+        text = (item.text() or "").strip()
+        sections = [p.strip() for p in text.split(",") if p.strip()]
+        if len(sections) > 1:
+            item.setToolTip(
+                f"{len(sections)}-process 扫描: {', '.join(sections)}\n"
+                "(逗号分隔 = 多个 process,这一行会展开成多个 sub-corner)"
+            )
+        else:
+            item.setToolTip("")
 
     def _cell_text(self, row: int, col: int) -> str:
         item = self._model.item(row, col)

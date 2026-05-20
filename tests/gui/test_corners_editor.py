@@ -22,6 +22,7 @@ from PyQt5.QtCore import Qt  # noqa: E402
 
 from simkit.gui.views.corners_editor import (  # noqa: E402
     COL_ENABLE,
+    COL_EXPANDS,
     COL_MODEL_FILE,
     COL_PROCESS,
     COL_ROW_NAME,
@@ -74,7 +75,8 @@ def test_construct_has_expected_children(editor):
     # Table
     assert editor.table is not None
     assert editor.table.model() is not None
-    assert editor.table.model().columnCount() == 7
+    # 7 editable columns + the G-9 computed "expands to" column.
+    assert editor.table.model().columnCount() == 8
 
     # Bottom row buttons
     assert editor.add_row_button is not None
@@ -483,3 +485,94 @@ def test_set_project_root_disables_push_when_model_missing(
     )
     # Push must be disabled because validation_errors() is non-empty.
     assert editor.push_button.isEnabled() is False
+
+
+# --- G-9: corner-model coherence ------------------------------------------
+
+
+def test_expands_column_counts_single_corner(editor):
+    editor.load_union([
+        {"row_name": "nom", "process": "tt", "vdd": "1.0",
+         "model_file": "/pdk/m.scs", "extra_vars": ""},
+    ])
+    assert editor._model.item(0, COL_EXPANDS).text() == "× 1"
+
+
+def test_expands_column_counts_process_sweep(editor):
+    editor.load_union([
+        {"row_name": "TT_pvt", "process": "tt,ss,ff", "vdd": "1.0",
+         "model_file": "/pdk/m.scs", "extra_vars": ""},
+    ])
+    # A row that is secretly 3 corners now reads "× 3".
+    assert editor._model.item(0, COL_EXPANDS).text() == "× 3"
+    tip = editor._model.item(0, COL_EXPANDS).toolTip()
+    assert "TT_pvt_0" in tip and "TT_pvt_2" in tip
+
+
+def test_expands_column_is_read_only(editor):
+    editor.load_union([
+        {"row_name": "nom", "process": "tt", "vdd": "1.0",
+         "model_file": "/pdk/m.scs", "extra_vars": ""},
+    ])
+    assert editor._model.item(0, COL_EXPANDS).isEditable() is False
+
+
+def test_expands_column_not_in_dump_union(editor):
+    editor.load_union([
+        {"row_name": "nom", "process": "tt", "vdd": "1.0",
+         "model_file": "/pdk/m.scs", "extra_vars": ""},
+    ])
+    dumped = editor.dump_union()[0]
+    assert "expands to" not in dumped
+    assert set(dumped) == {"row_name", "process", "temperature",
+                           "vdd", "model_file", "extra_vars"}
+
+
+def test_expands_recomputes_on_cell_edit(editor):
+    editor.load_union([
+        {"row_name": "TT_pvt", "process": "tt", "vdd": "1.0",
+         "model_file": "/pdk/m.scs", "extra_vars": ""},
+    ])
+    assert editor._model.item(0, COL_EXPANDS).text() == "× 1"
+    # Edit the process cell into a 3-process sweep.
+    editor._model.item(0, COL_PROCESS).setText("tt,ss,ff")
+    assert editor._model.item(0, COL_EXPANDS).text() == "× 3"
+
+
+def test_process_cell_tooltip_on_comma_list(editor):
+    editor.load_union([
+        {"row_name": "TT_pvt", "process": "tt,ss,ff", "vdd": "1.0",
+         "model_file": "/pdk/m.scs", "extra_vars": ""},
+    ])
+    assert "3-process" in editor._model.item(0, COL_PROCESS).toolTip()
+
+
+def test_coherence_warning_strip_shows_supply_split(editor):
+    editor.load_union([
+        {"row_name": "C1", "process": "tt", "vdd": "",
+         "model_file": "/pdk/m.scs", "extra_vars": "VDD=3,2.8"},
+    ])
+    assert editor._warnings.isHidden() is False
+    assert "供电" in editor.warnings_label.text()
+    # Coherence warnings never disable push.
+    assert editor.push_button.isEnabled() is True
+
+
+def test_coherence_warning_clears_when_supply_moved_to_column(editor):
+    editor.load_union([
+        {"row_name": "C1", "process": "tt", "vdd": "",
+         "model_file": "/pdk/m.scs", "extra_vars": "VDD=3"},
+    ])
+    assert editor._warnings.isHidden() is False
+    editor.load_union([
+        {"row_name": "C1", "process": "tt", "vdd": "3",
+         "model_file": "/pdk/m.scs", "extra_vars": ""},
+    ])
+    assert editor._warnings.isHidden() is True
+    assert editor.coherence_warnings() == []
+
+
+def test_header_tooltips_present(editor):
+    model = editor._model
+    assert "process" in model.horizontalHeaderItem(COL_PROCESS).toolTip()
+    assert model.horizontalHeaderItem(COL_EXPANDS).toolTip() != ""
