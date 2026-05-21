@@ -14,6 +14,7 @@ project has none yet), so the Corners tab is usable with no load step.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace as _dc_replace
 from pathlib import Path
 from typing import Optional
@@ -77,6 +78,7 @@ from simkit.corner_model import (
     run_set_membership,
     set_column_enabled,
     set_mode_var,
+    set_pvt_var,
     set_var_order,
     unbind_template,
 )
@@ -202,9 +204,13 @@ class CornerManagerView(QWidget):
             self._cm, self._profile, self
         )
         self.table.setModel(self.table_model)
-        self.table.verticalHeader().setDefaultSectionSize(24)
-        # Variable names live in column 0 now — the row header is redundant.
-        self.table.verticalHeader().hide()
+        vheader = self.table.verticalHeader()
+        vheader.setDefaultSectionSize(24)
+        # The row header is a thin drag gutter — grab it to reorder Design
+        # Variable rows. Variable names still live in column 0.
+        vheader.setFixedWidth(18)
+        vheader.setSectionsMovable(True)
+        vheader.setToolTip("Drag a row to reorder Design Variables")
         # #3.4 — columns are interactively resizable.
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Interactive)
@@ -255,6 +261,7 @@ class CornerManagerView(QWidget):
         )
         self.btn_reorder_corners.clicked.connect(self._on_reorder_corners)
         header.sectionMoved.connect(self._on_section_moved)
+        vheader.sectionMoved.connect(self._on_row_section_moved)
         header.sectionDoubleClicked.connect(self._on_header_double_clicked)
         header.customContextMenuRequested.connect(
             self._on_header_context_menu
@@ -528,7 +535,9 @@ class CornerManagerView(QWidget):
             return
         var = self.table_model.var_at(row)
         if var is not None:
-            self._show_variable_menu(var, gpos)
+            self._show_variable_menu(
+                var, self.table_model.data_row_kind(row), gpos
+            )
 
     def _on_header_context_menu(self, pos) -> None:
         """Right-click a corner header → the corner menu (2026 UX item 1)."""
@@ -586,22 +595,32 @@ class CornerManagerView(QWidget):
         menu.addAction(f"Delete {name!r}", lambda: self._delete_column(j))
         menu.exec_(gpos)
 
-    def _show_variable_menu(self, var: str, gpos) -> None:
+    def _show_variable_menu(self, var: str, kind: str, gpos) -> None:
+        """Right-click menu for a variable row. Temperature is intrinsic —
+        it cannot be renamed, moved, or removed."""
         menu = QMenu(self)
-        menu.addAction(
-            f"Rename {var!r}…", lambda: self._rename_variable(var)
-        )
-        _temp, design = self.table_model.variable_order()
-        if var in design:
-            i = design.index(var)
-            up = menu.addAction("Move Up", lambda: self._move_var(var, -1))
-            up.setEnabled(i > 0)
-            down = menu.addAction(
-                "Move Down", lambda: self._move_var(var, 1)
+        is_temp = kind == "temp"
+        if not is_temp:
+            menu.addAction(
+                f"Rename {var!r}…", lambda: self._rename_variable(var)
             )
-            down.setEnabled(i < len(design) - 1)
-        menu.addSeparator()
-        menu.addAction(f"Remove {var!r}", lambda: self._remove_variable(var))
+            _temp, design = self.table_model.variable_order()
+            if var in design:
+                i = design.index(var)
+                up = menu.addAction(
+                    "Move Up", lambda: self._move_var(var, -1)
+                )
+                up.setEnabled(i > 0)
+                down = menu.addAction(
+                    "Move Down", lambda: self._move_var(var, 1)
+                )
+                down.setEnabled(i < len(design) - 1)
+        menu.addAction("Add Design Variable…", self._add_variable)
+        if not is_temp:
+            menu.addSeparator()
+            menu.addAction(
+                f"Remove {var!r}", lambda: self._remove_variable(var)
+            )
         menu.exec_(gpos)
 
     # --- corner column actions ------------------------------------------
@@ -697,6 +716,46 @@ class CornerManagerView(QWidget):
         finally:
             self._reordering = False
 
+    def _on_row_section_moved(self, _logical, _old, _new) -> None:
+        """A row was dragged in the vertical-header gutter — re-order the
+        Design Variable rows to match. The header is restored to identity;
+        a drag that pulls a row out of the Design Variable block snaps back."""
+        if self._reordering:
+            return
+        self._reordering = True
+        try:
+            vheader = self.table.verticalHeader()
+            n = self.table_model.rowCount()
+            visual = sorted(range(n), key=vheader.visualIndex)
+            vheader.blockSignals(True)
+            for logical in range(n):
+                cur = vheader.visualIndex(logical)
+                if cur != logical:
+                    vheader.moveSection(cur, logical)
+            vheader.blockSignals(False)
+            design_rows = [
+                r for r in range(n)
+                if self.table_model.data_row_kind(r) == "var"
+            ]
+            if len(design_rows) < 2:
+                return
+            positions = [
+                p for p, r in enumerate(visual)
+                if self.table_model.data_row_kind(r) == "var"
+            ]
+            if positions != design_rows:
+                return   # a row left the Design Variable block — reject
+            new_design = [
+                self.table_model.var_at(visual[p]) for p in positions
+            ]
+            temp, design = self.table_model.variable_order()
+            if new_design != design:
+                self._apply(
+                    set_var_order(self._cm, tuple(temp + new_design))
+                )
+        finally:
+            self._reordering = False
+
     def _on_header_double_clicked(self, section: int) -> None:
         j = self.table_model.column_index_at(section)
         if j is not None:
@@ -730,6 +789,51 @@ class CornerManagerView(QWidget):
             QMessageBox.warning(self, "Remove variable failed", str(exc))
             return
         self._apply(new_cm)
+
+    def _add_variable(self) -> None:
+        """Add a new Design Variable row across every corner (issue: the
+        right-click menu could not add a row)."""
+        if not self._cm.columns:
+            QMessageBox.information(
+                self, "Add Design Variable",
+                "Add a corner first — a variable needs a column to live in.",
+            )
+            return
+        text, ok = QInputDialog.getText(
+            self, "Add Design Variable",
+            "New Design Variable name "
+            "(optionally  name = value , e.g.  vctrl = 0.6):",
+        )
+        if not ok:
+            return
+        name, _sep, value = text.strip().partition("=")
+        name, value = name.strip(), value.strip()
+        if not name:
+            return
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", name):
+            QMessageBox.warning(
+                self, "Add Design Variable",
+                f"{name!r} is not a valid variable name — it must start "
+                f"with a letter and use only letters, digits, and "
+                f"underscores.",
+            )
+            return
+        existing: set[str] = set()
+        for c in self._cm.columns:
+            existing |= set(c.pvt_vars)
+        if name in existing:
+            QMessageBox.warning(
+                self, "Add Design Variable",
+                f"Variable {name!r} already exists.",
+            )
+            return
+        cm = self._cm
+        for j in range(len(cm.columns)):
+            cm = set_pvt_var(cm, j, name, value)
+        if name not in cm.var_order:
+            cm = set_var_order(cm, tuple(cm.var_order) + (name,))
+        self._apply(cm)
+        self._select_var_row(name)
 
     def _move_selected_row(self, delta: int) -> None:
         idx = self.table.currentIndex()

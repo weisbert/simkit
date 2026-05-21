@@ -315,10 +315,7 @@ class CornerModelTableModel(QAbstractTableModel):
             j = section - _DATA_COL0
             if not (0 <= j < len(self._cols)):
                 return None
-            col = self._cols[j]
-            # Always show the point ("number") count so the user sees how
-            # many simulation points the corner expands to (2026 UX item 6).
-            return f"{effective_name(col)} ·{self._point_counts[j]}"
+            return effective_name(self._cols[j])
         j = section - _DATA_COL0
         if not (0 <= j < len(self._cols)):
             return None
@@ -378,7 +375,7 @@ class CornerModelTableModel(QAbstractTableModel):
             if kind is None:
                 return None
             label = self._rows[i][1]
-            if role == Qt.DisplayRole:
+            if role in (Qt.DisplayRole, Qt.EditRole):
                 return label
             if role == Qt.BackgroundRole:
                 if kind == _KIND_SECTION:
@@ -480,9 +477,7 @@ class CornerModelTableModel(QAbstractTableModel):
         if role == Qt.DisplayRole:
             return _MISSING if values is None else ", ".join(values)
         if role == Qt.EditRole:
-            if values is None or len(values) != 1:
-                return ""
-            return values[0]
+            return "" if values is None else ", ".join(values)
         if role == Qt.BackgroundRole:
             if values is None:
                 return None
@@ -514,8 +509,9 @@ class CornerModelTableModel(QAbstractTableModel):
             return base
         kind, key2 = self._rows[i]
         if col == _NAME_COL:
-            # Design Variable / Temperature names are renamed in place.
-            if kind in (_KIND_VAR, _KIND_TEMP):
+            # Design Variable names are renamed in place. Temperature is
+            # intrinsic — its name is fixed.
+            if kind == _KIND_VAR:
                 return base | Qt.ItemIsEditable
             return base
         if col == _CFILTER_COL:
@@ -531,10 +527,9 @@ class CornerModelTableModel(QAbstractTableModel):
             if entry is not None and len(entry.section) == 1:
                 return base | Qt.ItemIsEditable
             return base
-        values = self._display[j].get(key2)
-        if values is not None and len(values) == 1:
-            return base | Qt.ItemIsEditable
-        return base
+        # Design Variable / Temperature data cells are always editable —
+        # a blank ("—") cell and a multi-value cell included.
+        return base | Qt.ItemIsEditable
 
     def setData(
         self, index: QModelIndex, value: Any, role: int = Qt.EditRole
@@ -561,8 +556,8 @@ class CornerModelTableModel(QAbstractTableModel):
             return False
         kind, key2 = self._rows[i]
 
-        # Variable rename — column 0 of a Design Variable / Temperature row.
-        if col == _NAME_COL and kind in (_KIND_VAR, _KIND_TEMP):
+        # Variable rename — column 0 of a Design Variable row.
+        if col == _NAME_COL and kind == _KIND_VAR:
             if role != Qt.EditRole:
                 return False
             new_name = str(value).strip()
@@ -607,7 +602,9 @@ class CornerModelTableModel(QAbstractTableModel):
         elif self.is_managed_cell(row, col):
             new_cm = set_column_override(self._cm, j, key2, text)
         else:
-            new_cm = set_pvt_var(self._cm, j, key2, text)
+            # A comma-separated edit becomes a multi-value cell.
+            parts = tuple(p.strip() for p in text.split(",") if p.strip())
+            new_cm = set_pvt_var(self._cm, j, key2, parts or (text,))
         self.set_cornermodel(new_cm)
         self.cornermodelChanged.emit(new_cm)
         return True

@@ -20,6 +20,7 @@ from simkit.corner_model import (
     CornerModelValidationError,
     Mode,
     adopt_column,
+    apply_pull,
     classify_pull,
     column_models,
     effective_name,
@@ -32,6 +33,7 @@ from simkit.corner_model import (
     save_cornermodel,
     set_column_model_section,
     set_mode_var,
+    set_var_order,
     to_dict,
 )
 
@@ -250,6 +252,55 @@ def test_classify_pull_against_live_union(tmp_path):
     foreign_names = {r.row_name for r in result.foreign}
     assert foreign_names == {"TT_pvt", "TT_2p5G"}           # not in cornermodel
     assert "BT_2G_RX_TT" in result.missing                  # ours, not pulled
+
+
+def test_apply_pull_merges_new_vars_and_foreign_corners(tmp_path):
+    d = _base()
+    d["modes"] = {}
+    d["columns"] = [
+        {"mode": None, "name": "TT_pvt", "enabled": True,
+         "pvt_vars": {"temperature": "55"},
+         "models": [{"file": "rf018.scs", "section": "tt"}]},
+    ]
+    cm = _write_load(tmp_path, d)
+    pulled = union.load_union(_LIVE_UNION)
+
+    result = classify_pull(cm, pulled)
+    merged = apply_pull(cm, pulled, result)
+
+    by_name = {c.name: c for c in merged.columns}
+    # the matched corner gained the variables Maestro added — VDD here
+    # being a multi-value sweep.
+    assert by_name["TT_pvt"].pvt_vars["VDD"] == ("3", "2.8")
+    assert "VDD" in by_name["TT_pvt"].pvt_sweep_keys
+    # corners that exist only in Maestro are pulled in as new columns
+    assert "TT" in by_name and "TT_2p5G" in by_name
+    assert len(merged.columns) == 3
+    # the variable-row order follows Maestro
+    assert merged.var_order == ("temperature", "VDD", "flo")
+
+
+def test_apply_pull_routes_managed_register_to_override(tmp_path):
+    cm = _write_load(tmp_path, _base())   # managed columns, mode BT_2G_RX
+    pulled = union.load_union(_LIVE_UNION)
+    result = classify_pull(cm, pulled)
+    # managed columns do not match the live "TT*" rows — apply is a no-op
+    # on them, foreign rows still arrive as unmanaged columns.
+    merged = apply_pull(cm, pulled, result)
+    foreign_names = {c.name for c in merged.columns if not c.is_managed}
+    assert foreign_names == {"TT", "TT_pvt", "TT_2p5G"}
+    # the original managed columns survive untouched
+    assert sum(1 for c in merged.columns if c.is_managed) == 2
+
+
+def test_materialize_orders_row_vars_by_var_order(tmp_path):
+    cm = _write_load(tmp_path, _base())
+    order = ("VDD", "div_sel", "temperature", "d_en_dummy")
+    cm = set_var_order(cm, order)
+    u = materialize(cm)
+    for row in u.rows:
+        expected = [v for v in order if v in row.vars]
+        assert list(row.vars) == expected     # Push carries the row order
 
 
 def test_make_unmanaged_column_from_foreign(tmp_path):

@@ -253,19 +253,25 @@ class CornerManagerStage2Test(unittest.TestCase):
                 for b in self.view.cornermodel().template_bindings)
         )
 
-    def test_aggregation_column_header_shows_point_badge(self):
+    def test_aggregation_column_point_count_in_ncorners_row(self):
         self.view.templates_list.setCurrentRow(0)
         with mock.patch.object(
             cm_mod.QInputDialog, "getItem", return_value=("VCO", True),
         ):
             self.view._on_apply_template()
         model = self.view.table_model
-        headers = [
-            model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
-            for c in range(model.columnCount())
-        ]
+        col = next(
+            c for c in range(model.columnCount())
+            if model.headerData(c, Qt.Horizontal, Qt.DisplayRole) == "VCO_PVT"
+        )
+        nrow = next(
+            r for r in range(model.rowCount())
+            if model.data_row_kind(r) == "ncorners"
+        )
         # VCO_PVT = 2 proc_ct tuples × 2 VDD = 4 points
-        self.assertIn("VCO_PVT ·4", headers)
+        self.assertEqual(
+            model.data(model.index(nrow, col), Qt.DisplayRole), "4"
+        )
 
     def test_unbind_template_after_apply(self):
         self.view.templates_list.setCurrentRow(0)

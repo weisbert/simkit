@@ -59,8 +59,8 @@
 1. 在 `.cornermodel.json` 里 author 一个 `pvt_templates` + `correlated_axes`
    (格式见 `phase5_stage2_spec.md` §2),重新 Open Corner Model。
 2. 左侧"PVT 模板"区选模板 → **套用到模式** → 选一个模式 → 确认自动生成对应列。
-3. **VCO 复合轴验证:** 一个聚合列 `[工艺角+CT] × [电压] × [温度+s5p]` 的列头
-   应显示 `·45`(45 点,而非 405)。
+3. **VCO 复合轴验证:** 一个聚合列 `[工艺角+CT] × [电压] × [温度+s5p]` 在
+   底部 "Number of Corners" 行应显示 `45`(45 点,而非 405)。
 4. 改模板列后重新套用 → 绑定的模式同步;右键/解绑 → 该模式列**冻结保留**(D3)。
 5. Push → 确认聚合列摊开成正确的多个 corner row。
 
@@ -117,8 +117,8 @@
    temperature 三轴及其档位;corner 表 `BT_2G_RX_TT` 列已解析出 `LDO_VSET` /
    `temperature` / section。
 4. 选模板 `rx_full` → 套用到 `BT_2G_RX` → 生成三列;`split` 列(`ssMOS_ffRC`)
-   应解析成两个模型 `mos.scs:ss` + `rc.scs:ff`;`drift` 列点数 badge 显示温飘的
-   多点(`·6`)。
+   应解析成两个模型 `mos.scs:ss` + `rc.scs:ff`;`drift` 列在底部
+   "Number of Corners" 行显示温飘的多点(`6`)。
 5. **跨工程验证(真正的卖点):** 把 `rf018.pvtprofile.json` 换成另一工程的
    profile(process/voltage 名值不同),同一个 cornermodel 重新打开 → 同一套
    `axis_levels` 解析出新工程的具体值,模板不用改。

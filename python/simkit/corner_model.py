@@ -1110,6 +1110,22 @@ def materialize_column(
     return materialize_column_rows(model, column, profile)[0]
 
 
+def _order_row_vars(
+    row: UnionRow, global_order: list[str]
+) -> UnionRow:
+    """Re-key a row's ``vars`` dict to follow the cornermodel's global
+    variable-row order — so a Push carries the user's row ordering through
+    to Maestro (SKILL ``axlPutVar`` writes vars in JSON key order)."""
+    if not row.vars:
+        return row
+    ordered: dict[str, tuple[str, ...]] = {
+        v: row.vars[v] for v in global_order if v in row.vars
+    }
+    for v, val in row.vars.items():   # any var outside global_order — keep
+        ordered.setdefault(v, val)
+    return replace(row, vars=ordered)
+
+
 def materialize(
     model: CornerModel, profile: "PvtProfile | None" = None
 ) -> Union:
@@ -1128,6 +1144,13 @@ def materialize(
                 f"columns / correlated expansions collide"
             )
         seen.add(row.row_name)
+    # Each row's vars follow the cornermodel's global variable-row order so
+    # a Push reproduces the user's row ordering in Maestro.
+    all_vars: set[str] = set()
+    for row in rows:
+        all_vars |= set(row.vars)
+    global_order = ordered_var_rows(model, all_vars)
+    rows = [_order_row_vars(row, global_order) for row in rows]
     return Union(
         union_schema_version=1,
         name=model.name,
@@ -1318,6 +1341,57 @@ def cornermodel_from_union(union: Union, name: str = "corners") -> CornerModel:
     )
 
 
+def apply_pull(
+    model: CornerModel, pulled: Union, result: ReconcileResult,
+    profile: "PvtProfile | None" = None,
+) -> CornerModel:
+    """Merge a classified Maestro pull back into a non-empty cornermodel.
+
+    Pull means "make simkit reflect Maestro": every matched corner is
+    re-synced to its pulled state — new variables appear, changed values
+    update. An unmanaged column is rebuilt wholesale from its pulled row;
+    a managed column keeps its mode and routes pulled register values to
+    overrides. Foreign pulled rows (corners added in Maestro) become new
+    unmanaged columns. Columns missing from the pull are left in place —
+    a pull never deletes a corner. Modes / corner sets / run sets are
+    untouched. The variable-row order follows Maestro.
+
+    An aggregated (correlated-axis) column expands to several pulled rows
+    and is left as-is — there is no 1:1 row to re-sync it from.
+    """
+    cm = model
+    by_name = {row.row_name: row for row in pulled.rows}
+    for ci in range(len(model.columns)):
+        column = model.columns[ci]
+        name = effective_name(column)
+        if name not in result.matched:
+            continue            # foreign / missing / aggregated — skip
+        pulled_row = by_name.get(name)
+        if pulled_row is None:
+            continue
+        if not column.is_managed:
+            cm = _replace_column(cm, ci, replace(
+                make_unmanaged_column(pulled_row), name=column.name
+            ))
+        else:
+            mode_vars = model.modes[column.mode].vars
+            for d in result.matched[name]:
+                if d.maestro_value == ():
+                    continue    # var dropped in Maestro — left in place
+                if d.var in mode_vars:
+                    cm = set_column_override(
+                        cm, ci, d.var, d.maestro_value[0]
+                    )
+                else:
+                    cm = set_pvt_var(cm, ci, d.var, d.maestro_value)
+    for row in result.foreign:
+        cm = add_column(cm, make_unmanaged_column(row))
+    order = union_var_order(pulled)
+    if order:
+        cm = set_var_order(cm, order)
+    return cm
+
+
 @dataclass(frozen=True)
 class AdoptionSplit:
     """Preview of a §6.3 收编: how an unmanaged column's vars split when
@@ -1442,16 +1516,19 @@ def set_column_override(
 
 
 def set_pvt_var(
-    model: CornerModel, column_index: int, var: str, value: str
+    model: CornerModel, column_index: int, var: str,
+    value: "str | tuple[str, ...]",
 ) -> CornerModel:
-    """Return a new cornermodel with one column's scalar PVT var set."""
+    """Return a new cornermodel with one column's PVT var set.
+
+    ``value`` is a scalar string or a tuple of strings — a multi-value
+    cell such as ``("3", "2.8")``. The var is added to the column when absent,
+    so this also serves the GUI's "type into a blank corner cell" edit.
+    """
     column = model.columns[column_index]
-    if var not in column.pvt_vars:
-        raise CornerModelValidationError(
-            f"set_pvt_var: {var!r} is not a PVT var of this column"
-        )
+    values = (value,) if isinstance(value, str) else tuple(value)
     new_pvt = dict(column.pvt_vars)
-    new_pvt[var] = (value,)
+    new_pvt[var] = values
     new_sweep = column.pvt_sweep_keys - {var}
     return _replace_column(model, column_index, replace(
         column, pvt_vars=new_pvt, pvt_sweep_keys=new_sweep

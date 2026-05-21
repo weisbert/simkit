@@ -81,7 +81,7 @@ class CornerModelTableModelTest(unittest.TestCase):
         ]
         self.assertEqual(names, [
             "Variable", "Filter corner",
-            "BT_2G_RX_TT ·1", "BT_2G_RX_SS_1 ·1", "Foreign_TT ·1",
+            "BT_2G_RX_TT", "BT_2G_RX_SS_1", "Foreign_TT",
         ])
 
     def test_row_groups_cadence_layout(self):
