@@ -362,7 +362,8 @@ class CornerManagerStage3Test(unittest.TestCase):
         ):
             self.view._on_apply_template()
         names = {
-            self.view.table_model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
+            str(self.view.table_model.headerData(
+                c, Qt.Horizontal, Qt.DisplayRole)).split(" ·")[0]
             for c in range(self.view.table_model.columnCount())
         }
         self.assertIn("BT_2G_RX_PN_TT", names)
@@ -520,7 +521,8 @@ class CornerManagerStage5Test(unittest.TestCase):
         _QAPP.processEvents()
         visible = [
             model.var_at(r) for r in range(1, model.rowCount())
-            if not self.view.table.isRowHidden(r)
+            if model.data_row_kind(r) == "var"
+            and not self.view.table.isRowHidden(r)
         ]
         self.assertEqual(visible, ["ldo_vset"])
         self.view.hide()
@@ -535,7 +537,8 @@ class CornerManagerStage5Test(unittest.TestCase):
         _QAPP.processEvents()
         visible = {
             model.var_at(r) for r in range(1, model.rowCount())
-            if not self.view.table.isRowHidden(r)
+            if model.data_row_kind(r) == "var"
+            and not self.view.table.isRowHidden(r)
         }
         self.assertEqual(visible, {"ldo_vset", "div12"})
         self.view.hide()
@@ -734,7 +737,8 @@ class CornerManagerAuthoringTest(unittest.TestCase):
         ):
             self.view._on_apply_template()
         names = {
-            self.view.table_model.headerData(c, Qt.Horizontal, Qt.DisplayRole)
+            str(self.view.table_model.headerData(
+                c, Qt.Horizontal, Qt.DisplayRole)).split(" ·")[0]
             for c in range(self.view.table_model.columnCount())
         }
         self.assertIn("BT_2G_RX_LP", names)

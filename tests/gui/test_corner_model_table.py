@@ -68,10 +68,10 @@ class CornerModelTableModelTest(unittest.TestCase):
         self.model = CornerModelTableModel(self.cm)
 
     def test_dimensions(self):
-        # 3 corners (+ name + filter columns); temperature + 1 model file +
-        # d_en_dummy + div_sel data rows (+ the filter row).
+        # 3 corners (+ name + filter columns); Enable + temperature + 1 model
+        # file + d_en_dummy + div_sel + Tests data rows (+ the filter row).
         self.assertEqual(self.model.columnCount(), 5)
-        self.assertEqual(self.model.rowCount(), 5)
+        self.assertEqual(self.model.rowCount(), 7)
 
     def test_header_labels(self):
         names = [
@@ -80,17 +80,20 @@ class CornerModelTableModelTest(unittest.TestCase):
         ]
         self.assertEqual(names, [
             "Variable", "Filter corner",
-            "BT_2G_RX_TT", "BT_2G_RX_SS_1", "Foreign_TT",
+            "BT_2G_RX_TT ·1", "BT_2G_RX_SS_1 ·1", "Foreign_TT ·1",
         ])
 
-    def test_row_groups_temperature_models_then_design(self):
-        self.assertEqual(self.model.data_row_kind(_R0), "var")
-        self.assertEqual(self.model.var_at(_R0), "temperature")
-        self.assertEqual(self.model.data_row_kind(_R0 + 1), "model")
-        self.assertEqual(self.model.model_at(_R0 + 1), "rf018.scs")
-        design = {
-            self.model.var_at(r) for r in range(_R0 + 2, self.model.rowCount())
-        }
+    def test_row_groups_enable_temp_design_model_tests(self):
+        kinds = [
+            self.model.data_row_kind(r)
+            for r in range(_R0, self.model.rowCount())
+        ]
+        self.assertEqual(
+            kinds, ["enable", "temp", "var", "var", "model", "tests"]
+        )
+        self.assertEqual(self.model.var_at(_R0 + 1), "temperature")
+        self.assertEqual(self.model.model_at(_R0 + 4), "rf018.scs")
+        design = {self.model.var_at(_R0 + 2), self.model.var_at(_R0 + 3)}
         self.assertEqual(design, {"d_en_dummy", "div_sel"})
 
     def test_variable_name_in_column_zero(self):
@@ -191,13 +194,16 @@ class CornerModelTableModelTest(unittest.TestCase):
 
     def test_filter_cells_are_matcher_backed(self):
         # the four filter slots: (0,0) var-name, (0,1) corner-name,
-        # (0,2+) per-corner value, (r,1) per-variable value.
+        # (0,2+) per-corner value, (var-row,1) per-variable value.
         self.assertIsNotNone(self.model.matcher_at(0, 0))
         self.assertIsNotNone(self.model.matcher_at(0, 1))
         self.assertIsNotNone(self.model.matcher_at(0, _C0))
-        self.assertIsNotNone(self.model.matcher_at(_R0, 1))
+        var_row = self._row_of("d_en_dummy")
+        self.assertIsNotNone(self.model.matcher_at(var_row, 1))
         # a data cell is not a filter cell
-        self.assertIsNone(self.model.matcher_at(_R0, _C0))
+        self.assertIsNone(self.model.matcher_at(var_row, _C0))
+        # the Filter-corner cell on a structural row is not a filter cell
+        self.assertIsNone(self.model.matcher_at(_R0, 1))   # the Enable row
 
     def test_corner_name_filter_hides_columns(self):
         fired = []
@@ -209,12 +215,16 @@ class CornerModelTableModelTest(unittest.TestCase):
 
     def test_variable_name_filter_hides_rows(self):
         self.model.setData(self.model.index(0, 0), "div", Qt.EditRole)
-        visible = {
-            self.model.var_at(_R0 + i)
-            for i in range(self.model.rowCount() - 1)
-            if self.model.is_data_row_visible(i)
-        }
+        # only Design Variable rows are filtered (2026 UX clarification).
+        visible = set()
+        for r in range(_R0, self.model.rowCount()):
+            if self.model.data_row_kind(r) == "var" \
+                    and self.model.is_data_row_visible(r - _R0):
+                visible.add(self.model.var_at(r))
         self.assertEqual(visible, {"div_sel"})
+        # temperature is not a Design Variable — never hidden by a filter.
+        trow = self._row_of("temperature")
+        self.assertTrue(self.model.is_data_row_visible(trow - _R0))
 
     def test_per_corner_value_filter_hides_rows(self):
         # filter under BT_2G_RX_TT (col 2): keep variable rows whose TT
@@ -226,19 +236,20 @@ class CornerModelTableModelTest(unittest.TestCase):
         self.assertFalse(self.model.is_data_row_visible(den_i))
 
     def test_per_variable_value_filter_hides_columns(self):
-        # filter beside temperature (col 1): keep corners whose temperature
-        # is 55 — BT_2G_RX_TT and Foreign_TT, not BT_2G_RX_SS_1 (125).
-        trow = self._row_of("temperature")
-        self.model.setData(self.model.index(trow, 1), "55", Qt.EditRole)
+        # filter beside d_en_dummy (a Design Variable): keep corners whose
+        # d_en_dummy is 1 — only BT_2G_RX_TT (SS_1 overrides to 0, Foreign
+        # has no d_en_dummy).
+        drow = self._row_of("d_en_dummy")
+        self.model.setData(self.model.index(drow, 1), "1", Qt.EditRole)
         vis = [self.model.is_data_col_visible(j) for j in range(3)]
-        self.assertEqual(vis, [True, False, True])
+        self.assertEqual(vis, [True, False, False])
 
     def test_numeric_value_filter(self):
-        trow = self._row_of("temperature")
-        self.model.setData(self.model.index(trow, 1), ">100", Qt.EditRole)
-        self.model.set_filter_options(trow, 1, mode=FilterMode.NUMERIC)
+        drow = self._row_of("d_en_dummy")
+        self.model.setData(self.model.index(drow, 1), ">0", Qt.EditRole)
+        self.model.set_filter_options(drow, 1, mode=FilterMode.NUMERIC)
         vis = [self.model.is_data_col_visible(j) for j in range(3)]
-        self.assertEqual(vis, [False, True, False])  # only SS_1 (125)
+        self.assertEqual(vis, [True, False, False])  # only TT (d_en_dummy=1)
 
     def test_clear_all_filters(self):
         self.model.setData(self.model.index(0, 1), "SS", Qt.EditRole)

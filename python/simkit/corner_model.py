@@ -213,6 +213,9 @@ class Column:
     variant: str | None = None
     # Stage 6: semantic axis→level tokens resolved through the PVT profile.
     axis_levels: dict[str, str] = field(default_factory=dict)
+    # 2026 UX: tests this corner is scoped to. Empty = all tests (the Maestro
+    # default); non-empty mirrors Cadence's per-corner Tests selection.
+    tests: tuple[str, ...] = ()
 
     @property
     def is_managed(self) -> bool:
@@ -587,6 +590,7 @@ def _validate_column(
     col = replace(
         col, correlated_axes=col_axes, template=template, variant=variant,
         axis_levels=_parse_axis_levels(where, raw),
+        tests=_parse_tests(where, raw),
     )
 
     # Spec §2.4 / §6.3 — correlated-axis members must not collide with the
@@ -612,6 +616,24 @@ def _validate_column(
             f"{where}: unmanaged column has neither vars, models nor axes"
         )
     return col
+
+
+def _parse_tests(where: str, raw: dict) -> tuple[str, ...]:
+    """Parse the ``tests`` field — the tests a corner is scoped to. Absent or
+    empty means the corner applies to all tests (the Maestro default)."""
+    raw_t = raw.get("tests", [])
+    if not isinstance(raw_t, list):
+        raise CornerModelValidationError(
+            f"{where}: 'tests' must be a JSON array of strings"
+        )
+    out: list[str] = []
+    for t in raw_t:
+        if not isinstance(t, str) or not t.strip():
+            raise CornerModelValidationError(
+                f"{where}: each 'tests' entry must be a non-empty string"
+            )
+        out.append(t)
+    return tuple(out)
 
 
 def _parse_axis_levels(where: str, raw: dict) -> dict[str, str]:
@@ -1540,6 +1562,213 @@ def add_column(model: CornerModel, column: Column) -> CornerModel:
 
 
 # ---------------------------------------------------------------------------
+# 2026 UX — column delete / reorder / rename, variable rename / remove
+# ---------------------------------------------------------------------------
+
+
+def delete_column(model: CornerModel, column_index: int) -> CornerModel:
+    """Return a new cornermodel with the column at ``column_index`` removed.
+    Any run set that referenced the column drops it from its membership."""
+    if not (0 <= column_index < len(model.columns)):
+        raise CornerModelValidationError(
+            f"delete_column: index {column_index} out of range"
+        )
+    dropped = effective_name(model.columns[column_index])
+    cols = tuple(
+        c for i, c in enumerate(model.columns) if i != column_index
+    )
+    new_sets = {
+        name: replace(rs, columns=tuple(
+            c for c in rs.columns if c != dropped
+        ))
+        for name, rs in model.run_sets.items()
+    }
+    return replace(model, columns=cols, run_sets=new_sets)
+
+
+def reorder_columns(
+    model: CornerModel, new_order: tuple[int, ...]
+) -> CornerModel:
+    """Return a new cornermodel with columns permuted by ``new_order`` — a
+    permutation of ``range(len(columns))`` (corner reordering, 2026 UX)."""
+    n = len(model.columns)
+    if sorted(new_order) != list(range(n)):
+        raise CornerModelValidationError(
+            f"reorder_columns: {new_order} is not a permutation of "
+            f"0..{n - 1}"
+        )
+    return replace(model, columns=tuple(model.columns[i] for i in new_order))
+
+
+def move_column(
+    model: CornerModel, column_index: int, delta: int
+) -> CornerModel:
+    """Return a new cornermodel with one column nudged ``delta`` positions
+    (-1 = left, +1 = right). An out-of-range move is a no-op."""
+    n = len(model.columns)
+    target = column_index + delta
+    if not (0 <= column_index < n) or not (0 <= target < n):
+        return model
+    order = list(range(n))
+    order[column_index], order[target] = order[target], order[column_index]
+    return reorder_columns(model, tuple(order))
+
+
+def set_column_enabled(
+    model: CornerModel, column_index: int, enabled: bool
+) -> CornerModel:
+    """Return a new cornermodel with one column's enable flag set."""
+    column = model.columns[column_index]
+    return _replace_column(
+        model, column_index, replace(column, enabled=bool(enabled))
+    )
+
+
+def set_column_tests(
+    model: CornerModel, column_index: int, tests: tuple[str, ...]
+) -> CornerModel:
+    """Return a new cornermodel with one column's test scope set. An empty
+    tuple means the corner applies to all tests (the Maestro default)."""
+    column = model.columns[column_index]
+    clean = tuple(t.strip() for t in tests if t and t.strip())
+    return _replace_column(
+        model, column_index, replace(column, tests=clean)
+    )
+
+
+def rename_column(
+    model: CornerModel, column_index: int, new_name: str
+) -> CornerModel:
+    """Return a new cornermodel with one column's effective name set to
+    ``new_name``. A managed column keeps its mode / label and gets an
+    ``alias``; an unmanaged column's stored ``name`` is changed. Run sets
+    that referenced the old name follow the rename."""
+    if not (0 <= column_index < len(model.columns)):
+        raise CornerModelValidationError(
+            f"rename_column: index {column_index} out of range"
+        )
+    new_name = new_name.strip()
+    if not new_name:
+        raise CornerModelValidationError("rename_column: name is empty")
+    column = model.columns[column_index]
+    old_name = effective_name(column)
+    if new_name == old_name:
+        return model
+    others = {
+        effective_name(c) for i, c in enumerate(model.columns)
+        if i != column_index
+    }
+    if new_name in others:
+        raise CornerModelValidationError(
+            f"rename_column: name {new_name!r} collides with an existing "
+            f"column"
+        )
+    if column.is_managed:
+        new_col = replace(column, alias=new_name)
+    else:
+        new_col = replace(column, name=new_name)
+    renamed = _replace_column(model, column_index, new_col)
+    new_sets = {
+        name: replace(rs, columns=tuple(
+            new_name if c == old_name else c for c in rs.columns
+        ))
+        for name, rs in renamed.run_sets.items()
+    }
+    return replace(renamed, run_sets=new_sets)
+
+
+def rename_variable(
+    model: CornerModel, old_name: str, new_name: str
+) -> CornerModel:
+    """Return a new cornermodel with variable ``old_name`` renamed to
+    ``new_name`` everywhere — every column's PVT vars / overrides / sweep
+    keys, every mode's registers, and the explicit row order."""
+    new_name = new_name.strip()
+    if not _VAR_NAME_RE.match(new_name):
+        raise CornerModelValidationError(
+            f"rename_variable: name {new_name!r} must match "
+            f"^[A-Za-z][A-Za-z0-9_]*$"
+        )
+    if new_name == old_name:
+        return model
+    for axis in model.correlated_axes.values():
+        if old_name in axis.members or new_name in axis.members:
+            raise CornerModelValidationError(
+                f"rename_variable: {old_name!r}/{new_name!r} touches "
+                f"correlated axis {axis.name!r} — rename via the Axes editor"
+            )
+
+    def _rename(d: dict) -> dict:
+        return {(new_name if k == old_name else k): v for k, v in d.items()}
+
+    new_modes = {
+        name: Mode(name=name, vars=_rename(mode.vars))
+        for name, mode in model.modes.items()
+    }
+    new_cols: list[Column] = []
+    for col in model.columns:
+        if old_name in col.pvt_vars and new_name in col.pvt_vars:
+            raise CornerModelValidationError(
+                f"rename_variable: column {effective_name(col)!r} already "
+                f"has a variable {new_name!r}"
+            )
+        new_cols.append(replace(
+            col,
+            pvt_vars=_rename(col.pvt_vars),
+            overrides=_rename(col.overrides),
+            pvt_sweep_keys=frozenset(
+                new_name if k == old_name else k
+                for k in col.pvt_sweep_keys
+            ),
+        ))
+    new_var_order = tuple(
+        new_name if v == old_name else v for v in model.var_order
+    )
+    return replace(
+        model, modes=new_modes, columns=tuple(new_cols),
+        var_order=new_var_order,
+    )
+
+
+def remove_variable(model: CornerModel, var: str) -> CornerModel:
+    """Return a new cornermodel with variable ``var`` removed everywhere —
+    every column's PVT vars / overrides and every mode's registers."""
+    for axis in model.correlated_axes.values():
+        if var in axis.members:
+            raise CornerModelValidationError(
+                f"remove_variable: {var!r} is a member of correlated axis "
+                f"{axis.name!r} — remove it via the Axes editor"
+            )
+    for name, mode in model.modes.items():
+        if var in mode.vars and len(mode.vars) == 1:
+            raise CornerModelValidationError(
+                f"remove_variable: {var!r} is the only register of mode "
+                f"{name!r} — a mode needs at least one register"
+            )
+
+    def _drop(d: dict) -> dict:
+        return {k: v for k, v in d.items() if k != var}
+
+    new_modes = {
+        name: Mode(name=name, vars=_drop(mode.vars))
+        for name, mode in model.modes.items()
+    }
+    new_cols = tuple(
+        replace(
+            col,
+            pvt_vars=_drop(col.pvt_vars),
+            overrides=_drop(col.overrides),
+            pvt_sweep_keys=col.pvt_sweep_keys - {var},
+        )
+        for col in model.columns
+    )
+    new_var_order = tuple(v for v in model.var_order if v != var)
+    return replace(
+        model, modes=new_modes, columns=new_cols, var_order=new_var_order,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Stage 2 operations — correlated axes, templates, bind/unbind (spec §4)
 # ---------------------------------------------------------------------------
 
@@ -2172,6 +2401,8 @@ def to_dict(model: CornerModel) -> dict:
             entry["variant"] = col.variant
         if col.axis_levels:
             entry["axis_levels"] = dict(col.axis_levels)
+        if col.tests:
+            entry["tests"] = list(col.tests)
         columns.append(entry)
 
     out: dict = {
