@@ -74,8 +74,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "/software/public/qt/5.15.x_xcb/lib) is shadowing the venv's\n"
             "bundled Qt5. deploy_venv.sh should prepend the wheel's Qt5 lib\n"
             "dir to LD_LIBRARY_PATH at activation — try a fresh:\n"
-            "  bash:  source .venv/bin/activate\n"
-            "  csh:   source .venv/bin/activate.csh\n"
+            f"  bash:  source {sys.prefix}/bin/activate\n"
+            f"  csh:   source {sys.prefix}/bin/activate.csh\n"
         )
         return 5
 
