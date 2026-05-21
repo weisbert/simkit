@@ -360,8 +360,8 @@ def test_menu_bar_exists(qtbot):
     assert mb.actions(), "menu bar has no menus"
 
 
-def test_file_menu_has_open_module_action(qtbot):
-    """File menu must contain an 'Open Module…' action."""
+def test_file_menu_has_open_and_new_project_actions(qtbot):
+    """File menu must contain 'New Project…' and 'Open Project…' actions."""
     w = MainWindow()
     qtbot.addWidget(w)
     mb = w.menuBar()
@@ -372,9 +372,12 @@ def test_file_menu_has_open_module_action(qtbot):
             file_menu = action.menu()
             break
     assert file_menu is not None, "No 'File' menu found in menu bar"
-    action_texts = [a.text() for a in file_menu.actions()]
-    assert any("open module" in t.lower() for t in action_texts), (
-        f"'Open Module…' action not found in File menu; found: {action_texts}"
+    action_texts = [a.text().lower() for a in file_menu.actions()]
+    assert any("open project" in t for t in action_texts), (
+        f"'Open Project…' action not found in File menu; found: {action_texts}"
+    )
+    assert any("new project" in t for t in action_texts), (
+        f"'New Project…' action not found in File menu; found: {action_texts}"
     )
 
 
@@ -495,6 +498,36 @@ def test_open_module_warns_when_dir_has_no_pvtproject(qtbot, tmp_path, monkeypat
     w._on_open_module()
     assert w._loaded_module is None
     assert warned
+
+
+def test_new_module_creates_pvtproject_and_opens_it(qtbot, tmp_path):
+    """File ▸ New Project writes a valid .pvtproject and loads it — a
+    first-time user never hand-writes the sidecar JSON."""
+    import json
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    root = tmp_path / "fresh_chip"
+    assert w.new_module(root, "fresh_chip") is True
+    pvtproject = root / ".pvtproject"
+    assert pvtproject.is_file()
+    data = json.loads(pvtproject.read_text())
+    assert data["project"] == "fresh_chip"
+    assert data["dbRoot"]  # a non-empty default
+    assert w._loaded_module is not None
+    assert w._loaded_module.project_name == "fresh_chip"
+    # the Corners tab is live on the fresh project, no load step
+    assert w.right_panel.tabText(2) == "Corners"
+
+
+def test_new_module_rejects_an_invalid_project_name(qtbot, tmp_path):
+    warned = []
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._warn = lambda title, text: warned.append(title)
+    assert w.new_module(tmp_path / "x", "bad name!") is False
+    assert warned
+    assert not (tmp_path / "x" / ".pvtproject").exists()
 
 
 def test_broken_review_keeps_run_button_disabled(qtbot, tmp_path):

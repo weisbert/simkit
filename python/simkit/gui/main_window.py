@@ -127,10 +127,17 @@ class MainWindow(QMainWindow):
         # --- menu bar ---------------------------------------------------
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
-        self._open_module_action = QAction("Open Module…", self)
+        self._new_module_action = QAction("New Project…", self)
+        self._new_module_action.setShortcut("Ctrl+N")
+        self._new_module_action.setToolTip(
+            "Create a new simkit project (writes a .pvtproject) and open it"
+        )
+        self._new_module_action.triggered.connect(self._on_new_module)
+        file_menu.addAction(self._new_module_action)
+        self._open_module_action = QAction("Open Project…", self)
         self._open_module_action.setShortcut("Ctrl+O")
         self._open_module_action.setToolTip(
-            "Browse for a .pvtproject directory to open"
+            "Browse for an existing .pvtproject directory to open"
         )
         self._open_module_action.triggered.connect(self._on_open_module)
         file_menu.addAction(self._open_module_action)
@@ -181,7 +188,10 @@ class MainWindow(QMainWindow):
         self.module_selector = QWidget(objectName="moduleSelector")
         ms_layout = QHBoxLayout(self.module_selector)
         ms_layout.setContentsMargins(0, 0, 0, 0)
-        self.module_label = QLabel("No module open — File ▸ Open Module… (Ctrl+O)")
+        self.module_label = QLabel(
+            "No project open — File ▸ New Project… (Ctrl+N) or "
+            "Open Project… (Ctrl+O)"
+        )
         ms_layout.addWidget(self.module_label)
         top_bar_layout.addWidget(self.module_selector)
 
@@ -497,17 +507,93 @@ class MainWindow(QMainWindow):
 
         self._rewire_fs_watcher()
 
+    def _on_new_module(self) -> None:
+        """File ▸ New Project… — create a ``.pvtproject`` in a chosen
+        directory and open it, so a first-time user never has to
+        hand-write the sidecar JSON.
+        """
+        import re
+
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "New Project — choose the project directory",
+            str(Path.home()),
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
+        )
+        if not chosen:
+            return  # user cancelled
+        root = Path(chosen).expanduser().resolve()
+        if (root / ".pvtproject").is_file():
+            self.append_log(
+                f"[new-project] {root} already has a .pvtproject — opening it"
+            )
+            self._open_pvtproject(root / ".pvtproject")
+            return
+        default_name = re.sub(r"[^A-Za-z0-9_-]+", "_", root.name) or "project"
+        name, ok = QInputDialog.getText(
+            self, "New Project", "Project name (^[A-Za-z0-9_-]+$):",
+            QLineEdit.Normal, default_name,
+        )
+        if not ok or not name.strip():
+            return
+        self.new_module(root, name.strip())
+
+    def new_module(self, root: Path, name: str) -> bool:
+        """Write a ``.pvtproject`` for project ``name`` into ``root`` and
+        open it. Returns True on success. Split from the QFileDialog
+        handler so it is testable without modals."""
+        import json
+        import re
+
+        if not re.match(r"^[A-Za-z0-9_-]+$", name):
+            self._warn(
+                "Invalid project name",
+                f"{name!r} must match ^[A-Za-z0-9_-]+$ "
+                f"(letters, digits, underscore, hyphen).",
+            )
+            return False
+        root = Path(root).expanduser().resolve()
+        pvtproject = root / ".pvtproject"
+        data = {
+            "_doc": "simkit project — created via File ▸ New Project.",
+            "project": name,
+            "dbRoot": "./simkit_data",
+            "schema_version": 1,
+        }
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            pvtproject.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            self._warn("Could not create project", f"{pvtproject}\n\n{exc}")
+            return False
+        self.append_log(f"[new-project] created {pvtproject}")
+        return self._open_pvtproject(pvtproject)
+
+    def _open_pvtproject(self, pvtproject_path: Path) -> bool:
+        """Load a ``.pvtproject`` file into the window. Returns True on
+        success. Shared by New Project / Open Project."""
+        from simkit.gui.loaders import load_module
+        try:
+            loaded = load_module(pvtproject_path)
+        except Exception as exc:  # noqa: BLE001
+            self._warn("Could not open project", f"{pvtproject_path}\n\n{exc}")
+            self.append_log(f"[open-project] failed: {exc}")
+            return False
+        self.load_module(loaded)
+        self.append_log(f"[open-project] loaded {pvtproject_path}")
+        return True
+
     def _on_open_module(self) -> None:
-        """File > Open Module… — let the user pick a .pvtproject directory.
+        """File ▸ Open Project… — let the user pick a .pvtproject directory.
 
         Uses the same ``load_module`` + ``self.load_module`` code path as
         the ``--module`` CLI argument in ``simkit.gui.app``.
         """
-        from simkit.gui.loaders import load_module
-
         chosen = QFileDialog.getExistingDirectory(
             self,
-            "Open Module — select the .pvtproject directory",
+            "Open Project — select the .pvtproject directory",
             str(Path.home()),
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
         )
@@ -522,23 +608,14 @@ class MainWindow(QMainWindow):
         )
         if not pvtproject_path.is_file():
             self._warn(
-                "Not a simkit module",
+                "Not a simkit project",
                 f"{module_dir}\n\nThis directory has no .pvtproject file — "
-                f"it is not a simkit module.",
+                f"it is not a simkit project. Use File ▸ New Project… to "
+                f"create one here.",
             )
-            self.append_log(f"[open-module] no .pvtproject under {module_dir}")
+            self.append_log(f"[open-project] no .pvtproject under {module_dir}")
             return
-        try:
-            loaded = load_module(pvtproject_path)
-        except Exception as exc:  # noqa: BLE001
-            self._warn(
-                "Could not open module",
-                f"{pvtproject_path}\n\n{exc}",
-            )
-            self.append_log(f"[open-module] failed: {exc}")
-            return
-        self.load_module(loaded)
-        self.append_log(f"[open-module] loaded {pvtproject_path}")
+        self._open_pvtproject(pvtproject_path)
 
     # --- Phase 5 Corner Manager -----------------------------------------
 
@@ -1212,7 +1289,8 @@ class MainWindow(QMainWindow):
         """From-scratch review creation — spec §14.2, Tier-1 capability #8."""
         if self._loaded_module is None:
             self._warn(
-                "No module loaded", "Open a project first (File ▸ Open Module…)"
+                "No project loaded",
+                "Open a project first (File ▸ Open Project…)"
             )
             return
         wizard = ReviewWizard(
