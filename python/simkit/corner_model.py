@@ -1565,6 +1565,64 @@ def mode_from_column(
     return replace(new_model, columns=tuple(cols))
 
 
+def reclassify_mode(
+    model: CornerModel, mode_name: str, register_vars: dict[str, str]
+) -> CornerModel:
+    """Re-set which variables of ``mode_name`` are registers vs per-column
+    PVT vars (2026 UX — the New-Mode classification was previously frozen).
+
+    ``register_vars`` (var -> scalar value) is the complete desired register
+    set. A variable moving register→PVT is pushed onto every managed column
+    of the mode, seeded with its old register value; a variable moving
+    PVT→register is lifted off those columns. Columns of other modes are
+    untouched.
+    """
+    if mode_name not in model.modes:
+        raise CornerModelValidationError(
+            f"reclassify_mode: no such mode {mode_name!r}"
+        )
+    if not register_vars:
+        raise CornerModelValidationError(
+            f"reclassify_mode: mode {mode_name!r} needs at least one register"
+        )
+    for vname, vval in register_vars.items():
+        if not _VAR_NAME_RE.match(vname):
+            raise CornerModelValidationError(
+                f"reclassify_mode: var name {vname!r} must match "
+                f"^[A-Za-z][A-Za-z0-9_]*$"
+            )
+        if not isinstance(vval, str):
+            raise CornerModelValidationError(
+                f"reclassify_mode: register {vname!r} value must be a string"
+            )
+    old = model.modes[mode_name].vars
+    to_pvt = set(old) - set(register_vars)        # register -> PVT
+    to_register = set(register_vars) - set(old)   # PVT -> register
+
+    new_modes = dict(model.modes)
+    new_modes[mode_name] = Mode(name=mode_name, vars=dict(register_vars))
+
+    new_cols: list[Column] = []
+    for col in model.columns:
+        if col.mode != mode_name:
+            new_cols.append(col)
+            continue
+        pvt = dict(col.pvt_vars)
+        overrides = dict(col.overrides)
+        sweep = set(col.pvt_sweep_keys)
+        for v in to_pvt:
+            pvt.setdefault(v, (old[v],))
+        for v in to_register:
+            pvt.pop(v, None)
+            overrides.pop(v, None)
+            sweep.discard(v)
+        new_cols.append(replace(
+            col, pvt_vars=pvt, overrides=overrides,
+            pvt_sweep_keys=frozenset(sweep),
+        ))
+    return replace(model, modes=new_modes, columns=tuple(new_cols))
+
+
 def add_column(model: CornerModel, column: Column) -> CornerModel:
     """Return a new cornermodel with ``column`` appended (spec §7.2 New column).
 

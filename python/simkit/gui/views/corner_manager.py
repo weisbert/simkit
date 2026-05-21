@@ -50,21 +50,17 @@ from simkit.corner_model import (
     Column,
     CornerModel,
     CornerModelError,
-    CorrelatedAxis,
-    CorrelatedTuple,
     ModelEntry,
     PvtTemplate,
     TemplateColumn,
-    Variant,
     add_column,
-    add_correlated_axis,
     add_mode,
     add_pvt_template,
     add_run_set,
-    add_variant,
     apply_run_set,
     apply_template,
     check_cornermodel,
+    column_models,
     delete_column,
     effective_name,
     export_library,
@@ -73,6 +69,7 @@ from simkit.corner_model import (
     load_library,
     mode_from_column,
     move_column,
+    reclassify_mode,
     rename_column,
     rename_variable,
     reorder_columns,
@@ -81,7 +78,6 @@ from simkit.corner_model import (
     set_column_enabled,
     set_mode_var,
     set_var_order,
-    set_variant_var,
     unbind_template,
 )
 from simkit.gui.corner_filter import MENU_ORDER
@@ -105,7 +101,6 @@ class CornerManagerView(QWidget):
         self._profile = profile   # PvtProfile | None (Stage 6)
         self._source_path = source_path  # Path | None — where to persist
         self._loading_mode_vars = False
-        self._loading_variant_vars = False
         self._reordering = False
         self._set_filter: Optional[str] = None
         self._build_ui()
@@ -138,31 +133,21 @@ class CornerManagerView(QWidget):
         # walls on the side any more).
         self.btn_modes = QPushButton("Modes…")
         self.btn_modes.setToolTip(
-            "Define operating modes and edit their register values."
+            "Define operating modes (register configurations) and edit "
+            "their registers. A variant is just a mode derived from "
+            "another — use New Mode ▸ from an existing mode."
         )
-        self.btn_variants = QPushButton("Variants…")
-        self.btn_variants.setToolTip(
-            "Manage variants — delta overlays on a mode."
-        )
-        self.btn_templates = QPushButton("Templates…")
+        self.btn_templates = QPushButton("Corner Sets…")
         self.btn_templates.setToolTip(
-            "Author / apply reusable PVT templates; import / export the "
-            "template library."
-        )
-        self.btn_axes = QPushButton("Axes…")
-        self.btn_axes.setToolTip(
-            "Manage correlated axes — variable bundles that vary together."
+            "A Corner Set is a reusable list of PVT corner columns. "
+            "Design it once, then apply it to every mode — no need to "
+            "rebuild the same corners per mode."
         )
         self.btn_run_sets = QPushButton("Run Sets…")
         self.btn_run_sets.setToolTip(
             "Manage run sets — named cross-mode corner selections."
         )
-        self.btn_profile = QPushButton("Profile…")
-        self.btn_profile.setToolTip(
-            "Inspect the bound PVT profile (semantic mapping layer)."
-        )
-        for b in (self.btn_modes, self.btn_variants, self.btn_templates,
-                  self.btn_axes, self.btn_run_sets, self.btn_profile):
+        for b in (self.btn_modes, self.btn_templates, self.btn_run_sets):
             top.addWidget(b)
         self.btn_new_column = QPushButton("New Column")
         self.btn_new_column.setToolTip(
@@ -237,37 +222,23 @@ class CornerManagerView(QWidget):
         # Editor pop-ups — built once, hidden until a toolbar button raises
         # them; non-modal so corner-table edits stay live behind.
         self._build_modes_dialog()
-        self._build_variants_dialog()
         self._build_templates_dialog()
-        self._build_axes_dialog()
         self._build_run_sets_dialog()
-        self._build_profile_dialog()
 
         self.btn_modes.clicked.connect(
             lambda: self._open_dialog(self._modes_dialog))
-        self.btn_variants.clicked.connect(
-            lambda: self._open_dialog(self._variants_dialog))
         self.btn_templates.clicked.connect(
             lambda: self._open_dialog(self._templates_dialog))
-        self.btn_axes.clicked.connect(
-            lambda: self._open_dialog(self._axes_dialog))
         self.btn_run_sets.clicked.connect(
             lambda: self._open_dialog(self._run_sets_dialog))
-        self.btn_profile.clicked.connect(
-            lambda: self._open_dialog(self._profile_dialog))
 
         self.modes_list.currentItemChanged.connect(self._on_mode_selected)
         self.mode_vars.itemChanged.connect(self._on_mode_var_changed)
-        self.variants_list.currentItemChanged.connect(
-            self._on_variant_selected
-        )
-        self.variant_vars.itemChanged.connect(self._on_variant_var_changed)
         self.table_model.cornermodelChanged.connect(self._on_table_edited)
         self.btn_new_mode.clicked.connect(self._on_new_mode)
+        self.btn_edit_mode.clicked.connect(self._on_edit_mode)
         self.btn_new_column.clicked.connect(self._on_new_column)
-        self.btn_new_variant.clicked.connect(self._on_new_variant)
         self.btn_new_template.clicked.connect(self._on_new_template)
-        self.btn_new_axis.clicked.connect(self._on_new_axis)
         self.btn_apply_template.clicked.connect(self._on_apply_template)
         self.btn_unbind_template.clicked.connect(self._on_unbind_template)
         self.btn_new_run_set.clicked.connect(self._on_new_run_set)
@@ -313,20 +284,31 @@ class CornerManagerView(QWidget):
         self._modes_dialog.setWindowTitle("Modes")
         self._modes_dialog.resize(420, 500)
         v = QVBoxLayout(self._modes_dialog)
+        v.addWidget(QLabel(
+            "A mode is a named register configuration (e.g. BT_2G_RX). "
+            "Every corner column belongs to a mode; edit a register here "
+            "and all of that mode's columns update at once."
+        ))
         hdr = QHBoxLayout()
         hdr.addWidget(QLabel("Modes"))
         hdr.addStretch(1)
         self.btn_new_mode = QPushButton("New Mode")
         self.btn_new_mode.setToolTip(
-            "Define a new operating mode — a named bag of register values "
-            "(e.g. BT_2G_RX). Columns reference a mode."
+            "Define a new mode — from scratch, from a corner column, or "
+            "derived from an existing mode (the old 'variant')."
+        )
+        self.btn_edit_mode = QPushButton("Edit Mode…")
+        self.btn_edit_mode.setToolTip(
+            "Re-classify which variables are registers vs PVT, and "
+            "add / remove registers, for the selected mode."
         )
         hdr.addWidget(self.btn_new_mode)
+        hdr.addWidget(self.btn_edit_mode)
         v.addLayout(hdr)
         self.modes_list = QListWidget()
         v.addWidget(self.modes_list)
         v.addWidget(QLabel(
-            "Registers (edit once — every referencing column syncs)"
+            "Registers (edit a value — every column of this mode syncs)"
         ))
         self.mode_vars = QTableWidget(0, 2)
         self.mode_vars.setHorizontalHeaderLabels(["Register", "Value"])
@@ -336,79 +318,39 @@ class CornerManagerView(QWidget):
         self.mode_vars.verticalHeader().setDefaultSectionSize(24)
         v.addWidget(self.mode_vars)
 
-    def _build_variants_dialog(self) -> None:
-        self._variants_dialog = QDialog(self)
-        self._variants_dialog.setWindowTitle("Variants")
-        self._variants_dialog.resize(420, 460)
-        v = QVBoxLayout(self._variants_dialog)
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("Variants (delta overlay on a mode)"))
-        hdr.addStretch(1)
-        self.btn_new_variant = QPushButton("New Variant")
-        hdr.addWidget(self.btn_new_variant)
-        v.addLayout(hdr)
-        self.variants_list = QListWidget()
-        v.addWidget(self.variants_list)
-        v.addWidget(QLabel("Overridden registers (absolute values)"))
-        self.variant_vars = QTableWidget(0, 2)
-        self.variant_vars.setHorizontalHeaderLabels(
-            ["Overridden register", "Absolute value"]
-        )
-        self.variant_vars.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
-        self.variant_vars.verticalHeader().setDefaultSectionSize(24)
-        v.addWidget(self.variant_vars)
-
     def _build_templates_dialog(self) -> None:
         self._templates_dialog = QDialog(self)
-        self._templates_dialog.setWindowTitle("PVT Templates")
+        self._templates_dialog.setWindowTitle("Corner Sets")
         self._templates_dialog.resize(440, 420)
         v = QVBoxLayout(self._templates_dialog)
+        v.addWidget(QLabel(
+            "A Corner Set is a reusable list of PVT corner columns "
+            "(TT, SS_1, FF_1, …). Author it once, then apply it to every "
+            "mode so you do not rebuild the same corners per mode."
+        ))
         hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("PVT Templates"))
+        hdr.addWidget(QLabel("Corner Sets"))
         hdr.addStretch(1)
-        self.btn_new_template = QPushButton("New Template")
+        self.btn_new_template = QPushButton("New Corner Set")
         self.btn_new_template.setToolTip(
-            "Author a reusable PVT template — a list of corner columns "
-            "you can apply to any mode or variant (pain point a)."
+            "Author a reusable list of PVT corner columns."
         )
         hdr.addWidget(self.btn_new_template)
         v.addLayout(hdr)
         self.templates_list = QListWidget()
         v.addWidget(self.templates_list)
         tmpl_btns = QHBoxLayout()
-        self.btn_apply_template = QPushButton("Apply to mode")
+        self.btn_apply_template = QPushButton("Apply to a mode")
         self.btn_unbind_template = QPushButton("Unbind")
         tmpl_btns.addWidget(self.btn_apply_template)
         tmpl_btns.addWidget(self.btn_unbind_template)
         v.addLayout(tmpl_btns)
         lib_btns = QHBoxLayout()
-        self.btn_export_lib = QPushButton("Export template library")
-        self.btn_import_lib = QPushButton("Import template library")
+        self.btn_export_lib = QPushButton("Export to file")
+        self.btn_import_lib = QPushButton("Import from file")
         lib_btns.addWidget(self.btn_export_lib)
         lib_btns.addWidget(self.btn_import_lib)
         v.addLayout(lib_btns)
-
-    def _build_axes_dialog(self) -> None:
-        self._axes_dialog = QDialog(self)
-        self._axes_dialog.setWindowTitle("Correlated Axes")
-        self._axes_dialog.resize(440, 340)
-        v = QVBoxLayout(self._axes_dialog)
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel(
-            "Correlated axes (bound var bundle, cross-product as one axis)"
-        ))
-        hdr.addStretch(1)
-        self.btn_new_axis = QPushButton("New Axis")
-        self.btn_new_axis.setToolTip(
-            "Define a correlated axis — a bundle of variables that must "
-            "vary together, cross-multiplied as one axis (pain point h)."
-        )
-        hdr.addWidget(self.btn_new_axis)
-        v.addLayout(hdr)
-        self.axes_list = QListWidget()
-        v.addWidget(self.axes_list)
 
     def _build_run_sets_dialog(self) -> None:
         self._run_sets_dialog = QDialog(self)
@@ -429,17 +371,6 @@ class CornerManagerView(QWidget):
         btns.addWidget(self.btn_apply_run_set)
         btns.addWidget(self.btn_filter_set)
         v.addLayout(btns)
-
-    def _build_profile_dialog(self) -> None:
-        self._profile_dialog = QDialog(self)
-        self._profile_dialog.setWindowTitle("PVT Profile")
-        self._profile_dialog.resize(380, 260)
-        v = QVBoxLayout(self._profile_dialog)
-        v.addWidget(QLabel(
-            "PVT Profile (semantic mapping layer, read-only)"
-        ))
-        self.profile_list = QListWidget()
-        v.addWidget(self.profile_list)
 
     # --- model swap ------------------------------------------------------
 
@@ -484,25 +415,9 @@ class CornerManagerView(QWidget):
         self.modes_list.setCurrentRow(target)
 
     def _refresh_side_panels(self) -> None:
-        self._refresh_profile_panel()
         self._refresh_modes_panel()
-        self._refresh_variants_panel()
         self._refresh_templates_panel()
         self._refresh_run_sets_panel()
-
-    def _refresh_profile_panel(self) -> None:
-        self.profile_list.clear()
-        if self._profile is None:
-            bound = self._cm.pvt_profile
-            self.profile_list.addItem(
-                "(no PVT profile bound)" if bound is None
-                else f"⚠ profile {bound} bound but not loaded"
-            )
-            return
-        self.profile_list.addItem(f"profile: {self._profile.name}")
-        for axis_name in sorted(self._profile.axes):
-            levels = ", ".join(sorted(self._profile.axes[axis_name].levels))
-            self.profile_list.addItem(f"  {axis_name}: {levels}")
 
     # --- run-sets panel + column filter ---------------------------------
 
@@ -889,113 +804,24 @@ class CornerManagerView(QWidget):
                     continue
                 self.table_model.setData(idx, value, Qt.EditRole)
 
-    # --- variants panel --------------------------------------------------
-
-    def _refresh_variants_panel(self) -> None:
-        prev = self._selected_variant_name()
-        self.variants_list.blockSignals(True)
-        self.variants_list.clear()
-        names = sorted(self._cm.variants)
-        for name in names:
-            base = self._cm.variants[name].base_mode
-            self.variants_list.addItem(f"{name}  → {base}")
-        self.variants_list.blockSignals(False)
-        if prev in names:
-            self.variants_list.setCurrentRow(names.index(prev))
-        elif names:
-            self.variants_list.setCurrentRow(0)
-        else:
-            self._populate_variant_vars(None)
-
-    def _selected_variant_name(self) -> Optional[str]:
-        item = self.variants_list.currentItem()
-        if item is None:
-            return None
-        return item.text().split("  → ")[0]
-
-    def _on_variant_selected(self, *_args) -> None:
-        self._populate_variant_vars(self._selected_variant_name())
-
-    def _populate_variant_vars(self, variant_name: Optional[str]) -> None:
-        self._loading_variant_vars = True
-        self.variant_vars.setRowCount(0)
-        if variant_name is not None and variant_name in self._cm.variants:
-            variant = self._cm.variants[variant_name]
-            for var, value in sorted(variant.vars.items()):
-                row = self.variant_vars.rowCount()
-                self.variant_vars.insertRow(row)
-                name_item = QTableWidgetItem(var)
-                name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-                self.variant_vars.setItem(row, 0, name_item)
-                self.variant_vars.setItem(row, 1, QTableWidgetItem(value))
-        self._loading_variant_vars = False
-
-    def _on_variant_var_changed(self, item: QTableWidgetItem) -> None:
-        if self._loading_variant_vars or item.column() != 1:
-            return
-        variant_name = self._selected_variant_name()
-        if variant_name is None:
-            return
-        var = self.variant_vars.item(item.row(), 0).text()
-        new_value = item.text().strip()
-        if new_value == "":
-            self._refresh_variants_panel()
-            return
-        try:
-            new_cm = set_variant_var(
-                self._cm, variant_name, var, new_value
-            )
-        except CornerModelError as exc:
-            QMessageBox.warning(self, "Edit variant failed", str(exc))
-            self._refresh_variants_panel()
-            return
-        self._apply(new_cm)
-
-    def _on_new_variant(self) -> None:
-        if not self._cm.modes:
-            QMessageBox.warning(self, "New Variant", "Create a mode first.")
-            return
-        base, ok = QInputDialog.getItem(
-            self, "New Variant", "Base mode:", sorted(self._cm.modes), 0, False
-        )
-        if not ok:
-            return
-        name, ok = QInputDialog.getText(
-            self, "New Variant", "Variant name (^[A-Za-z][A-Za-z0-9_]*$):"
-        )
-        if not ok or not name.strip():
-            return
-        text, ok = QInputDialog.getMultiLineText(
-            self, "New Variant — override registers",
-            "One var=absolute-value per line (may only override "
-            "registers the base mode already has):",
-            "d_div12_en=0",
-        )
-        if not ok:
-            return
-        try:
-            overlay = _parse_var_lines(text)
-            new_cm = add_variant(self._cm, Variant(
-                name=name.strip(), base_mode=base, vars=overlay
-            ))
-        except (ValueError, CornerModelError) as exc:
-            QMessageBox.warning(self, "New variant failed", str(exc))
-            return
-        self._apply(new_cm)
+    # --- corner sets (templates) ----------------------------------------
 
     def _on_new_template(self) -> None:
         if not self._cm.modes:
-            QMessageBox.warning(self, "New Template", "Create a mode first.")
+            QMessageBox.warning(
+                self, "New Corner Set", "Create a mode first."
+            )
             return
         name, ok = QInputDialog.getText(
-            self, "New Template", "Template name (^[A-Za-z][A-Za-z0-9_]*$):"
+            self, "New Corner Set",
+            "Corner set name (^[A-Za-z][A-Za-z0-9_]*$):"
         )
         if not ok or not name.strip():
             return
         cols_text, ok = QInputDialog.getMultiLineText(
-            self, "New Template — columns",
-            "One column per line — pvt_label: var=value, var=value\n"
-            "(use +axisName to attach an existing correlated axis):",
+            self, "New Corner Set — corner columns",
+            "One corner column per line — label: var=value, var=value\n"
+            "e.g.   TT: temperature=55, VDD=0.9",
             "TT: temperature=55, VDD=0.9",
         )
         if not ok:
@@ -1006,40 +832,7 @@ class CornerManagerView(QWidget):
                 name=name.strip(), columns=columns,
             ))
         except (ValueError, CornerModelError) as exc:
-            QMessageBox.warning(self, "New template failed", str(exc))
-            return
-        self._apply(new_cm)
-
-    def _on_new_axis(self) -> None:
-        name, ok = QInputDialog.getText(
-            self, "New Axis", "Axis name (^[A-Za-z][A-Za-z0-9_]*$):"
-        )
-        if not ok or not name.strip():
-            return
-        members_text, ok = QInputDialog.getText(
-            self, "New Axis",
-            "Member variables that vary together (comma-separated):",
-        )
-        if not ok or not members_text.strip():
-            return
-        members = tuple(
-            m.strip() for m in members_text.split(",") if m.strip()
-        )
-        tuples_text, ok = QInputDialog.getMultiLineText(
-            self, "New Axis — correlated points",
-            "One point per line — label: member=value, member=value\n"
-            "(each line must assign exactly the members above):",
-            "TT: " + ", ".join(f"{m}=" for m in members),
-        )
-        if not ok:
-            return
-        try:
-            tuples = _parse_axis_tuples(tuples_text)
-            new_cm = add_correlated_axis(self._cm, CorrelatedAxis(
-                name=name.strip(), members=members, tuples=tuples,
-            ))
-        except (ValueError, CornerModelError) as exc:
-            QMessageBox.warning(self, "New axis failed", str(exc))
+            QMessageBox.warning(self, "New corner set failed", str(exc))
             return
         self._apply(new_cm)
 
@@ -1056,12 +849,6 @@ class CornerManagerView(QWidget):
             self.templates_list.addItem(f"{name}{suffix}")
         if prev in names:
             self.templates_list.setCurrentRow(names.index(prev))
-        self.axes_list.clear()
-        for name, axis in sorted(self._cm.correlated_axes.items()):
-            self.axes_list.addItem(
-                f"{name}  ({len(axis.tuples)} pts · "
-                f"{'+'.join(axis.members)})"
-            )
 
     def _selected_template_name(self) -> Optional[str]:
         item = self.templates_list.currentItem()
@@ -1187,53 +974,39 @@ class CornerManagerView(QWidget):
             return
         self._apply(new_cm)
 
-    # --- templates: apply / unbind --------------------------------------
-
-    _VARIANT_PREFIX = "Variant: "
+    # --- corner sets: apply / unbind ------------------------------------
 
     def _on_apply_template(self) -> None:
         tmpl = self._selected_template_name()
         if tmpl is None:
             QMessageBox.warning(
-                self, "Apply template", "Select a template first."
+                self, "Apply corner set", "Select a corner set first."
             )
             return
         if not self._cm.modes:
             QMessageBox.warning(
-                self, "Apply template", "Create a mode first."
+                self, "Apply corner set", "Create a mode first."
             )
             return
-        targets = sorted(self._cm.modes) + [
-            self._VARIANT_PREFIX + v for v in sorted(self._cm.variants)
-        ]
-        target, ok = QInputDialog.getItem(
-            self, "Apply template",
-            f"Apply template {tmpl} to (mode / variant):",
-            targets, 0, False,
+        mode, ok = QInputDialog.getItem(
+            self, "Apply corner set",
+            f"Apply corner set {tmpl} to which mode:",
+            sorted(self._cm.modes), 0, False,
         )
         if not ok:
             return
         try:
-            new_cm = self._apply_template_to_target(tmpl, target)
+            new_cm = apply_template(self._cm, mode, tmpl)
         except CornerModelError as exc:
-            QMessageBox.warning(self, "Apply template failed", str(exc))
+            QMessageBox.warning(self, "Apply corner set failed", str(exc))
             return
         self._apply(new_cm)
-
-    def _apply_template_to_target(
-        self, tmpl: str, target: str
-    ) -> CornerModel:
-        if target.startswith(self._VARIANT_PREFIX):
-            vname = target[len(self._VARIANT_PREFIX):]
-            base = self._cm.variants[vname].base_mode
-            return apply_template(self._cm, base, tmpl, variant=vname)
-        return apply_template(self._cm, target, tmpl)
 
     def _on_unbind_template(self) -> None:
         tmpl = self._selected_template_name()
         if tmpl is None:
             QMessageBox.warning(
-                self, "Unbind template", "Select a template first."
+                self, "Unbind corner set", "Select a corner set first."
             )
             return
         bound = [
@@ -1241,17 +1014,14 @@ class CornerManagerView(QWidget):
         ]
         if not bound:
             QMessageBox.warning(
-                self, "Unbind template",
-                f"Template {tmpl} is not bound to any mode / variant."
+                self, "Unbind corner set",
+                f"Corner set {tmpl} is not applied to any mode."
             )
             return
-        labels = [
-            (self._VARIANT_PREFIX + b.variant) if b.variant else b.mode
-            for b in bound
-        ]
+        labels = [b.variant or b.mode for b in bound]
         label, ok = QInputDialog.getItem(
-            self, "Unbind template",
-            f"Unbind {tmpl} from which target (its columns stay, frozen):",
+            self, "Unbind corner set",
+            f"Unbind {tmpl} from which mode (its columns stay, frozen):",
             labels, 0, False,
         )
         if not ok:
@@ -1261,16 +1031,83 @@ class CornerManagerView(QWidget):
             self._cm, binding.mode, tmpl, variant=binding.variant
         ))
 
-    # --- new mode / new column ------------------------------------------
+    # --- new / edit mode, new column ------------------------------------
 
     def _on_new_mode(self) -> None:
-        # A mode is best *derived* from a corner the user already authored in
-        # Cadence — pick a column, classify its vars. Only fall back to typing
-        # vars by hand when the project has no column to derive from yet.
+        methods = []
         if self._cm.columns:
+            methods.append("From a corner column")
+        if self._cm.modes:
+            methods.append("Derived from an existing mode")
+        methods.append("Type registers by hand")
+        if len(methods) == 1:
+            choice = methods[0]
+        else:
+            choice, ok = QInputDialog.getItem(
+                self, "New Mode", "Create the new mode:", methods, 0, False
+            )
+            if not ok:
+                return
+        if choice == "From a corner column":
             self._new_mode_from_column()
+        elif choice == "Derived from an existing mode":
+            self._new_mode_from_mode()
         else:
             self._new_mode_manual()
+
+    def _new_mode_from_mode(self) -> None:
+        """痛点 c — a 'variant' is just a mode derived from another: copy a
+        mode's registers, tweak a few, give it a new name."""
+        base, ok = QInputDialog.getItem(
+            self, "New Mode — derive from a mode",
+            "Base mode to copy registers from:",
+            sorted(self._cm.modes), 0, False,
+        )
+        if not ok:
+            return
+        name, ok = QInputDialog.getText(
+            self, "New Mode — derive from a mode",
+            "New mode name (^[A-Za-z][A-Za-z0-9_]*$):", text=f"{base}_PN",
+        )
+        if not ok or not name.strip():
+            return
+        seed = "\n".join(
+            f"{k}={v}"
+            for k, v in sorted(self._cm.modes[base].vars.items())
+        )
+        text, ok = QInputDialog.getMultiLineText(
+            self, "New Mode — registers",
+            "Edit the registers for the new mode (one var=value per line) — "
+            "e.g. turn d_div12_en off for a PSS variant:",
+            seed,
+        )
+        if not ok:
+            return
+        try:
+            mode_vars = _parse_var_lines(text)
+            new_cm = add_mode(self._cm, name.strip(), mode_vars)
+        except (ValueError, CornerModelError) as exc:
+            QMessageBox.warning(self, "New mode failed", str(exc))
+            return
+        self._apply(new_cm)
+
+    def _on_edit_mode(self) -> None:
+        item = self.modes_list.currentItem()
+        if item is None:
+            QMessageBox.warning(self, "Edit Mode", "Select a mode first.")
+            return
+        mode_name = item.text()
+        dialog = _EditModeDialog(self._cm, mode_name, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        try:
+            new_cm = reclassify_mode(
+                self._cm, mode_name, dialog.register_vars()
+            )
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Edit Mode failed", str(exc))
+            return
+        self._apply(new_cm)
 
     def _new_mode_from_column(self) -> None:
         dialog = _NewModeDialog(self._cm, self)
@@ -1503,7 +1340,8 @@ class _NewModeDialog(QDialog):
         layout.addWidget(self._table)
         layout.addWidget(QLabel(
             "Unticked → mode registers (value editable). "
-            "Ticked → per-column PVT variables."
+            "Ticked → per-column PVT variables. The 'Process · <file>' "
+            "rows are the P of PVT — always per-column, never a register."
         ))
 
         buttons = QDialogButtonBox(
@@ -1544,6 +1382,21 @@ class _NewModeDialog(QDialog):
                 Qt.Checked if _default_is_pvt(var) else Qt.Unchecked
             )
             self._table.setItem(row, 2, pvt_item)
+        # Process (the P of PVT) is stored as model.section, not a var —
+        # surface it read-only so the user can see it is part of the corner.
+        for entry in column_models(col):
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            name_item = QTableWidgetItem(f"Process · {entry.file}")
+            name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self._table.setItem(row, 0, name_item)
+            val_item = QTableWidgetItem(", ".join(entry.section))
+            val_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self._table.setItem(row, 1, val_item)
+            pvt_item = QTableWidgetItem()
+            pvt_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            pvt_item.setCheckState(Qt.Checked)
+            self._table.setItem(row, 2, pvt_item)
 
     def selected_column_index(self) -> int:
         return self._column_combo.currentIndex()
@@ -1561,6 +1414,101 @@ class _NewModeDialog(QDialog):
                 continue   # ticked → PVT, not a register
             var = self._table.item(row, 0).text()
             out[var] = self._table.item(row, 1).text().strip()
+        return out
+
+
+class _EditModeDialog(QDialog):
+    """Re-classify an existing mode's variables (register vs PVT) and edit
+    register values — the New-Mode classification used to be frozen
+    (2026 UX item #1)."""
+
+    def __init__(
+        self, model: CornerModel, mode_name: str,
+        parent: Optional[QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit Mode — {mode_name}")
+        self.setMinimumWidth(460)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            f"Re-classify {mode_name}'s variables. Unticked → mode "
+            "register (one value, shared by every column of the mode). "
+            "Ticked → per-column PVT variable."
+        ))
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Variable", "Value", "PVT?"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._table.verticalHeader().setDefaultSectionSize(24)
+        layout.addWidget(self._table)
+        layout.addWidget(QLabel(
+            "'Process · <file>' rows are shown for reference — Process is "
+            "always per-column PVT and can never be a register."
+        ))
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        mode = model.modes[mode_name]
+        cols = [c for c in model.columns if c.mode == mode_name]
+        for var in sorted(mode.vars):
+            self._add_row(var, mode.vars[var], is_pvt=False, eligible=True)
+        pvt_seen: dict[str, tuple] = {}
+        for c in cols:
+            for v, tup in c.pvt_vars.items():
+                pvt_seen.setdefault(v, tup)
+        for var in sorted(pvt_seen):
+            tup = pvt_seen[var]
+            self._add_row(
+                var, tup[0] if len(tup) == 1 else ", ".join(tup),
+                is_pvt=True, eligible=len(tup) == 1,
+            )
+        files_seen: set[str] = set()
+        for c in cols:
+            for entry in column_models(c):
+                if entry.file in files_seen:
+                    continue
+                files_seen.add(entry.file)
+                self._add_row(
+                    f"Process · {entry.file}", ", ".join(entry.section),
+                    is_pvt=True, eligible=False, is_var=False,
+                )
+
+    def _add_row(
+        self, name: str, value: str, *,
+        is_pvt: bool, eligible: bool, is_var: bool = True,
+    ) -> None:
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        name_item = QTableWidgetItem(name)
+        name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        name_item.setData(Qt.UserRole, is_var)
+        self._table.setItem(row, 0, name_item)
+        val_item = QTableWidgetItem(value)
+        if not eligible:
+            val_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        self._table.setItem(row, 1, val_item)
+        pvt_item = QTableWidgetItem()
+        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled
+        if eligible:
+            flags |= Qt.ItemIsUserCheckable
+        pvt_item.setFlags(flags)
+        pvt_item.setCheckState(Qt.Checked if is_pvt else Qt.Unchecked)
+        self._table.setItem(row, 2, pvt_item)
+
+    def register_vars(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for row in range(self._table.rowCount()):
+            name_item = self._table.item(row, 0)
+            if not name_item.data(Qt.UserRole):
+                continue   # a Process / model reference row
+            if self._table.item(row, 2).checkState() == Qt.Checked:
+                continue   # ticked → PVT, not a register
+            out[name_item.text()] = self._table.item(row, 1).text().strip()
         return out
 
 
@@ -1675,20 +1623,3 @@ def _parse_template_columns(text: str) -> tuple[TemplateColumn, ...]:
     return tuple(cols)
 
 
-def _parse_axis_tuples(text: str) -> tuple[CorrelatedTuple, ...]:
-    """Parse the New-Axis multi-line dialog into CorrelatedTuples."""
-    tuples: list[CorrelatedTuple] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        label, rest = _split_label_line(line)
-        pairs, axes = _parse_kv_comma(rest)
-        if axes:
-            raise ValueError(
-                f"point {label!r}: '+axis' tokens are not valid here"
-            )
-        tuples.append(CorrelatedTuple(label=label, values=pairs))
-    if not tuples:
-        raise ValueError("a correlated axis needs at least one point")
-    return tuple(tuples)

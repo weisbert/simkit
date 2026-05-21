@@ -297,6 +297,34 @@ def test_union_var_order_merges_row_orderings():
     assert union_var_order(u) == ("temperature", "gain", "vdd")
 
 
+def test_reclassify_mode_moves_vars_between_register_and_pvt():
+    from simkit.corner_model import (
+        Column, empty_cornermodel, add_mode, add_column, reclassify_mode,
+    )
+    m = empty_cornermodel("corners", "p", "tb")
+    m = add_mode(m, "RX", {"d_en": "1", "div_sel": "2"})
+    m = add_column(m, Column(
+        mode="RX", enabled=True,
+        pvt_vars={"temperature": ("55",), "gain": ("10",)},
+        models=(), pvt_label="TT",
+    ))
+    # gain (PVT) -> register; div_sel (register) -> per-column PVT.
+    m2 = reclassify_mode(m, "RX", {"d_en": "1", "gain": "10"})
+    assert set(m2.modes["RX"].vars) == {"d_en", "gain"}
+    col = m2.columns[0]
+    assert col.pvt_vars["div_sel"] == ("2",)   # seeded with the old value
+    assert "gain" not in col.pvt_vars
+
+
+def test_reclassify_mode_rejects_empty_register_set():
+    from simkit.corner_model import (
+        empty_cornermodel, add_mode, reclassify_mode,
+    )
+    m = add_mode(empty_cornermodel("c", "p", "tb"), "RX", {"d_en": "1"})
+    with pytest.raises(CornerModelValidationError):
+        reclassify_mode(m, "RX", {})
+
+
 def test_adopt_column_three_way_split():
     mode = Mode(name="BT_2G_RX", vars={"d_en_dummy": "1", "div_sel": "2"})
     col = make_unmanaged_column(

@@ -116,6 +116,9 @@ class CornerManagerViewTest(unittest.TestCase):
     def test_new_mode_from_column(self):
         # _make_cm has columns, so New Mode derives a mode from a column.
         with mock.patch.object(
+            cm_mod.QInputDialog, "getItem",
+            return_value=("From a corner column", True),
+        ), mock.patch.object(
             cm_mod._NewModeDialog, "exec_",
             return_value=cm_mod.QDialog.Accepted,
         ), mock.patch.object(
@@ -233,10 +236,8 @@ class CornerManagerStage2Test(unittest.TestCase):
         self._warning_mock = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_template_and_axis_panels_populated(self):
+    def test_template_panel_populated(self):
         self.assertEqual(self.view.templates_list.count(), 1)
-        self.assertEqual(self.view.axes_list.count(), 1)
-        self.assertIn("proc_ct", self.view.axes_list.item(0).text())
 
     def test_apply_template_generates_columns(self):
         self.view.templates_list.setCurrentRow(0)
@@ -278,95 +279,64 @@ class CornerManagerStage2Test(unittest.TestCase):
         self.assertEqual(self.view.table_model.columnCount(), 5)
 
 
-def _make_stage3_cm() -> "object":
-    data = {
-        "cornermodel_schema_version": 1,
-        "name": "lo_corners",
-        "project": "1AXX",
-        "testbench_id": "sim_yusheng/Test/maestro",
-        "modes": {"BT_2G_RX": {"vars": {
-            "d_en_dummy": "1", "d_div12_en": "1",
-        }}},
-        "variants": {
-            "BT_2G_RX_PN": {"base_mode": "BT_2G_RX",
-                            "vars": {"d_div12_en": "0"}},
-        },
-        "pvt_templates": {
-            "pn_set": {"columns": [{"pvt_label": "TT",
-                                    "pvt_vars": {"temperature": "55"}}]}
-        },
-        "columns": [
-            {"mode": "BT_2G_RX", "variant": "BT_2G_RX_PN",
-             "pvt_label": "seed", "enabled": True,
-             "pvt_vars": {"temperature": "55"}},
-        ],
-    }
-    tmp = Path(tempfile.mkdtemp())
-    p = tmp / "lo_corners.cornermodel.json"
-    p.write_text(json.dumps(data), encoding="utf-8")
-    return load_cornermodel(p)
+class CornerManagerNewModeFromModeTest(unittest.TestCase):
+    """2026 UX — a 'variant' is now just a mode derived from another."""
 
-
-class CornerManagerStage3Test(unittest.TestCase):
     def setUp(self):
-        self._guard_modals()
-        self.view = CornerManagerView(_make_stage3_cm())
+        patcher = mock.patch.object(
+            cm_mod.QMessageBox, "warning", return_value=None
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.view = CornerManagerView(_make_cm())
 
     def tearDown(self):
         self.view.hide()
         self.view.deleteLater()
 
-    def _guard_modals(self):
-        patcher = mock.patch.object(
-            cm_mod.QMessageBox, "warning", return_value=None
-        )
-        self._warning_mock = patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_variants_panel_populated(self):
-        self.assertEqual(self.view.variants_list.count(), 1)
-        self.assertIn("BT_2G_RX_PN", self.view.variants_list.item(0).text())
-        # the variant's covered register shows in the overlay table
-        self.assertEqual(self.view.variant_vars.rowCount(), 1)
-
-    def test_variant_var_edit_propagates(self):
-        edited = []
-        self.view.cornermodel_edited.connect(edited.append)
-        self.view.variants_list.setCurrentRow(0)
-        self.view.variant_vars.item(0, 1).setText("2")
-        self.assertEqual(len(edited), 1)
-        self.assertEqual(
-            self.view.cornermodel().variants["BT_2G_RX_PN"].vars["d_div12_en"],
-            "2",
-        )
-
-    def test_new_variant_via_dialog(self):
+    def test_new_mode_derived_from_existing_mode(self):
+        # BT_2G_RX exists; derive BT_2G_RX_PN by copying + tweaking registers.
         with mock.patch.object(
             cm_mod.QInputDialog, "getItem",
-            return_value=("BT_2G_RX", True),
+            side_effect=[
+                ("Derived from an existing mode", True),
+                ("BT_2G_RX", True),
+            ],
         ), mock.patch.object(
             cm_mod.QInputDialog, "getText",
-            return_value=("BT_2G_RX_LP", True),
+            return_value=("BT_2G_RX_PN", True),
         ), mock.patch.object(
             cm_mod.QInputDialog, "getMultiLineText",
-            return_value=("d_en_dummy=0", True),
+            return_value=("d_en_dummy=1\ndiv_sel=0", True),
         ):
-            self.view._on_new_variant()
-        self.assertIn("BT_2G_RX_LP", self.view.cornermodel().variants)
+            self.view._on_new_mode()
+        modes = self.view.cornermodel().modes
+        self.assertIn("BT_2G_RX_PN", modes)
+        self.assertEqual(modes["BT_2G_RX_PN"].vars["div_sel"], "0")
 
-    def test_apply_template_to_variant(self):
-        self.view.templates_list.setCurrentRow(0)
+    def test_edit_mode_reclassifies_registers(self):
+        # _make_cm's mode BT_2G_RX has registers d_en_dummy + div_sel.
+        self.view.modes_list.setCurrentRow(0)
         with mock.patch.object(
-            cm_mod.QInputDialog, "getItem",
-            return_value=("Variant: BT_2G_RX_PN", True),
+            cm_mod._EditModeDialog, "exec_",
+            return_value=cm_mod.QDialog.Accepted,
+        ), mock.patch.object(
+            cm_mod._EditModeDialog, "register_vars",
+            return_value={"d_en_dummy": "1"},
         ):
-            self.view._on_apply_template()
-        names = {
-            str(self.view.table_model.headerData(
-                c, Qt.Horizontal, Qt.DisplayRole)).split(" ·")[0]
-            for c in range(self.view.table_model.columnCount())
-        }
-        self.assertIn("BT_2G_RX_PN_TT", names)
+            self.view._on_edit_mode()
+        regs = self.view.cornermodel().modes["BT_2G_RX"].vars
+        self.assertEqual(set(regs), {"d_en_dummy"})
+
+    def test_new_mode_dialog_surfaces_process(self):
+        # _make_cm columns carry a model file — the New Mode dialog must
+        # show Process so the user sees the P of PVT (2026 UX #2).
+        dialog = cm_mod._NewModeDialog(self.view.cornermodel())
+        names = [
+            dialog._table.item(r, 0).text()
+            for r in range(dialog._table.rowCount())
+        ]
+        self.assertTrue(any(n.startswith("Process") for n in names))
 
 
 def _make_stage4_cm() -> "object":
@@ -633,32 +603,16 @@ class CornerManagerStage6Test(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_profile_panel_lists_axes(self):
-        view = CornerManagerView(self.cm, self.profile)
-        self.addCleanup(view.deleteLater)
-        rows = [
-            view.profile_list.item(i).text()
-            for i in range(view.profile_list.count())
-        ]
-        self.assertTrue(any("profile: rf018" in r for r in rows))
-        self.assertTrue(any("voltage:" in r for r in rows))
-
     def test_table_resolves_axis_levels_with_profile(self):
+        # The PVT profile is still a data-layer concept (the table resolves
+        # axis_levels through it) — only the standalone Profile GUI panel
+        # was removed in the 2026 simplification.
         view = CornerManagerView(self.cm, self.profile)
         self.addCleanup(view.deleteLater)
         model = view.table_model
         rows = {model.var_at(r) for r in range(model.rowCount())}
         # voltage:nominal resolves LDO_VSET into the displayed table
         self.assertIn("LDO_VSET", rows)
-
-    def test_unloaded_profile_warns_in_panel(self):
-        view = CornerManagerView(self.cm, None)   # cm names a profile, none given
-        self.addCleanup(view.deleteLater)
-        rows = [
-            view.profile_list.item(i).text()
-            for i in range(view.profile_list.count())
-        ]
-        self.assertTrue(any("not loaded" in r for r in rows))
 
 
 def _make_basic_cm() -> "object":
@@ -683,8 +637,7 @@ def _make_basic_cm() -> "object":
 
 
 class CornerManagerAuthoringTest(unittest.TestCase):
-    """GUI authoring of templates / axes / run sets — the controls the
-    RFIC-designer walkthrough flagged as missing (2026-05-21)."""
+    """GUI authoring of corner sets / run sets."""
 
     def setUp(self):
         patcher = mock.patch.object(
@@ -694,21 +647,6 @@ class CornerManagerAuthoringTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.view = CornerManagerView(_make_basic_cm())
         self.addCleanup(self.view.deleteLater)
-
-    def test_new_axis_button_creates_a_correlated_axis(self):
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getText",
-            side_effect=[("proc_ct", True), ("process, CT", True)],
-        ), mock.patch.object(
-            cm_mod.QInputDialog, "getMultiLineText",
-            return_value=("TT: process=tt, CT=100\nFF: process=ff, CT=88",
-                          True),
-        ):
-            self.view._on_new_axis()
-        axes = self.view.cornermodel().correlated_axes
-        self.assertIn("proc_ct", axes)
-        self.assertEqual(axes["proc_ct"].members, ("process", "CT"))
-        self.assertEqual(len(axes["proc_ct"].tuples), 2)
 
     def test_new_template_button_creates_a_pvt_template(self):
         with mock.patch.object(
