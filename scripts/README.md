@@ -261,8 +261,14 @@ Cleanup rules:
 - Keeps the N most-recently-modified deploys (default `--keep 3`).
 - **Always protects the deploy that `current` points to**, even if it
   would otherwise fall outside the keep cutoff (rollback semantics).
-- `*.tar.gz` and `*.manifest.txt` files are **NOT** touched — only
-  `simkit_*/` directories. Clean tarballs by hand:
+  This is also what keeps the shared venv's `simkit_src.pth` valid —
+  the code dir it resolves to is never pruned.
+- The shared `venv/` is **NOT** touched — cleanup only deletes
+  `simkit_*/` directories, and `venv/` is not one. (Deleting an old
+  `simkit_*/` also reclaims any legacy per-deploy `.venv/` it carried
+  from before the shared-venv model.)
+- `*.tar.gz` and `*.manifest.txt` files are **NOT** touched. Clean
+  tarballs by hand:
   ```bash
   rm <DEPLOYS>/*.tar.gz <DEPLOYS>/*.manifest.txt
   ```
