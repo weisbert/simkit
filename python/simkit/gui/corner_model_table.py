@@ -10,8 +10,10 @@ into the grid (2026 UX feedback). Model coordinates:
 * **row 0** — the filter row: ``(0,0)`` filters Design Variable rows by name,
   ``(0,1)`` filters corner columns by name, ``(0,2+)`` are per-corner value
   filters that hide Design Variable rows.
-* **rows 1+** — the data rows, Cadence-grouped: Enable, Temperature, Design
-  Variables, Model File, Tests.
+* **rows 1+** — the data rows in the Cadence Corners-Setup layout: an Enable
+  row, then section-headed groups (Temperature / Design Variables / Model
+  Files / Tests — one row per test, a checkbox per corner), then a trailing
+  Number of Corners count row.
 
 Each filter cell carries a :class:`~simkit.gui.corner_filter.Matcher` (mode +
 pattern); its display text leads with the mode chip so the active mode is
@@ -54,13 +56,12 @@ from simkit.corner_model import (
     set_column_enabled,
     set_column_model_section,
     set_column_override,
-    set_column_tests,
+    set_column_test_enabled,
     set_pvt_var,
 )
 
 _MISSING = "—"
 _TEMPERATURE_VAR = "temperature"
-_ALL_TESTS = "(all tests)"
 
 # Model geometry — the filter frame occupies row 0 and columns 0-1.
 _FILTER_ROW = 0
@@ -70,17 +71,20 @@ _DATA_COL0 = 2         # first corner column
 _DATA_ROW0 = 1         # first data row
 
 # Row kinds. "var" (Design Variable) is the only filterable kind.
+_KIND_SECTION = "section"     # a Cadence-style group separator
 _KIND_ENABLE = "enable"
 _KIND_TEMP = "temp"
 _KIND_VAR = "var"
 _KIND_MODEL = "model"
-_KIND_TESTS = "tests"
+_KIND_TEST = "test"           # one row per test in the master list
+_KIND_NCORNERS = "ncorners"   # the trailing "Number of Corners" count row
 
 _BRUSH_RED = QBrush(QColor(0xFF, 0xD0, 0xD0))      # diverging override (D1)
 _BRUSH_MANAGED = QBrush(QColor(0xE8, 0xF0, 0xFF))  # mode-managed register cell
 _BRUSH_TEMP = QBrush(QColor(0xFF, 0xF2, 0xD8))     # temperature row
 _BRUSH_MODEL = QBrush(QColor(0xE5, 0xF3, 0xE5))    # model-file row
-_BRUSH_STRUCT = QBrush(QColor(0xEC, 0xEC, 0xF4))   # Enable / Tests structural row
+_BRUSH_STRUCT = QBrush(QColor(0xEC, 0xEC, 0xF4))   # Enable / Test structural row
+_BRUSH_SECTION = QBrush(QColor(0xCF, 0xCF, 0xDC))  # a section-header row
 _BRUSH_FOREIGN_HDR = QBrush(QColor(0xDD, 0xDD, 0xDD))  # unmanaged column header
 _BRUSH_DISABLED_HDR = QBrush(QColor(0xEC, 0xEC, 0xEC))  # disabled column header
 _BRUSH_NAME = QBrush(QColor(0xF4, 0xF4, 0xF4))     # variable-name column
@@ -154,17 +158,27 @@ class CornerModelTableModel(QAbstractTableModel):
                     seen.add(m.file)
                     model_files.append(m.file)
         model_files.sort()
-        # Cadence grouping (2026 UX item 12): Enable, Temperature, Design
-        # Variables, Model File, Tests. The Enable / Tests structural rows
-        # only appear once the model has at least one corner column.
+        # Cadence Corners-Setup layout: an Enable row, then section-headed
+        # groups — Temperature / Design Variables / Model Files / Tests —
+        # and a trailing Number of Corners count row. Each section appears
+        # only when it has content; Tests needs a pulled master test list.
         rows: list[tuple[str, str]] = []
         if self._cols:
             rows.append((_KIND_ENABLE, "Enable"))
-        rows += [(_KIND_TEMP, v) for v in temp_vars]
-        rows += [(_KIND_VAR, v) for v in design_vars]
-        rows += [(_KIND_MODEL, f) for f in model_files]
+        if temp_vars:
+            rows.append((_KIND_SECTION, "Temperature"))
+            rows += [(_KIND_TEMP, v) for v in temp_vars]
+        if design_vars:
+            rows.append((_KIND_SECTION, "Design Variables"))
+            rows += [(_KIND_VAR, v) for v in design_vars]
+        if model_files:
+            rows.append((_KIND_SECTION, "Model Files"))
+            rows += [(_KIND_MODEL, f) for f in model_files]
+        if self._cm.tests:
+            rows.append((_KIND_SECTION, "Tests"))
+            rows += [(_KIND_TEST, t) for t in self._cm.tests]
         if self._cols:
-            rows.append((_KIND_TESTS, "Tests"))
+            rows.append((_KIND_NCORNERS, "Number of Corners"))
         self._rows = rows
 
     # --- geometry --------------------------------------------------------
@@ -367,24 +381,30 @@ class CornerModelTableModel(QAbstractTableModel):
             if role == Qt.DisplayRole:
                 return label
             if role == Qt.BackgroundRole:
+                if kind == _KIND_SECTION:
+                    return _BRUSH_SECTION
                 if kind == _KIND_MODEL:
                     return _BRUSH_MODEL
                 if kind == _KIND_TEMP:
                     return _BRUSH_TEMP
-                if kind in (_KIND_ENABLE, _KIND_TESTS):
+                if kind in (_KIND_ENABLE, _KIND_TEST, _KIND_NCORNERS):
                     return _BRUSH_STRUCT
                 return _BRUSH_NAME
             if role == Qt.ToolTipRole:
                 if kind == _KIND_ENABLE:
                     return "Per-corner enable — tick to include the corner"
-                if kind == _KIND_TESTS:
-                    return ("Tests the corner is scoped to — double-click a "
-                            "cell to edit (empty = all tests)")
+                if kind == _KIND_TEST:
+                    return ("Test row — tick the corners this test runs in")
+                if kind == _KIND_NCORNERS:
+                    return ("How many simulation points each corner expands "
+                            "to (Cadence 'Number of Corners')")
                 if kind == _KIND_MODEL:
                     return ("Process model file — its cells show the "
                             "section (process corner)")
                 if kind == _KIND_TEMP:
                     return "Temperature"
+                if kind == _KIND_SECTION:
+                    return None
                 return ("Register variable (mode-managed)"
                         if label in self._register_vars
                         else "Design variable (per-column); double-click "
@@ -394,7 +414,8 @@ class CornerModelTableModel(QAbstractTableModel):
         # column 1 on a structural row — a blank, non-filter cell.
         if col == _CFILTER_COL:
             if role == Qt.BackgroundRole and kind is not None:
-                return _BRUSH_STRUCT
+                return (_BRUSH_SECTION if kind == _KIND_SECTION
+                        else _BRUSH_STRUCT)
             return None
 
         # data cell — col >= _DATA_COL0, row >= _DATA_ROW0
@@ -403,6 +424,11 @@ class CornerModelTableModel(QAbstractTableModel):
             return None
         kind, key2 = self._rows[i]
         column = self._cols[j]
+
+        if kind == _KIND_SECTION:
+            if role == Qt.BackgroundRole:
+                return _BRUSH_SECTION
+            return None
 
         if kind == _KIND_ENABLE:
             if role == Qt.CheckStateRole:
@@ -414,17 +440,24 @@ class CornerModelTableModel(QAbstractTableModel):
                         else "Corner disabled — excluded from a run")
             return None
 
-        if kind == _KIND_TESTS:
-            joined = ", ".join(column.tests)
-            if role == Qt.DisplayRole:
-                return joined if joined else _ALL_TESTS
-            if role == Qt.EditRole:
-                return joined
+        if kind == _KIND_TEST:
+            on = (not column.tests) or (key2 in column.tests)
+            if role == Qt.CheckStateRole:
+                return Qt.Checked if on else Qt.Unchecked
             if role == Qt.BackgroundRole:
                 return _BRUSH_STRUCT
             if role == Qt.ToolTipRole:
-                return ("Corner runs in every test" if not column.tests
-                        else "Corner scoped to: " + joined)
+                return (f"Test {key2!r} runs in this corner" if on
+                        else f"Test {key2!r} is disabled for this corner")
+            return None
+
+        if kind == _KIND_NCORNERS:
+            if role == Qt.DisplayRole:
+                return str(self._point_counts[j])
+            if role == Qt.BackgroundRole:
+                return _BRUSH_STRUCT
+            if role == Qt.TextAlignmentRole:
+                return int(Qt.AlignCenter)
             return None
 
         if kind == _KIND_MODEL:
@@ -489,10 +522,10 @@ class CornerModelTableModel(QAbstractTableModel):
             return base
         if not (0 <= j < len(self._cols)):
             return base
-        if kind == _KIND_ENABLE:
+        if kind in (_KIND_ENABLE, _KIND_TEST):
             return base | Qt.ItemIsUserCheckable
-        if kind == _KIND_TESTS:
-            return base | Qt.ItemIsEditable
+        if kind in (_KIND_SECTION, _KIND_NCORNERS):
+            return base
         if kind == _KIND_MODEL:
             entry = self._model_entry(j, key2)
             if entry is not None and len(entry.section) == 1:
@@ -554,13 +587,12 @@ class CornerModelTableModel(QAbstractTableModel):
             self.cornermodelChanged.emit(new_cm)
             return True
 
-        if kind == _KIND_TESTS:
-            if role != Qt.EditRole:
+        if kind == _KIND_TEST:
+            if role != Qt.CheckStateRole:
                 return False
-            tests = tuple(
-                t.strip() for t in str(value).split(",") if t.strip()
+            new_cm = set_column_test_enabled(
+                self._cm, j, key2, value == Qt.Checked
             )
-            new_cm = set_column_tests(self._cm, j, tests)
             self.set_cornermodel(new_cm)
             self.cornermodelChanged.emit(new_cm)
             return True
@@ -612,6 +644,13 @@ class CornerModelTableModel(QAbstractTableModel):
         """Model-file name for a model-file data row — None otherwise."""
         i = row - _DATA_ROW0
         if 0 <= i < len(self._rows) and self._rows[i][0] == _KIND_MODEL:
+            return self._rows[i][1]
+        return None
+
+    def test_at(self, row: int) -> Optional[str]:
+        """Test name for a Test data row — None otherwise."""
+        i = row - _DATA_ROW0
+        if 0 <= i < len(self._rows) and self._rows[i][0] == _KIND_TEST:
             return self._rows[i][1]
         return None
 

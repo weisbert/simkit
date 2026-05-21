@@ -84,6 +84,9 @@ class Union:
     project: str
     testbench_id: str
     rows: tuple[UnionRow, ...]
+    # The master list of every test name in the testbench (Maestro order).
+    # Captured by the SKILL pull; empty for sidecars predating it.
+    tests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -124,12 +127,24 @@ def load_union(path: Path | str) -> Union:
     testbench_id = _validate_required_str(p, data, "testbench_id")
     rows = _validate_rows(p, data)
 
+    raw_tests = data.get("tests", [])
+    if not isinstance(raw_tests, list):
+        raise UnionValidationError(f"{p}: top-level 'tests' must be an array")
+    master_tests: list[str] = []
+    for t in raw_tests:
+        if not isinstance(t, str) or not t.strip():
+            raise UnionValidationError(
+                f"{p}: each top-level 'tests' entry must be a non-empty string"
+            )
+        master_tests.append(t)
+
     return Union(
         union_schema_version=schema_version,
         name=name,
         project=project,
         testbench_id=testbench_id,
         rows=rows,
+        tests=tuple(master_tests),
     )
 
 

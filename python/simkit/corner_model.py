@@ -242,6 +242,10 @@ class CornerModel:
     var_order: tuple[str, ...] = ()
     # Stage 6 addition — name of the bound PVT profile (resolved at materialize).
     pvt_profile: str | None = None
+    # 2026 UX — the master list of every test name in the testbench, in
+    # Maestro order. Captured on pull; the Tests grid renders one row per
+    # entry. Empty until a pull has populated it.
+    tests: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +311,7 @@ def load_cornermodel(
         raise CornerModelValidationError(
             f"{p}: 'pvt_profile' must be a string or absent"
         )
+    master_tests = _parse_tests(str(p), data)
 
     return CornerModel(
         cornermodel_schema_version=schema_version,
@@ -322,6 +327,7 @@ def load_cornermodel(
         run_sets=run_sets,
         var_order=var_order,
         pvt_profile=pvt_profile,
+        tests=master_tests,
     )
 
 
@@ -1128,6 +1134,7 @@ def materialize(
         project=model.project,
         testbench_id=model.testbench_id,
         rows=tuple(rows),
+        tests=model.tests,
     )
 
 
@@ -1307,6 +1314,7 @@ def cornermodel_from_union(union: Union, name: str = "corners") -> CornerModel:
         modes={},
         columns=tuple(make_unmanaged_column(r) for r in union.rows),
         var_order=union_var_order(union),
+        tests=union.tests,
     )
 
 
@@ -1715,6 +1723,31 @@ def set_column_tests(
     clean = tuple(t.strip() for t in tests if t and t.strip())
     return _replace_column(
         model, column_index, replace(column, tests=clean)
+    )
+
+
+def set_column_test_enabled(
+    model: CornerModel, column_index: int, test: str, enabled: bool
+) -> CornerModel:
+    """Toggle one test on/off for one corner column — the Tests-grid
+    checkbox action. ``Column.tests`` stays normalised: empty means the
+    column runs every test (the master list), so when the checkbox grid
+    ends up fully ticked the scope collapses back to empty."""
+    master = model.tests
+    if not master:
+        return model
+    column = model.columns[column_index]
+    current = set(column.tests) if column.tests else set(master)
+    if enabled:
+        current.add(test)
+    else:
+        current.discard(test)
+    if current >= set(master):
+        new_tests: tuple[str, ...] = ()
+    else:
+        new_tests = tuple(t for t in master if t in current)
+    return _replace_column(
+        model, column_index, replace(column, tests=new_tests)
     )
 
 
@@ -2540,6 +2573,8 @@ def to_dict(model: CornerModel) -> dict:
         out["var_order"] = list(model.var_order)
     if model.pvt_profile is not None:
         out["pvt_profile"] = model.pvt_profile
+    if model.tests:
+        out["tests"] = list(model.tests)
     return out
 
 

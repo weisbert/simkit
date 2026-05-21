@@ -68,10 +68,11 @@ class CornerModelTableModelTest(unittest.TestCase):
         self.model = CornerModelTableModel(self.cm)
 
     def test_dimensions(self):
-        # 3 corners (+ name + filter columns); Enable + temperature + 1 model
-        # file + d_en_dummy + div_sel + Tests data rows (+ the filter row).
+        # 3 corners (+ name + filter columns). Rows: Enable, Temperature
+        # section + 1, Design Variables section + 2, Model Files section
+        # + 1, Number of Corners (+ the filter row) = 10.
         self.assertEqual(self.model.columnCount(), 5)
-        self.assertEqual(self.model.rowCount(), 7)
+        self.assertEqual(self.model.rowCount(), 10)
 
     def test_header_labels(self):
         names = [
@@ -83,17 +84,28 @@ class CornerModelTableModelTest(unittest.TestCase):
             "BT_2G_RX_TT ·1", "BT_2G_RX_SS_1 ·1", "Foreign_TT ·1",
         ])
 
-    def test_row_groups_enable_temp_design_model_tests(self):
+    def test_row_groups_cadence_layout(self):
         kinds = [
             self.model.data_row_kind(r)
             for r in range(_R0, self.model.rowCount())
         ]
-        self.assertEqual(
-            kinds, ["enable", "temp", "var", "var", "model", "tests"]
-        )
-        self.assertEqual(self.model.var_at(_R0 + 1), "temperature")
-        self.assertEqual(self.model.model_at(_R0 + 4), "rf018.scs")
-        design = {self.model.var_at(_R0 + 2), self.model.var_at(_R0 + 3)}
+        # Cadence Corners-Setup layout: Enable, section-headed groups,
+        # trailing Number of Corners. No Tests section — the fixture has
+        # no pulled master test list.
+        self.assertEqual(kinds, [
+            "enable", "section", "temp", "section", "var", "var",
+            "section", "model", "ncorners",
+        ])
+        temp_row = next(r for r in range(self.model.rowCount())
+                        if self.model.data_row_kind(r) == "temp")
+        self.assertEqual(self.model.var_at(temp_row), "temperature")
+        model_row = next(r for r in range(self.model.rowCount())
+                         if self.model.data_row_kind(r) == "model")
+        self.assertEqual(self.model.model_at(model_row), "rf018.scs")
+        design = {
+            self.model.var_at(r) for r in range(self.model.rowCount())
+            if self.model.data_row_kind(r) == "var"
+        }
         self.assertEqual(design, {"d_en_dummy", "div_sel"})
 
     def test_variable_name_in_column_zero(self):
@@ -277,6 +289,46 @@ class CornerModelTableModelTest(unittest.TestCase):
             if self.model.model_at(r) == file:
                 return r
         raise AssertionError(f"model file {file!r} not in model")
+
+
+class TestsGridTest(unittest.TestCase):
+    """The Cadence-style Tests grid — one row per test, a checkbox per
+    corner — plus the trailing Number of Corners row (2026 UX)."""
+
+    def _model_with_tests(self):
+        from dataclasses import replace
+        from simkit.corner_model import (
+            Column, empty_cornermodel, add_mode, add_column,
+        )
+        m = empty_cornermodel("corners", "p", "tb")
+        m = add_mode(m, "RX", {"d_en": "1"})
+        m = add_column(m, Column(
+            mode="RX", enabled=True, pvt_vars={"temperature": ("55",)},
+            models=(), pvt_label="TT",
+        ))
+        m = replace(m, tests=("acdc", "tran"))
+        return CornerModelTableModel(m)
+
+    def test_per_test_rows_and_ncorners_row(self):
+        model = self._model_with_tests()
+        kinds = [
+            model.data_row_kind(r) for r in range(_R0, model.rowCount())
+        ]
+        self.assertEqual(kinds.count("test"), 2)
+        self.assertEqual(kinds.count("ncorners"), 1)
+        self.assertEqual(kinds[-1], "ncorners")
+
+    def test_test_checkbox_toggles_column_scope(self):
+        model = self._model_with_tests()
+        trow = next(
+            r for r in range(model.rowCount())
+            if model.test_at(r) == "acdc"
+        )
+        idx = model.index(trow, _C0)
+        self.assertTrue(bool(model.flags(idx) & Qt.ItemIsUserCheckable))
+        self.assertEqual(model.data(idx, Qt.CheckStateRole), Qt.Checked)
+        model.setData(idx, Qt.Unchecked, Qt.CheckStateRole)
+        self.assertEqual(model.cornermodel().columns[0].tests, ("tran",))
 
 
 if __name__ == "__main__":

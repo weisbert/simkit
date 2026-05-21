@@ -316,6 +316,26 @@ def test_reclassify_mode_moves_vars_between_register_and_pvt():
     assert "gain" not in col.pvt_vars
 
 
+def test_set_column_test_enabled_toggles_scope():
+    from simkit.corner_model import (
+        Column, empty_cornermodel, add_mode, add_column,
+        set_column_test_enabled,
+    )
+    m = empty_cornermodel("corners", "p", "tb")
+    m = add_mode(m, "RX", {"d_en": "1"})
+    m = add_column(m, Column(
+        mode="RX", enabled=True, pvt_vars={"temperature": ("55",)},
+        models=(), pvt_label="TT",
+    ))
+    m = replace(m, tests=("acdc", "tran"))
+    # disabling acdc scopes the column to the remaining test.
+    m2 = set_column_test_enabled(m, 0, "acdc", False)
+    assert m2.columns[0].tests == ("tran",)
+    # re-enabling collapses the scope back to empty (= all tests).
+    m3 = set_column_test_enabled(m2, 0, "acdc", True)
+    assert m3.columns[0].tests == ()
+
+
 def test_reclassify_mode_rejects_empty_register_set():
     from simkit.corner_model import (
         empty_cornermodel, add_mode, reclassify_mode,

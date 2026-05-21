@@ -489,8 +489,13 @@
     (setarray envelope "project"              projectName)
     (setarray envelope "testbench_id"         tbid)
     (setarray envelope "rows"                 rows)
-    (setq keyOrder (list "union_schema_version" "name" "project"
-                         "testbench_id" "rows"))
+    ;; The master test list — the Tests grid renders one row per entry.
+    (cond
+      (allTests (setarray envelope "tests" allTests)))
+    (setq keyOrder
+      (append (list "union_schema_version" "name" "project"
+                     "testbench_id" "rows")
+              (cond (allTests (list "tests")) (t nil))))
     (setarray envelope _PVT_JSON_KEYS_PROP keyOrder)
     (return envelope)
   )

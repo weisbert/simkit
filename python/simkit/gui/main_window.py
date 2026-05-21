@@ -2040,13 +2040,13 @@ def _serialize_union(u: Any) -> str:
         if r.tests:
             row_dict["tests"] = list(r.tests)
         rows_out.append(row_dict)
-    return json.dumps(
-        {
-            "union_schema_version": u.union_schema_version,
-            "name": u.name,
-            "project": u.project,
-            "testbench_id": u.testbench_id,
-            "rows": rows_out,
-        },
-        indent=2,
-    )
+    out: dict[str, Any] = {
+        "union_schema_version": u.union_schema_version,
+        "name": u.name,
+        "project": u.project,
+        "testbench_id": u.testbench_id,
+        "rows": rows_out,
+    }
+    if getattr(u, "tests", ()):
+        out["tests"] = list(u.tests)
+    return json.dumps(out, indent=2)
