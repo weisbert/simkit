@@ -21,6 +21,35 @@ deployment (unpack → venv).
 
 ---
 
+## The shared-venv model (why a code deploy is fast)
+
+The venv depends only on `requirements.lock.txt`; the code does not. So
+the venv is **shared** across deploys and lives at a stable path:
+
+```
+<DEPLOYS>/
+  venv/                      # the ONE venv — rebuilt only when the lock changes
+    .simkit_lockhash         # sha256 of the lock it was built from
+    lib/.../simkit_src.pth   # one line: <DEPLOYS>/current/python
+  current  ->  simkit_<sha>/ # symlink to the active code deploy
+  simkit_<sha>/              # a code deploy — python/ skill/ scripts/ ...
+```
+
+`simkit` is **not** pip-installed. The venv imports it through the
+static `simkit_src.pth`, which points at `<DEPLOYS>/current/python` —
+so a code-only deploy is just **"extract new dir + flip the `current`
+symlink"**. `deploy_venv.sh` hashes `requirements.lock.txt`: if it
+matches the venv's stored hash, the venv is reused untouched (no pip);
+if it differs, the venv is rebuilt. Deploy times:
+
+| Deploy | What runs |
+|---|---|
+| Code / SKILL / docs only | flip symlink, smoke test — seconds |
+| `requirements.lock.txt` changed | full venv rebuild from wheels |
+| First-ever deploy on a host | full venv build (bootstraps `<DEPLOYS>/venv`) |
+
+---
+
 ## Yellow Windows — fetch wheels + bundle
 
 Prereq: git pull from home is up to date, Python 3.11 installed.
@@ -140,17 +169,17 @@ cd simkit_20260519_214a6ec
 bash scripts/deploy_venv.sh
 ```
 
-`deploy_venv.sh` creates `.venv/` (fully isolated — **does NOT**
-inherit from the red-zone global Python), installs every package from
-`vendor/wheels/`, installs simkit editable, runs 4 smoke tests, and
-**atomically points `<DEPLOYS>/current` → this deploy** so the active
-deploy has a stable, version-independent path.
+`deploy_venv.sh` builds the shared `<DEPLOYS>/venv` (fully isolated —
+**does NOT** inherit from the red-zone global Python), installs every
+package from `vendor/wheels/`, writes the `simkit_src.pth` + the `pvt`
+wrapper, runs the smoke tests, and **atomically points
+`<DEPLOYS>/current` → this deploy**.
 
-After it's done:
+After it's done — note the venv path is stable, it does not change per
+deploy:
 
 ```bash
-cd <DEPLOYS>/current
-source .venv/bin/activate
+source <DEPLOYS>/venv/bin/activate
 pvt --help
 ```
 
@@ -189,18 +218,20 @@ remembering the absolute path.
 ### Useful flags
 
 ```bash
-bash scripts/deploy_venv.sh --force       # wipe + recreate existing .venv
-bash scripts/deploy_venv.sh --no-current  # don't touch the 'current' symlink
+bash scripts/deploy_venv.sh --force       # rebuild the shared venv even if the lock is unchanged
+bash scripts/deploy_venv.sh --no-current  # don't flip the 'current' symlink
 bash scripts/deploy_venv.sh --no-smoke    # skip post-install smoke tests
 ```
 
 ### Daily activation (永远是这一行)
 
 ```bash
-cd <DEPLOYS>/current
-source .venv/bin/activate
+source <DEPLOYS>/venv/bin/activate
 pvt run review.json
 ```
+
+The venv path is fixed — it no longer changes per deploy, so this is
+the same line forever. (csh: `source <DEPLOYS>/venv/bin/activate.csh`.)
 
 ### Rollback to an earlier deploy
 
@@ -208,8 +239,13 @@ Instant — just retarget the symlink, no rebuild:
 
 ```bash
 ln -sfn <DEPLOYS>/simkit_<earlier-date>_<sha> <DEPLOYS>/current
-# next 'cd current && source .venv/bin/activate' uses the earlier env
+# the venv's simkit_src.pth follows `current`, so the next `pvt` run
+# uses the earlier code. No reinstall.
 ```
+
+Caveat: rollback only flips *code*. If the earlier deploy needed a
+different `requirements.lock.txt`, rebuild the venv from that deploy:
+`cd <DEPLOYS>/current && bash scripts/deploy_venv.sh --force`.
 
 ### Cleanup old deploys
 

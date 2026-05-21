@@ -18,7 +18,7 @@
 #   2  tarball file not found
 #   3  SHA256 mismatch
 #   4  extraction failed
-#   5  code-only payload but no wheels found in <deploys>/current/
+#   5  code-only payload, no shared venv yet, and no wheels to seed one
 
 set -euo pipefail
 
@@ -47,7 +47,7 @@ Examples:
 The script looks for a sibling <payload>.manifest.txt and verifies the
 SHA256 if found. Missing manifest = skipped verification with a warning.
 
-Exit codes: 0 ok / 1 usage / 2 not found / 3 checksum / 4 extract / 5 no-wheels missing prior deploy
+Exit codes: 0 ok / 1 usage / 2 not found / 3 checksum / 4 extract / 5 no shared venv and no wheels to seed one
 EOF
     exit 1
 }
@@ -150,24 +150,33 @@ if [[ -d "$EXTRACT_PATH/scripts" ]]; then
     chmod +x "$EXTRACT_PATH"/scripts/*.py 2>/dev/null || true
 fi
 
-# Code-only payload — copy wheels from the prior deploy (current/).
-# Detected by: vendor/wheels/ missing OR empty in extracted tree.
+# Code-only payload — wheels missing OR empty in the extracted tree.
+#
+# The shared venv (<deploys>/venv) holds the installed deps and is reused
+# across code-only deploys, so a code-only payload needs NO wheels once
+# that venv exists. Wheels are only seeded when the shared venv is not
+# there yet (first deploy / venv rebuild) — copied from the prior deploy.
 WHEELS_DIR="$EXTRACT_PATH/vendor/wheels"
+SHARED_VENV="$TARGET/venv"
 if [[ ! -d "$WHEELS_DIR" ]] || ! compgen -G "$WHEELS_DIR/*.whl" > /dev/null; then
-    PRIOR_WHEELS="$TARGET/current/vendor/wheels"
-    if [[ -d "$PRIOR_WHEELS" ]] && compgen -G "$PRIOR_WHEELS/*.whl" > /dev/null; then
-        echo "[unpack] Code-only payload detected — wheels missing in tarball."
-        mkdir -p "$WHEELS_DIR"
-        # Use cp -L to dereference any symlinks in the source.
-        cp -L "$PRIOR_WHEELS"/*.whl "$WHEELS_DIR/"
-        WHEEL_COUNT=$(ls "$WHEELS_DIR"/*.whl 2>/dev/null | wc -l)
-        echo "[unpack]   copied $WHEEL_COUNT wheels from $PRIOR_WHEELS"
+    if [[ -d "$SHARED_VENV" ]]; then
+        echo "[unpack] Code-only payload — shared venv $SHARED_VENV exists;"
+        echo "[unpack]   no wheels needed (deploy_venv.sh reuses the venv)."
     else
-        echo "ERROR: code-only payload but no wheels available." >&2
-        echo "       Looked at: $PRIOR_WHEELS" >&2
-        echo "       Do a full payload deploy first (without --no-wheels) to" >&2
-        echo "       seed wheels into <deploys>/current/." >&2
-        exit 5
+        PRIOR_WHEELS="$TARGET/current/vendor/wheels"
+        if [[ -d "$PRIOR_WHEELS" ]] && compgen -G "$PRIOR_WHEELS/*.whl" > /dev/null; then
+            echo "[unpack] Code-only payload, no shared venv yet — seeding wheels."
+            mkdir -p "$WHEELS_DIR"
+            # Use cp -L to dereference any symlinks in the source.
+            cp -L "$PRIOR_WHEELS"/*.whl "$WHEELS_DIR/"
+            WHEEL_COUNT=$(ls "$WHEELS_DIR"/*.whl 2>/dev/null | wc -l)
+            echo "[unpack]   copied $WHEEL_COUNT wheels from $PRIOR_WHEELS"
+        else
+            echo "ERROR: code-only payload, no shared venv and no wheels to" >&2
+            echo "       seed one. Do a full payload deploy first (without" >&2
+            echo "       --no-wheels) to build <deploys>/venv." >&2
+            exit 5
+        fi
     fi
 fi
 
