@@ -721,3 +721,69 @@ def test_corner_push_confirm_no_skips_push(qtbot, tmp_path):
         w._corner_model_push_confirm(u, snapshot, "fnxSession0", module)
     assert all(op[0] != "pvt_corners_push" for op in w._worker.ops)
     assert "cancelled by user" in w.bottom_log.toPlainText()
+
+
+def test_corner_push_no_deletions_skips_the_dialog(qtbot, tmp_path):
+    """Smart gate — a push that deletes nothing goes straight through,
+    no confirmation dialog (the snapshot is still taken)."""
+    from unittest import mock as _mock
+    from simkit.corner_model import materialize
+    import simkit.gui.main_window as mw
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    from simkit.gui.loaders import load_module
+    module = load_module(pvtproject)
+    w.load_module(module)
+    w._worker = _RecordingWorker()
+
+    snapshot = tmp_path / "snap.union.json"
+    _write_union(snapshot, ["M_TT"])  # live ⊆ pushed → nothing to delete
+    u = materialize(_cm_with_one_column())
+
+    def _boom(*a, **k):
+        raise AssertionError("dialog shown for a non-deleting push")
+
+    with _mock.patch.object(mw.QMessageBox, "exec_", _boom):
+        w._corner_model_push_confirm(u, snapshot, "fnxSession0", module)
+    assert any(op[0] == "pvt_corners_push" for op in w._worker.ops)
+
+
+def test_corner_push_skip_checkbox_suppresses_future_dialogs(qtbot, tmp_path):
+    from unittest import mock as _mock
+    from simkit.corner_model import materialize
+    import simkit.gui.main_window as mw
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    from simkit.gui.loaders import load_module
+    module = load_module(pvtproject)
+    w.load_module(module)
+    w._worker = _RecordingWorker()
+
+    snapshot = tmp_path / "snap.union.json"
+    _write_union(snapshot, ["TT", "OLD_CORNER"])
+    u = materialize(_cm_with_one_column())
+
+    with _mock.patch.object(mw.QMessageBox, "exec_",
+                            return_value=mw.QMessageBox.Yes), \
+         _mock.patch.object(mw.QCheckBox, "isChecked", return_value=True):
+        w._corner_model_push_confirm(u, snapshot, "fnxSession0", module)
+    assert w._skip_corner_push_confirm is True
+
+
+def test_prune_snapshots_keeps_only_the_most_recent(qtbot, tmp_path):
+    w = MainWindow()
+    qtbot.addWidget(w)
+    snap_dir = tmp_path / "snapshots"
+    snap_dir.mkdir()
+    for i in range(25):
+        (snap_dir / f"corners_202605{i:02d}_000000.union.json").write_text("{}")
+    w._prune_snapshots(snap_dir)
+    remaining = sorted(p.name for p in snap_dir.glob("corners_*.union.json"))
+    assert len(remaining) == w.CORNER_SNAPSHOT_KEEP
+    # the newest 20 survive — oldest (…0500…) is gone, newest (…2400…) stays
+    assert "corners_20260524_000000.union.json" in remaining
+    assert "corners_20260500_000000.union.json" not in remaining

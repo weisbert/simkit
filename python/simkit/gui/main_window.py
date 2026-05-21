@@ -30,6 +30,7 @@ from PyQt5.QtCore import Qt, QModelIndex, QPoint, QFileSystemWatcher, QTimer
 from PyQt5.QtWidgets import (
     QAction,
     QApplication,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -266,6 +267,9 @@ class MainWindow(QMainWindow):
         self.corner_manager = CornerManagerView(empty_cornermodel())
         # Where the displayed cornermodel persists; set by load_module.
         self._cornermodel_path: Optional[Path] = None
+        # When True, the Push confirmation dialog is skipped for the rest
+        # of this session (the pre-push snapshot is still always taken).
+        self._skip_corner_push_confirm = False
 
         self.right_panel.addTab(self.results_tab, "Results")
         self.right_panel.addTab(self.summary_tab, "Summary")
@@ -770,8 +774,9 @@ class MainWindow(QMainWindow):
     def _corner_model_push_confirm(
         self, u: object, snapshot: Path, session: str, module: object,
     ) -> None:
-        """Snapshot is on disk — show the confirm dialog, then push if the
-        user agrees. ``u`` is the materialised union to push."""
+        """Snapshot is on disk — confirm (only when the push would delete
+        corners), then push. ``u`` is the materialised union to push."""
+        self._prune_snapshots(snapshot.parent)
         try:
             live = load_union(snapshot)
             live_names = {r.row_name for r in live.rows}
@@ -784,34 +789,42 @@ class MainWindow(QMainWindow):
         pushed_names = {r.row_name for r in u.rows}
         to_delete = sorted(live_names - pushed_names)
 
-        lines = [
-            f"Push will overwrite the Maestro corner table with "
-            f"{len(u.rows)} corner(s).",
-            "",
-            "A snapshot of the current live corners was saved to:",
-            f"  snapshots/{snapshot.name}",
-            "  (push that file back to restore the previous state)",
-        ]
-        if to_delete:
-            lines += [
-                "",
-                f"WARNING — {len(to_delete)} live corner(s) are NOT in this "
-                f"corner model and WILL BE DELETED:",
+        # Smart gate: the confirmation dialog only interrupts when the push
+        # would actually DELETE live corners — a purely additive / overwrite
+        # push goes straight through (the snapshot was still taken). A
+        # per-session "don't ask again" suppresses even the deletion dialog.
+        if to_delete and not self._skip_corner_push_confirm:
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("simkit — confirm corner Push")
+            box.setText("\n".join([
+                f"This Push would write {len(u.rows)} corner(s) and "
+                f"DELETE {len(to_delete)} live corner(s) that are not in "
+                f"the corner model:",
                 "  " + ", ".join(to_delete),
-            ]
-        lines += ["", "Proceed with the push?"]
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("simkit — confirm corner Push")
-        box.setText("\n".join(lines))
-        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        box.setDefaultButton(QMessageBox.No)
-        if box.exec_() != QMessageBox.Yes:
-            self.append_log(
-                "[corner-model] push cancelled by user — snapshot kept at "
-                f"snapshots/{snapshot.name}"
-            )
-            return
+                "",
+                "A snapshot of the current live corners was saved to:",
+                f"  snapshots/{snapshot.name}",
+                "  (push that file back to restore the previous state)",
+                "",
+                "Proceed with the push?",
+            ]))
+            skip_cb = QCheckBox("Don't ask again this session")
+            box.setCheckBox(skip_cb)
+            box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+            box.setDefaultButton(QMessageBox.No)
+            if box.exec_() != QMessageBox.Yes:
+                self.append_log(
+                    "[corner-model] push cancelled by user — snapshot kept "
+                    f"at snapshots/{snapshot.name}"
+                )
+                return
+            if skip_cb.isChecked():
+                self._skip_corner_push_confirm = True
+                self.append_log(
+                    "[corner-model] push confirmation suppressed for the "
+                    "rest of this session (snapshots still taken)"
+                )
         out_path = self._scratch_path("cornermodel_push", ".union.json")
         out_path.write_text(_serialize_union(u), encoding="utf-8")
         self._queue_op(
@@ -830,6 +843,27 @@ class MainWindow(QMainWindow):
             f"[corner-model] push queued (--replace) — "
             f"{len(u.rows)} corner(s) to write, {len(to_delete)} to delete"
         )
+
+    #: How many timestamped corner snapshots to keep per project.
+    CORNER_SNAPSHOT_KEEP = 20
+
+    def _prune_snapshots(self, snap_dir: Path) -> None:
+        """Roll the snapshot directory — keep only the most recent
+        ``CORNER_SNAPSHOT_KEEP`` ``corners_*.union.json`` files so the
+        pre-push backups cannot pile up unbounded. Filenames are
+        timestamp-sorted, so a plain name sort is chronological."""
+        try:
+            snaps = sorted(snap_dir.glob("corners_*.union.json"))
+        except OSError:
+            return
+        for old in snaps[:-self.CORNER_SNAPSHOT_KEEP]:
+            try:
+                old.unlink()
+            except OSError as exc:
+                self.append_log(
+                    f"[corner-model] could not prune old snapshot "
+                    f"{old.name}: {exc}"
+                )
 
     def _on_corner_model_pull(self) -> None:
         """Pull Maestro's current corners into the corner manager.
