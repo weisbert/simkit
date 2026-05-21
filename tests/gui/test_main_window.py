@@ -622,3 +622,102 @@ def test_open_corner_model_bad_file_logs_and_returns_none(qtbot, tmp_path):
     bad.write_text("{not json", encoding="utf-8")
     assert w.open_corner_model(bad) is None
     assert "[corner-model] load failed" in w.bottom_log.toPlainText()
+
+
+# --- Push safety gate -------------------------------------------------------
+
+class _RecordingWorker:
+    """Minimal BridgeWorker stand-in — records queued ops, returns req ids."""
+
+    def __init__(self):
+        self.ops = []
+
+    def queue_op(self, func_name, **kwargs):
+        self.ops.append((func_name, kwargs))
+        return len(self.ops)
+
+
+def _cm_with_one_column():
+    from simkit.corner_model import add_column, add_mode, empty_cornermodel, Column
+    cm = add_mode(empty_cornermodel(name="t", project="P", testbench_id="l/c/v"),
+                  "M", {"d_en": "1"})
+    return add_column(cm, Column(mode="M", enabled=True,
+                                 pvt_vars={"temperature": ("55",)},
+                                 models=(), pvt_label="TT"))
+
+
+def _write_union(path, row_names):
+    import json
+    path.write_text(json.dumps({
+        "union_schema_version": 1, "name": "snap", "project": "P",
+        "testbench_id": "l/c/v",
+        "rows": [{"row_name": n, "vars": {"temperature": ["55"]}}
+                 for n in row_names],
+    }), encoding="utf-8")
+
+
+def test_corner_push_snapshots_before_pushing(qtbot, tmp_path):
+    """Push must first queue a pvt_corners_pull snapshot — never push direct."""
+    from simkit.gui.loaders import load_module
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w.load_module(load_module(pvtproject))
+    w._worker = _RecordingWorker()
+    w.session_input.setText("fnxSession0")
+
+    w._on_corner_model_push(_cm_with_one_column())
+
+    assert w._worker.ops, "no op was queued"
+    assert w._worker.ops[0][0] == "pvt_corners_pull"
+    assert "snapshots/" in w._worker.ops[0][1]["out_path"]
+    # no push has been queued yet — it waits for snapshot + confirmation
+    assert all(op[0] != "pvt_corners_push" for op in w._worker.ops)
+
+
+def test_corner_push_confirm_yes_queues_push(qtbot, tmp_path):
+    from unittest import mock as _mock
+    from simkit.corner_model import materialize
+    import simkit.gui.main_window as mw
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    from simkit.gui.loaders import load_module
+    module = load_module(pvtproject)
+    w.load_module(module)
+    w._worker = _RecordingWorker()
+
+    snapshot = tmp_path / "snap.union.json"
+    _write_union(snapshot, ["TT", "OLD_CORNER"])  # OLD_CORNER not in the model
+    u = materialize(_cm_with_one_column())  # materialises corner "M_TT"
+
+    with _mock.patch.object(mw.QMessageBox, "exec_",
+                            return_value=mw.QMessageBox.Yes):
+        w._corner_model_push_confirm(u, snapshot, "fnxSession0", module)
+    assert any(op[0] == "pvt_corners_push" for op in w._worker.ops)
+
+
+def test_corner_push_confirm_no_skips_push(qtbot, tmp_path):
+    from unittest import mock as _mock
+    from simkit.corner_model import materialize
+    import simkit.gui.main_window as mw
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w = MainWindow()
+    qtbot.addWidget(w)
+    from simkit.gui.loaders import load_module
+    module = load_module(pvtproject)
+    w.load_module(module)
+    w._worker = _RecordingWorker()
+
+    snapshot = tmp_path / "snap.union.json"
+    _write_union(snapshot, ["TT", "OLD_CORNER"])
+    u = materialize(_cm_with_one_column())
+
+    with _mock.patch.object(mw.QMessageBox, "exec_",
+                            return_value=mw.QMessageBox.No):
+        w._corner_model_push_confirm(u, snapshot, "fnxSession0", module)
+    assert all(op[0] != "pvt_corners_push" for op in w._worker.ops)
+    assert "cancelled by user" in w.bottom_log.toPlainText()

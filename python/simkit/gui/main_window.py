@@ -715,8 +715,15 @@ class MainWindow(QMainWindow):
         return None
 
     def _on_corner_model_push(self, cm: object, profile: object = None) -> None:
-        """Materialise the cornermodel to a union and push it to Maestro
-        (spec §4.1)."""
+        """Push the cornermodel to Maestro — behind a safety gate.
+
+        A corner push is destructive (``replace=True`` drops live corners
+        not in the model). So before pushing we first snapshot the current
+        live corner table into ``snapshots/`` and then show a confirmation
+        dialog that lists exactly which live corners the push would delete.
+        The actual push only happens if the user confirms.
+        """
+        from datetime import datetime
         from simkit.corner_model import materialize
         self.append_log("[corner-model] push requested")
         if not self._can_dispatch_bridge("corner-model push"):
@@ -734,6 +741,77 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[corner-model] push rejected: {exc}")
             return
+        # Safety gate — snapshot the live corner table before the push so
+        # the user can always restore by pushing the snapshot back.
+        snap_dir = module.project_root / "snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snapshot = snap_dir / f"corners_{stamp}.union.json"
+        self._queue_op(
+            "pvt_corners_pull",
+            on_ok=lambda result: self._corner_model_push_confirm(
+                u, snapshot, session, module,
+            ),
+            on_err=lambda err: self.append_log(
+                f"[corner-model] push ABORTED — could not snapshot the live "
+                f"corner table ({err}); nothing was pushed"
+            ),
+            kwargs={
+                "out_path": str(snapshot),
+                "pvtproject_path": module.project_path,
+                "session": session,
+            },
+        )
+        self.append_log(
+            f"[corner-model] snapshotting live corners → "
+            f"snapshots/{snapshot.name} before push"
+        )
+
+    def _corner_model_push_confirm(
+        self, u: object, snapshot: Path, session: str, module: object,
+    ) -> None:
+        """Snapshot is on disk — show the confirm dialog, then push if the
+        user agrees. ``u`` is the materialised union to push."""
+        try:
+            live = load_union(snapshot)
+            live_names = {r.row_name for r in live.rows}
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(
+                f"[corner-model] push ABORTED — snapshot {snapshot.name} "
+                f"could not be read ({exc}); nothing was pushed"
+            )
+            return
+        pushed_names = {r.row_name for r in u.rows}
+        to_delete = sorted(live_names - pushed_names)
+
+        lines = [
+            f"Push will overwrite the Maestro corner table with "
+            f"{len(u.rows)} corner(s).",
+            "",
+            "A snapshot of the current live corners was saved to:",
+            f"  snapshots/{snapshot.name}",
+            "  (push that file back to restore the previous state)",
+        ]
+        if to_delete:
+            lines += [
+                "",
+                f"WARNING — {len(to_delete)} live corner(s) are NOT in this "
+                f"corner model and WILL BE DELETED:",
+                "  " + ", ".join(to_delete),
+            ]
+        lines += ["", "Proceed with the push?"]
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("simkit — confirm corner Push")
+        box.setText("\n".join(lines))
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.No)
+        if box.exec_() != QMessageBox.Yes:
+            self.append_log(
+                "[corner-model] push cancelled by user — snapshot kept at "
+                f"snapshots/{snapshot.name}"
+            )
+            return
         out_path = self._scratch_path("cornermodel_push", ".union.json")
         out_path.write_text(_serialize_union(u), encoding="utf-8")
         self._queue_op(
@@ -748,7 +826,10 @@ class MainWindow(QMainWindow):
                 "replace": True,
             },
         )
-        self.append_log("[corner-model] push queued (--replace)")
+        self.append_log(
+            f"[corner-model] push queued (--replace) — "
+            f"{len(u.rows)} corner(s) to write, {len(to_delete)} to delete"
+        )
 
     def _on_corner_model_pull(self) -> None:
         """Pull Maestro's current corners into the corner manager.
