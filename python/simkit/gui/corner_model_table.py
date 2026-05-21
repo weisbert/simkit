@@ -623,6 +623,13 @@ class CornerModelTableModel(QAbstractTableModel):
             return self._cols[j]
         return None
 
+    def variable_order(self) -> tuple[list[str], list[str]]:
+        """``(temperature rows, Design Variable rows)`` in current display
+        order — the view uses this to reorder Design Variable rows."""
+        temp = [k for kind, k in self._rows if kind == _KIND_TEMP]
+        design = [k for kind, k in self._rows if kind == _KIND_VAR]
+        return temp, design
+
     def column_index_at(self, col: int) -> Optional[int]:
         """The cornermodel column index behind a data column, or None."""
         j = col - _DATA_COL0

@@ -779,5 +779,130 @@ class CornerManagerAuthoringTest(unittest.TestCase):
         self.assertEqual(hidden.count(False), 1)
 
 
+class CornerManagerInteractionTest(unittest.TestCase):
+    """2026 UX — corner / variable context-menu actions, row + column
+    reordering, and Excel-style copy / paste."""
+
+    def setUp(self):
+        patcher = mock.patch.object(
+            cm_mod.QMessageBox, "warning", return_value=None
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.view = CornerManagerView(_make_cm())
+
+    def tearDown(self):
+        self.view.hide()
+        self.view.deleteLater()
+
+    def _corner_names(self):
+        m = self.view.table_model
+        return [
+            str(m.headerData(c, Qt.Horizontal, Qt.DisplayRole)).split(" ·")[0]
+            for c in range(2, m.columnCount())
+        ]
+
+    def test_duplicate_column_places_copy_after_source(self):
+        self.view._duplicate_column(0)
+        self.assertEqual(
+            self._corner_names(),
+            ["BT_2G_RX_TT", "BT_2G_RX_TT_copy", "BT_2G_RX_SS_1"],
+        )
+
+    def test_delete_column(self):
+        with mock.patch.object(
+            cm_mod.QMessageBox, "question",
+            return_value=cm_mod.QMessageBox.Yes,
+        ):
+            self.view._delete_column(0)
+        self.assertEqual(self._corner_names(), ["BT_2G_RX_SS_1"])
+
+    def test_toggle_column_enabled(self):
+        self.assertTrue(self.view.cornermodel().columns[0].enabled)
+        self.view._toggle_column_enabled(0)
+        self.assertFalse(self.view.cornermodel().columns[0].enabled)
+
+    def test_shift_column(self):
+        self.view._shift_column(0, 1)
+        self.assertEqual(
+            self._corner_names(), ["BT_2G_RX_SS_1", "BT_2G_RX_TT"]
+        )
+
+    def test_reorder_corners_dialog(self):
+        with mock.patch.object(
+            cm_mod._ReorderDialog, "exec_",
+            return_value=cm_mod.QDialog.Accepted,
+        ), mock.patch.object(
+            cm_mod._ReorderDialog, "new_order", return_value=(1, 0),
+        ):
+            self.view._on_reorder_corners()
+        self.assertEqual(
+            self._corner_names(), ["BT_2G_RX_SS_1", "BT_2G_RX_TT"]
+        )
+
+    def test_rename_column(self):
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=("RX_FAST", True),
+        ):
+            self.view._rename_column(0)
+        self.assertIn("RX_FAST", self._corner_names())
+
+    def test_rename_variable(self):
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=("DIV_SEL", True),
+        ):
+            self.view._rename_variable("div_sel")
+        _temp, design = self.view.table_model.variable_order()
+        self.assertIn("DIV_SEL", design)
+        self.assertNotIn("div_sel", design)
+
+    def test_remove_variable(self):
+        with mock.patch.object(
+            cm_mod.QMessageBox, "question",
+            return_value=cm_mod.QMessageBox.Yes,
+        ):
+            self.view._remove_variable("div_sel")
+        _temp, design = self.view.table_model.variable_order()
+        self.assertNotIn("div_sel", design)
+
+    def test_move_design_variable_row(self):
+        before = self.view.table_model.variable_order()[1]
+        self.view._move_var(before[0], 1)
+        after = self.view.table_model.variable_order()[1]
+        self.assertEqual(after[0], before[1])
+        self.assertEqual(after[1], before[0])
+
+    def test_copy_then_paste_overwrites_cells(self):
+        model = self.view.table_model
+        trow = next(
+            r for r in range(model.rowCount())
+            if model.var_at(r) == "temperature"
+        )
+        # copy the temperature value of corner column 2
+        self.view.table.selectionModel().select(
+            model.index(trow, 2),
+            self.view.table.selectionModel().ClearAndSelect,
+        )
+        self.view._copy_selection()
+        self.assertEqual(QApplication.clipboard().text(), "55")
+        # paste it over corner column 3 (was 125)
+        self.view.table.setCurrentIndex(model.index(trow, 3))
+        self.view._paste_selection()
+        self.assertEqual(
+            model.data(model.index(trow, 3), Qt.DisplayRole), "55"
+        )
+
+    def test_header_drag_reorders_model(self):
+        header = self.view.table.horizontalHeader()
+        header.moveSection(2, 3)   # drag the first corner past the second
+        self.assertEqual(
+            self._corner_names(), ["BT_2G_RX_SS_1", "BT_2G_RX_TT"]
+        )
+        # the header itself is restored to identity visual order
+        self.assertEqual(
+            [header.visualIndex(i) for i in range(4)], [0, 1, 2, 3]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

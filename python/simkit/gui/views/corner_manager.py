@@ -14,12 +14,15 @@ project has none yet), so the Corners tab is usable with no load step.
 from __future__ import annotations
 
 import json
+from dataclasses import replace as _dc_replace
 from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import pyqtSignal
+from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -34,6 +37,7 @@ from PyQt5.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QShortcut,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -61,14 +65,22 @@ from simkit.corner_model import (
     apply_run_set,
     apply_template,
     check_cornermodel,
+    delete_column,
     effective_name,
     export_library,
     import_library,
     library_to_dict,
     load_library,
     mode_from_column,
+    move_column,
+    rename_column,
+    rename_variable,
+    reorder_columns,
+    remove_variable,
     run_set_membership,
+    set_column_enabled,
     set_mode_var,
+    set_var_order,
     set_variant_var,
     unbind_template,
 )
@@ -94,6 +106,7 @@ class CornerManagerView(QWidget):
         self._source_path = source_path  # Path | None — where to persist
         self._loading_mode_vars = False
         self._loading_variant_vars = False
+        self._reordering = False
         self._set_filter: Optional[str] = None
         self._build_ui()
         self._refresh_side_panels()
@@ -172,15 +185,29 @@ class CornerManagerView(QWidget):
 
         hint = QHBoxLayout()
         hint.addWidget(QLabel(
-            "Filters are embedded in the table — type in a Filter cell; "
-            "right-click it to pick the match mode."
+            "Right-click a corner or a variable row for actions; "
+            "type in a Filter cell to filter."
         ))
         hint.addStretch(1)
+        self.btn_move_up = QPushButton("▲ Move Up")
+        self.btn_move_up.setToolTip(
+            "Move the selected Design Variable row up one position."
+        )
+        self.btn_move_down = QPushButton("▼ Move Down")
+        self.btn_move_down.setToolTip(
+            "Move the selected Design Variable row down one position."
+        )
+        self.btn_reorder_corners = QPushButton("Reorder Corners…")
+        self.btn_reorder_corners.setToolTip(
+            "Open a list to reorder the corner columns."
+        )
         self.btn_clear_filters = QPushButton("Clear filters")
         self.btn_clear_filters.setToolTip(
             "Clear every embedded filter cell and the run-set filter."
         )
-        hint.addWidget(self.btn_clear_filters)
+        for b in (self.btn_move_up, self.btn_move_down,
+                  self.btn_reorder_corners, self.btn_clear_filters):
+            hint.addWidget(b)
         outer.addLayout(hint)
 
         # The corner table is the subject of the view — it fills the body.
@@ -194,10 +221,12 @@ class CornerManagerView(QWidget):
         # Variable names live in column 0 now — the row header is redundant.
         self.table.verticalHeader().hide()
         # #3.4 — columns are interactively resizable.
-        self.table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Interactive
-        )
-        self.table.horizontalHeader().setDefaultSectionSize(96)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setDefaultSectionSize(96)
+        # Grab a corner name to drag the whole corner column (2026 UX item 10).
+        header.setSectionsMovable(True)
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         outer.addWidget(self.table, 1)
@@ -249,6 +278,22 @@ class CornerManagerView(QWidget):
         self.table.customContextMenuRequested.connect(
             self._on_table_context_menu
         )
+        self.btn_move_up.clicked.connect(lambda: self._move_selected_row(-1))
+        self.btn_move_down.clicked.connect(
+            lambda: self._move_selected_row(1)
+        )
+        self.btn_reorder_corners.clicked.connect(self._on_reorder_corners)
+        header.sectionMoved.connect(self._on_section_moved)
+        header.sectionDoubleClicked.connect(self._on_header_double_clicked)
+        header.customContextMenuRequested.connect(
+            self._on_header_context_menu
+        )
+        copy_sc = QShortcut(QKeySequence.Copy, self.table)
+        copy_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        copy_sc.activated.connect(self._copy_selection)
+        paste_sc = QShortcut(QKeySequence.Paste, self.table)
+        paste_sc.setContext(Qt.WidgetWithChildrenShortcut)
+        paste_sc.activated.connect(self._paste_selection)
         self.btn_export_lib.clicked.connect(self._on_export_library)
         self.btn_import_lib.clicked.connect(self._on_import_library)
         self.btn_pull.clicked.connect(self.pull_requested.emit)
@@ -551,14 +596,33 @@ class CornerManagerView(QWidget):
             self.table.setRowHidden(i + 1, not model.is_data_row_visible(i))
 
     def _on_table_context_menu(self, pos) -> None:
-        """Right-click a filter cell → pick its match mode / case flag."""
+        """Right-click the table — a filter cell shows its match-mode menu, a
+        corner cell its corner menu, a variable name its variable menu."""
         index = self.table.indexAt(pos)
         if not index.isValid():
             return
-        matcher = self.table_model.matcher_at(index.row(), index.column())
-        if matcher is None:
-            return  # not a filter cell
         row, col = index.row(), index.column()
+        gpos = self.table.viewport().mapToGlobal(pos)
+        matcher = self.table_model.matcher_at(row, col)
+        if matcher is not None:
+            self._show_filter_menu(row, col, matcher, gpos)
+            return
+        j = self.table_model.column_index_at(col)
+        if j is not None:
+            self._show_column_menu(j, gpos)
+            return
+        var = self.table_model.var_at(row)
+        if var is not None:
+            self._show_variable_menu(var, gpos)
+
+    def _on_header_context_menu(self, pos) -> None:
+        """Right-click a corner header → the corner menu (2026 UX item 1)."""
+        header = self.table.horizontalHeader()
+        j = self.table_model.column_index_at(header.logicalIndexAt(pos))
+        if j is not None:
+            self._show_column_menu(j, header.viewport().mapToGlobal(pos))
+
+    def _show_filter_menu(self, row, col, matcher, gpos) -> None:
         menu = QMenu(self)
         for mode in MENU_ORDER:
             act = menu.addAction(mode.value)
@@ -578,7 +642,252 @@ class CornerManagerView(QWidget):
                 row, col, case_sensitive=checked
             )
         )
-        menu.exec_(self.table.viewport().mapToGlobal(pos))
+        menu.exec_(gpos)
+
+    def _show_column_menu(self, j: int, gpos) -> None:
+        column = self._cm.columns[j]
+        name = effective_name(column)
+        menu = QMenu(self)
+        menu.addAction("New Corner…", self._on_new_column)
+        menu.addAction(
+            f"Duplicate {name!r}", lambda: self._duplicate_column(j)
+        )
+        menu.addAction(f"Rename {name!r}…", lambda: self._rename_column(j))
+        toggle = "Disable" if column.enabled else "Enable"
+        menu.addAction(
+            f"{toggle} {name!r}", lambda: self._toggle_column_enabled(j)
+        )
+        menu.addSeparator()
+        act_left = menu.addAction(
+            "Move Left", lambda: self._shift_column(j, -1)
+        )
+        act_left.setEnabled(j > 0)
+        act_right = menu.addAction(
+            "Move Right", lambda: self._shift_column(j, 1)
+        )
+        act_right.setEnabled(j < len(self._cm.columns) - 1)
+        menu.addAction("Reorder Corners…", self._on_reorder_corners)
+        menu.addSeparator()
+        menu.addAction(f"Delete {name!r}", lambda: self._delete_column(j))
+        menu.exec_(gpos)
+
+    def _show_variable_menu(self, var: str, gpos) -> None:
+        menu = QMenu(self)
+        menu.addAction(
+            f"Rename {var!r}…", lambda: self._rename_variable(var)
+        )
+        _temp, design = self.table_model.variable_order()
+        if var in design:
+            i = design.index(var)
+            up = menu.addAction("Move Up", lambda: self._move_var(var, -1))
+            up.setEnabled(i > 0)
+            down = menu.addAction(
+                "Move Down", lambda: self._move_var(var, 1)
+            )
+            down.setEnabled(i < len(design) - 1)
+        menu.addSeparator()
+        menu.addAction(f"Remove {var!r}", lambda: self._remove_variable(var))
+        menu.exec_(gpos)
+
+    # --- corner column actions ------------------------------------------
+
+    def _duplicate_column(self, j: int) -> None:
+        src = self._cm.columns[j]
+        base = effective_name(src)
+        existing = {effective_name(c) for c in self._cm.columns}
+        new_name, n = f"{base}_copy", 2
+        while new_name in existing:
+            new_name, n = f"{base}_copy{n}", n + 1
+        dup = (_dc_replace(src, alias=new_name) if src.is_managed
+               else _dc_replace(src, name=new_name))
+        try:
+            new_cm = add_column(self._cm, dup)
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Duplicate corner failed", str(exc))
+            return
+        # Place the duplicate immediately after the source column.
+        order = list(range(len(new_cm.columns)))
+        order.insert(j + 1, order.pop())
+        self._apply(reorder_columns(new_cm, tuple(order)))
+
+    def _rename_column(self, j: int) -> None:
+        old = effective_name(self._cm.columns[j])
+        new, ok = QInputDialog.getText(
+            self, "Rename corner", "New corner name:", text=old
+        )
+        if not ok or not new.strip() or new.strip() == old:
+            return
+        try:
+            new_cm = rename_column(self._cm, j, new.strip())
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Rename corner failed", str(exc))
+            return
+        self._apply(new_cm)
+
+    def _toggle_column_enabled(self, j: int) -> None:
+        column = self._cm.columns[j]
+        self._apply(set_column_enabled(self._cm, j, not column.enabled))
+
+    def _shift_column(self, j: int, delta: int) -> None:
+        new_cm = move_column(self._cm, j, delta)
+        if new_cm is not self._cm:
+            self._apply(new_cm)
+
+    def _delete_column(self, j: int) -> None:
+        name = effective_name(self._cm.columns[j])
+        if QMessageBox.question(
+            self, "Delete corner",
+            f"Delete corner {name!r}? Push to Maestro to apply it there.",
+        ) != QMessageBox.Yes:
+            return
+        self._apply(delete_column(self._cm, j))
+
+    def _on_reorder_corners(self) -> None:
+        if len(self._cm.columns) < 2:
+            QMessageBox.information(
+                self, "Reorder Corners",
+                "Add at least two corner columns first."
+            )
+            return
+        names = [effective_name(c) for c in self._cm.columns]
+        dialog = _ReorderDialog("Reorder Corners", names, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        order = dialog.new_order()
+        if order != tuple(range(len(names))):
+            self._apply(reorder_columns(self._cm, order))
+
+    def _on_section_moved(self, _logical, _old, _new) -> None:
+        """A corner header was dragged — re-seat the model to match. The
+        header itself is restored to identity (a model reset does not undo a
+        section move); the cornermodel carries the new order."""
+        if self._reordering:
+            return
+        self._reordering = True
+        try:
+            header = self.table.horizontalHeader()
+            n = self.table_model.columnCount()
+            visual = sorted(range(n), key=header.visualIndex)
+            header.blockSignals(True)
+            for logical in range(n):
+                cur = header.visualIndex(logical)
+                if cur != logical:
+                    header.moveSection(cur, logical)
+            header.blockSignals(False)
+            if n < 4 or visual[0] != 0 or visual[1] != 1:
+                return   # the Variable / Filter columns must stay first
+            data_order = tuple(lg - 2 for lg in visual[2:])
+            if data_order != tuple(range(len(data_order))):
+                self._apply(reorder_columns(self._cm, data_order))
+        finally:
+            self._reordering = False
+
+    def _on_header_double_clicked(self, section: int) -> None:
+        j = self.table_model.column_index_at(section)
+        if j is not None:
+            self._rename_column(j)
+
+    # --- variable row actions -------------------------------------------
+
+    def _rename_variable(self, var: str) -> None:
+        new, ok = QInputDialog.getText(
+            self, "Rename variable", "New variable name:", text=var
+        )
+        if not ok or not new.strip() or new.strip() == var:
+            return
+        try:
+            new_cm = rename_variable(self._cm, var, new.strip())
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Rename variable failed", str(exc))
+            return
+        self._apply(new_cm)
+        self._select_var_row(new.strip())
+
+    def _remove_variable(self, var: str) -> None:
+        if QMessageBox.question(
+            self, "Remove variable",
+            f"Remove variable {var!r} from every corner?",
+        ) != QMessageBox.Yes:
+            return
+        try:
+            new_cm = remove_variable(self._cm, var)
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Remove variable failed", str(exc))
+            return
+        self._apply(new_cm)
+
+    def _move_selected_row(self, delta: int) -> None:
+        idx = self.table.currentIndex()
+        var = self.table_model.var_at(idx.row()) if idx.isValid() else None
+        if var is None:
+            QMessageBox.information(
+                self, "Move row", "Select a Design Variable row first."
+            )
+            return
+        self._move_var(var, delta)
+
+    def _move_var(self, var: str, delta: int) -> None:
+        temp, design = self.table_model.variable_order()
+        if var not in design:
+            QMessageBox.information(
+                self, "Move row",
+                "Only Design Variable rows can be reordered."
+            )
+            return
+        i = design.index(var)
+        target = i + delta
+        if not (0 <= target < len(design)):
+            return
+        design[i], design[target] = design[target], design[i]
+        self._apply(set_var_order(self._cm, tuple(temp + design)))
+        self._select_var_row(var)
+
+    def _select_var_row(self, var: str) -> None:
+        for r in range(self.table_model.rowCount()):
+            if self.table_model.var_at(r) == var:
+                self.table.setCurrentIndex(self.table_model.index(r, 0))
+                return
+
+    # --- clipboard (Excel-style copy / paste) ---------------------------
+
+    def _copy_selection(self) -> None:
+        """Copy the selected cells as tab / newline separated text."""
+        sel = self.table.selectionModel().selectedIndexes()
+        if not sel:
+            return
+        rows = sorted({i.row() for i in sel})
+        cols = sorted({i.column() for i in sel})
+        by_cell = {(i.row(), i.column()): i for i in sel}
+        lines = []
+        for r in rows:
+            cells = []
+            for c in cols:
+                idx = by_cell.get((r, c))
+                value = (self.table_model.data(idx, Qt.DisplayRole)
+                         if idx is not None else None)
+                cells.append("" if value is None else str(value))
+            lines.append("\t".join(cells))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _paste_selection(self) -> None:
+        """Paste tab / newline separated text over cells, anchored at the
+        current cell — non-editable cells are skipped."""
+        text = QApplication.clipboard().text()
+        cur = self.table.currentIndex()
+        if not text or not cur.isValid():
+            return
+        grid = [line.split("\t") for line in text.split("\n")]
+        while grid and grid[-1] == [""]:
+            grid.pop()
+        r0, c0 = cur.row(), cur.column()
+        for dr, line in enumerate(grid):
+            for dc, value in enumerate(line):
+                idx = self.table_model.index(r0 + dr, c0 + dc)
+                if not idx.isValid():
+                    continue
+                if not (self.table_model.flags(idx) & Qt.ItemIsEditable):
+                    continue
+                self.table_model.setData(idx, value, Qt.EditRole)
 
     # --- variants panel --------------------------------------------------
 
@@ -1253,6 +1562,67 @@ class _NewModeDialog(QDialog):
             var = self._table.item(row, 0).text()
             out[var] = self._table.item(row, 1).text().strip()
         return out
+
+
+class _ReorderDialog(QDialog):
+    """A draggable vertical list for reordering corner columns — easier than
+    dragging columns sideways when there are many (2026 UX item 11)."""
+
+    def __init__(
+        self, title: str, names: list[str],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(340)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Drag a row — or select one and use the arrows — to reorder "
+            "the corner columns:"
+        ))
+        body = QHBoxLayout()
+        self._list = QListWidget()
+        self._list.setDragDropMode(QAbstractItemView.InternalMove)
+        self._list.setSelectionMode(QAbstractItemView.SingleSelection)
+        for idx, name in enumerate(names):
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, idx)
+            self._list.addItem(item)
+        body.addWidget(self._list, 1)
+        arrows = QVBoxLayout()
+        self._btn_up = QPushButton("▲")
+        self._btn_down = QPushButton("▼")
+        arrows.addStretch(1)
+        arrows.addWidget(self._btn_up)
+        arrows.addWidget(self._btn_down)
+        arrows.addStretch(1)
+        body.addLayout(arrows)
+        layout.addLayout(body)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._btn_up.clicked.connect(lambda: self._nudge(-1))
+        self._btn_down.clicked.connect(lambda: self._nudge(1))
+        self._list.setCurrentRow(0)
+
+    def _nudge(self, delta: int) -> None:
+        row = self._list.currentRow()
+        target = row + delta
+        if row < 0 or not (0 <= target < self._list.count()):
+            return
+        item = self._list.takeItem(row)
+        self._list.insertItem(target, item)
+        self._list.setCurrentRow(target)
+
+    def new_order(self) -> tuple[int, ...]:
+        """The new column order as a permutation of the original indices."""
+        return tuple(
+            self._list.item(i).data(Qt.UserRole)
+            for i in range(self._list.count())
+        )
 
 
 def _split_label_line(line: str) -> tuple[str, str]:
