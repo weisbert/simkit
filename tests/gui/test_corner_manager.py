@@ -82,7 +82,11 @@ class CornerManagerViewTest(unittest.TestCase):
         self.view.show()
         _QAPP.processEvents()
         self.assertGreater(self.view.table.rowHeight(0), 0)
+        # the Modes pop-up renders its register table at a real height too
+        self.view._modes_dialog.show()
+        _QAPP.processEvents()
         self.assertGreater(self.view.mode_vars.rowHeight(0), 0)
+        self.view._modes_dialog.hide()
 
     def test_global_edit_syncs_all_columns(self):
         edited = []
@@ -128,10 +132,13 @@ class CornerManagerViewTest(unittest.TestCase):
             return_value=("FF_1", True),
         ), mock.patch.object(
             cm_mod.QInputDialog, "getMultiLineText",
-            return_value=("temperature=-40", True),
+            side_effect=[("temperature=-40", True), ("rf018.scs: ff", True)],
         ):
             self.view._on_new_column()
         self.assertEqual(self.view.table_model.columnCount(), 3)
+        new_col = self.view.cornermodel().columns[-1]
+        self.assertEqual(new_col.models[0].file, "rf018.scs")
+        self.assertEqual(new_col.models[0].section, ("ff",))
 
     def test_push_signal_carries_cornermodel(self):
         captured = []

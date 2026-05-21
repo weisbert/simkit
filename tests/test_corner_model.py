@@ -20,6 +20,7 @@ from simkit.corner_model import (
     Mode,
     adopt_column,
     classify_pull,
+    column_models,
     effective_name,
     is_cell_red,
     load_cornermodel,
@@ -27,6 +28,7 @@ from simkit.corner_model import (
     materialize,
     materialize_column,
     save_cornermodel,
+    set_column_model_section,
     set_mode_var,
     to_dict,
 )
@@ -274,6 +276,23 @@ def test_adopt_column_three_way_split():
     assert split.pvt_vars_kept == ("temperature",)
     assert adopted.mode == "BT_2G_RX"
     assert effective_name(adopted) == "BT_2G_RX_adopted"
+
+
+# --- process-model section edit ------------------------------------------
+
+
+def test_set_column_model_section_retargets_one_column(tmp_path):
+    cm = _write_load(tmp_path, _base())
+    edited = set_column_model_section(cm, 0, "rf018.scs", "ff")
+    assert column_models(edited.columns[0])[0].section == ("ff",)
+    # the sibling column keeps its own section
+    assert column_models(edited.columns[1])[0].section == ("ss",)
+
+
+def test_set_column_model_section_unknown_file_raises(tmp_path):
+    cm = _write_load(tmp_path, _base())
+    with pytest.raises(CornerModelValidationError):
+        set_column_model_section(cm, 0, "nonexistent.scs", "ff")
 
 
 # --- serialisation round-trip --------------------------------------------

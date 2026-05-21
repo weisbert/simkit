@@ -1019,6 +1019,15 @@ def _column_models(
     return tuple(models)
 
 
+def column_models(
+    column: Column, profile: "PvtProfile | None" = None
+) -> tuple[ModelEntry, ...]:
+    """Public view of a column's resolved process-model entries — what the
+    corner table renders as its Model Files rows (one row per file, the cell
+    showing that model's section / process corner)."""
+    return _column_models(column, profile)
+
+
 def materialize_column_rows(
     model: CornerModel, column: Column, profile: "PvtProfile | None" = None
 ) -> list[UnionRow]:
@@ -1392,6 +1401,37 @@ def set_pvt_var(
     new_sweep = column.pvt_sweep_keys - {var}
     return _replace_column(model, column_index, replace(
         column, pvt_vars=new_pvt, pvt_sweep_keys=new_sweep
+    ))
+
+
+def set_column_model_section(
+    model: CornerModel, column_index: int, file: str, section: str
+) -> CornerModel:
+    """Return a new cornermodel with one column's process-model section set.
+
+    This is the GUI's "edit a process-corner cell" action — it retargets the
+    section of model file ``file`` on this column only, leaving every other
+    column untouched.
+    """
+    column = model.columns[column_index]
+    new_models: list[ModelEntry] = []
+    found = False
+    for m in column.models:
+        if m.file == file:
+            new_models.append(replace(m, section=(section,)))
+            found = True
+        else:
+            new_models.append(m)
+    if not found:
+        raise CornerModelValidationError(
+            f"set_column_model_section: column has no model file {file!r}"
+        )
+    new_sweep = frozenset(
+        i for i in column.model_sweep_indices
+        if column.models[i].file != file
+    )
+    return _replace_column(model, column_index, replace(
+        column, models=tuple(new_models), model_sweep_indices=new_sweep
     ))
 
 

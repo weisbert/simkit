@@ -32,7 +32,6 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
-    QSplitter,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -47,6 +46,7 @@ from simkit.corner_model import (
     CornerModelError,
     CorrelatedAxis,
     CorrelatedTuple,
+    ModelEntry,
     PvtTemplate,
     TemplateColumn,
     Variant,
@@ -117,15 +117,41 @@ class CornerManagerView(QWidget):
         self.title_label = QLabel(self._title_text())
         top.addWidget(self.title_label)
         top.addStretch(1)
-        self.btn_new_mode = QPushButton("New Mode")
-        self.btn_new_mode.setToolTip(
-            "Define a new operating mode — a named bag of register values "
-            "(e.g. BT_2G_RX). Columns reference a mode."
+        # Editor launchers — each opens a focused pop-up so the corner table
+        # itself stays the subject of the view (the setup controls are not
+        # walls on the side any more).
+        self.btn_modes = QPushButton("Modes…")
+        self.btn_modes.setToolTip(
+            "Define operating modes and edit their register values."
         )
+        self.btn_variants = QPushButton("Variants…")
+        self.btn_variants.setToolTip(
+            "Manage variants — delta overlays on a mode."
+        )
+        self.btn_templates = QPushButton("Templates…")
+        self.btn_templates.setToolTip(
+            "Author / apply reusable PVT templates; import / export the "
+            "template library."
+        )
+        self.btn_axes = QPushButton("Axes…")
+        self.btn_axes.setToolTip(
+            "Manage correlated axes — variable bundles that vary together."
+        )
+        self.btn_run_sets = QPushButton("Run Sets…")
+        self.btn_run_sets.setToolTip(
+            "Manage run sets — named cross-mode corner selections."
+        )
+        self.btn_profile = QPushButton("Profile…")
+        self.btn_profile.setToolTip(
+            "Inspect the bound PVT profile (semantic mapping layer)."
+        )
+        for b in (self.btn_modes, self.btn_variants, self.btn_templates,
+                  self.btn_axes, self.btn_run_sets, self.btn_profile):
+            top.addWidget(b)
         self.btn_new_column = QPushButton("New Column")
         self.btn_new_column.setToolTip(
             "Add one corner column to a mode (a PVT label + per-column "
-            "PVT variables)."
+            "PVT variables and process model files)."
         )
         self.btn_pull = QPushButton("Pull")
         self.btn_pull.setToolTip(
@@ -137,8 +163,7 @@ class CornerManagerView(QWidget):
             "Materialise this corner model and push the corners to the "
             "live Maestro session (replaces the Maestro corner table)."
         )
-        for b in (self.btn_new_mode, self.btn_new_column,
-                  self.btn_pull, self.btn_push):
+        for b in (self.btn_new_column, self.btn_pull, self.btn_push):
             top.addWidget(b)
         outer.addLayout(top)
 
@@ -149,9 +174,7 @@ class CornerManagerView(QWidget):
             "Filter columns by name — supports and / or / * (e.g. RX or TX)"
         )
         filt.addWidget(self.filter_edit)
-        self.btn_filter_set = QPushButton("Filter to selected run set")
         self.btn_clear_filter = QPushButton("Show all columns")
-        filt.addWidget(self.btn_filter_set)
         filt.addWidget(self.btn_clear_filter)
         outer.addLayout(filt)
 
@@ -159,98 +182,13 @@ class CornerManagerView(QWidget):
         rowfilt.addWidget(QLabel("Row filter:"))
         self.row_filter_edit = QLineEdit()
         self.row_filter_edit.setPlaceholderText(
-            "Filter rows by variable name — supports and / or / * "
-            "wildcards (e.g. ldo* or div12)"
+            "Filter rows by variable / model-file name — supports "
+            "and / or / * wildcards (e.g. ldo* or div12)"
         )
         rowfilt.addWidget(self.row_filter_edit)
         outer.addLayout(rowfilt)
 
-        splitter = QSplitter(Qt.Horizontal)
-
-        left = QWidget()
-        left_v = QVBoxLayout(left)
-        left_v.addWidget(QLabel("PVT Profile (semantic mapping layer, read-only)"))
-        self.profile_list = QListWidget()
-        self.profile_list.setMaximumHeight(90)
-        left_v.addWidget(self.profile_list)
-        left_v.addWidget(QLabel("Modes"))
-        self.modes_list = QListWidget()
-        left_v.addWidget(self.modes_list)
-        left_v.addWidget(QLabel("Registers (edit once — every referencing column syncs)"))
-        self.mode_vars = QTableWidget(0, 2)
-        self.mode_vars.setHorizontalHeaderLabels(["Register", "Value"])
-        self.mode_vars.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
-        self.mode_vars.verticalHeader().setDefaultSectionSize(24)
-        left_v.addWidget(self.mode_vars)
-
-        var_hdr = QHBoxLayout()
-        var_hdr.addWidget(QLabel("Variants (delta overlay on a mode)"))
-        self.btn_new_variant = QPushButton("New Variant")
-        var_hdr.addWidget(self.btn_new_variant)
-        left_v.addLayout(var_hdr)
-        self.variants_list = QListWidget()
-        left_v.addWidget(self.variants_list)
-        self.variant_vars = QTableWidget(0, 2)
-        self.variant_vars.setHorizontalHeaderLabels(
-            ["Overridden register", "Absolute value"]
-        )
-        self.variant_vars.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
-        self.variant_vars.verticalHeader().setDefaultSectionSize(24)
-        left_v.addWidget(self.variant_vars)
-
-        tmpl_hdr = QHBoxLayout()
-        tmpl_hdr.addWidget(QLabel("PVT Templates"))
-        self.btn_new_template = QPushButton("New Template")
-        self.btn_new_template.setToolTip(
-            "Author a reusable PVT template — a list of corner columns "
-            "you can apply to any mode or variant (pain point a)."
-        )
-        tmpl_hdr.addWidget(self.btn_new_template)
-        left_v.addLayout(tmpl_hdr)
-        self.templates_list = QListWidget()
-        left_v.addWidget(self.templates_list)
-        tmpl_btns = QHBoxLayout()
-        self.btn_apply_template = QPushButton("Apply to mode")
-        self.btn_unbind_template = QPushButton("Unbind")
-        tmpl_btns.addWidget(self.btn_apply_template)
-        tmpl_btns.addWidget(self.btn_unbind_template)
-        left_v.addLayout(tmpl_btns)
-        lib_btns = QHBoxLayout()
-        self.btn_export_lib = QPushButton("Export template library")
-        self.btn_import_lib = QPushButton("Import template library")
-        lib_btns.addWidget(self.btn_export_lib)
-        lib_btns.addWidget(self.btn_import_lib)
-        left_v.addLayout(lib_btns)
-
-        axes_hdr = QHBoxLayout()
-        axes_hdr.addWidget(
-            QLabel("Correlated axes (bound var bundle, cross-product as one axis)")
-        )
-        self.btn_new_axis = QPushButton("New Axis")
-        self.btn_new_axis.setToolTip(
-            "Define a correlated axis — a bundle of variables that must "
-            "vary together, cross-multiplied as one axis (pain point h)."
-        )
-        axes_hdr.addWidget(self.btn_new_axis)
-        left_v.addLayout(axes_hdr)
-        self.axes_list = QListWidget()
-        left_v.addWidget(self.axes_list)
-
-        rs_hdr = QHBoxLayout()
-        rs_hdr.addWidget(QLabel("Run sets (cross-mode corner selection)"))
-        self.btn_new_run_set = QPushButton("New Run Set")
-        rs_hdr.addWidget(self.btn_new_run_set)
-        left_v.addLayout(rs_hdr)
-        self.run_sets_list = QListWidget()
-        left_v.addWidget(self.run_sets_list)
-        self.btn_apply_run_set = QPushButton("Switch to this run set")
-        left_v.addWidget(self.btn_apply_run_set)
-        splitter.addWidget(left)
-
+        # The corner table is the subject of the view — it fills the body.
         self.table = QTableView()
         self.table_model = CornerModelTableModel(
             self._cm, self._profile, self
@@ -260,13 +198,32 @@ class CornerManagerView(QWidget):
         # Stage 5: drag variable rows to reorder (pain-point g).
         self.table.verticalHeader().setSectionsMovable(True)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
-        splitter.addWidget(self.table)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 3)
-        outer.addWidget(splitter)
+        outer.addWidget(self.table, 1)
 
         self.check_label = QLabel()
         outer.addWidget(self.check_label)
+
+        # Editor pop-ups — built once, hidden until a toolbar button raises
+        # them; non-modal so corner-table edits stay live behind.
+        self._build_modes_dialog()
+        self._build_variants_dialog()
+        self._build_templates_dialog()
+        self._build_axes_dialog()
+        self._build_run_sets_dialog()
+        self._build_profile_dialog()
+
+        self.btn_modes.clicked.connect(
+            lambda: self._open_dialog(self._modes_dialog))
+        self.btn_variants.clicked.connect(
+            lambda: self._open_dialog(self._variants_dialog))
+        self.btn_templates.clicked.connect(
+            lambda: self._open_dialog(self._templates_dialog))
+        self.btn_axes.clicked.connect(
+            lambda: self._open_dialog(self._axes_dialog))
+        self.btn_run_sets.clicked.connect(
+            lambda: self._open_dialog(self._run_sets_dialog))
+        self.btn_profile.clicked.connect(
+            lambda: self._open_dialog(self._profile_dialog))
 
         self.modes_list.currentItemChanged.connect(self._on_mode_selected)
         self.mode_vars.itemChanged.connect(self._on_mode_var_changed)
@@ -297,6 +254,146 @@ class CornerManagerView(QWidget):
         self.btn_push.clicked.connect(
             lambda: self.push_requested.emit(self._cm)
         )
+
+    # --- editor pop-ups --------------------------------------------------
+
+    def _open_dialog(self, dialog: QDialog) -> None:
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _build_modes_dialog(self) -> None:
+        self._modes_dialog = QDialog(self)
+        self._modes_dialog.setWindowTitle("Modes")
+        self._modes_dialog.resize(420, 500)
+        v = QVBoxLayout(self._modes_dialog)
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("Modes"))
+        hdr.addStretch(1)
+        self.btn_new_mode = QPushButton("New Mode")
+        self.btn_new_mode.setToolTip(
+            "Define a new operating mode — a named bag of register values "
+            "(e.g. BT_2G_RX). Columns reference a mode."
+        )
+        hdr.addWidget(self.btn_new_mode)
+        v.addLayout(hdr)
+        self.modes_list = QListWidget()
+        v.addWidget(self.modes_list)
+        v.addWidget(QLabel(
+            "Registers (edit once — every referencing column syncs)"
+        ))
+        self.mode_vars = QTableWidget(0, 2)
+        self.mode_vars.setHorizontalHeaderLabels(["Register", "Value"])
+        self.mode_vars.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.mode_vars.verticalHeader().setDefaultSectionSize(24)
+        v.addWidget(self.mode_vars)
+
+    def _build_variants_dialog(self) -> None:
+        self._variants_dialog = QDialog(self)
+        self._variants_dialog.setWindowTitle("Variants")
+        self._variants_dialog.resize(420, 460)
+        v = QVBoxLayout(self._variants_dialog)
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("Variants (delta overlay on a mode)"))
+        hdr.addStretch(1)
+        self.btn_new_variant = QPushButton("New Variant")
+        hdr.addWidget(self.btn_new_variant)
+        v.addLayout(hdr)
+        self.variants_list = QListWidget()
+        v.addWidget(self.variants_list)
+        v.addWidget(QLabel("Overridden registers (absolute values)"))
+        self.variant_vars = QTableWidget(0, 2)
+        self.variant_vars.setHorizontalHeaderLabels(
+            ["Overridden register", "Absolute value"]
+        )
+        self.variant_vars.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self.variant_vars.verticalHeader().setDefaultSectionSize(24)
+        v.addWidget(self.variant_vars)
+
+    def _build_templates_dialog(self) -> None:
+        self._templates_dialog = QDialog(self)
+        self._templates_dialog.setWindowTitle("PVT Templates")
+        self._templates_dialog.resize(440, 420)
+        v = QVBoxLayout(self._templates_dialog)
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("PVT Templates"))
+        hdr.addStretch(1)
+        self.btn_new_template = QPushButton("New Template")
+        self.btn_new_template.setToolTip(
+            "Author a reusable PVT template — a list of corner columns "
+            "you can apply to any mode or variant (pain point a)."
+        )
+        hdr.addWidget(self.btn_new_template)
+        v.addLayout(hdr)
+        self.templates_list = QListWidget()
+        v.addWidget(self.templates_list)
+        tmpl_btns = QHBoxLayout()
+        self.btn_apply_template = QPushButton("Apply to mode")
+        self.btn_unbind_template = QPushButton("Unbind")
+        tmpl_btns.addWidget(self.btn_apply_template)
+        tmpl_btns.addWidget(self.btn_unbind_template)
+        v.addLayout(tmpl_btns)
+        lib_btns = QHBoxLayout()
+        self.btn_export_lib = QPushButton("Export template library")
+        self.btn_import_lib = QPushButton("Import template library")
+        lib_btns.addWidget(self.btn_export_lib)
+        lib_btns.addWidget(self.btn_import_lib)
+        v.addLayout(lib_btns)
+
+    def _build_axes_dialog(self) -> None:
+        self._axes_dialog = QDialog(self)
+        self._axes_dialog.setWindowTitle("Correlated Axes")
+        self._axes_dialog.resize(440, 340)
+        v = QVBoxLayout(self._axes_dialog)
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel(
+            "Correlated axes (bound var bundle, cross-product as one axis)"
+        ))
+        hdr.addStretch(1)
+        self.btn_new_axis = QPushButton("New Axis")
+        self.btn_new_axis.setToolTip(
+            "Define a correlated axis — a bundle of variables that must "
+            "vary together, cross-multiplied as one axis (pain point h)."
+        )
+        hdr.addWidget(self.btn_new_axis)
+        v.addLayout(hdr)
+        self.axes_list = QListWidget()
+        v.addWidget(self.axes_list)
+
+    def _build_run_sets_dialog(self) -> None:
+        self._run_sets_dialog = QDialog(self)
+        self._run_sets_dialog.setWindowTitle("Run Sets")
+        self._run_sets_dialog.resize(440, 340)
+        v = QVBoxLayout(self._run_sets_dialog)
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("Run sets (cross-mode corner selection)"))
+        hdr.addStretch(1)
+        self.btn_new_run_set = QPushButton("New Run Set")
+        hdr.addWidget(self.btn_new_run_set)
+        v.addLayout(hdr)
+        self.run_sets_list = QListWidget()
+        v.addWidget(self.run_sets_list)
+        btns = QHBoxLayout()
+        self.btn_apply_run_set = QPushButton("Switch to this run set")
+        self.btn_filter_set = QPushButton("Filter table to this run set")
+        btns.addWidget(self.btn_apply_run_set)
+        btns.addWidget(self.btn_filter_set)
+        v.addLayout(btns)
+
+    def _build_profile_dialog(self) -> None:
+        self._profile_dialog = QDialog(self)
+        self._profile_dialog.setWindowTitle("PVT Profile")
+        self._profile_dialog.resize(380, 260)
+        v = QVBoxLayout(self._profile_dialog)
+        v.addWidget(QLabel(
+            "PVT Profile (semantic mapping layer, read-only)"
+        ))
+        self.profile_list = QListWidget()
+        v.addWidget(self.profile_list)
 
     # --- model swap ------------------------------------------------------
 
@@ -739,8 +836,8 @@ class CornerManagerView(QWidget):
     def _apply_row_filter(self) -> None:
         expr = self.row_filter_edit.text()
         for r in range(self.table_model.rowCount()):
-            var = self.table_model.var_at(r) or ""
-            self.table.setRowHidden(r, not self._row_matches(var, expr))
+            label = self.table_model.row_label(r) or ""
+            self.table.setRowHidden(r, not self._row_matches(label, expr))
 
     def _on_row_section_moved(self, *_args) -> None:
         if self._reordering:
@@ -918,8 +1015,16 @@ class CornerManagerView(QWidget):
         )
         if not ok:
             return
+        models_text, ok = QInputDialog.getMultiLineText(
+            self, "New Column — process model files",
+            "One 'file: section' per line, e.g. rf018.scs: tt "
+            "(may be empty):", "",
+        )
+        if not ok:
+            return
         try:
             pvt = _parse_var_lines(text)
+            models = _parse_model_lines(models_text)
         except ValueError as exc:
             QMessageBox.warning(self, "New column failed", str(exc))
             return
@@ -927,7 +1032,7 @@ class CornerManagerView(QWidget):
             mode=mode,
             enabled=True,
             pvt_vars={k: (v,) for k, v in pvt.items()},
-            models=(),
+            models=models,
             pvt_label=label.strip(),
         )
         try:
@@ -958,6 +1063,30 @@ def _parse_var_lines(text: str) -> dict[str, str]:
             raise ValueError(f"line {line!r} is missing the var name")
         out[key] = value
     return out
+
+
+def _parse_model_lines(text: str) -> tuple[ModelEntry, ...]:
+    """Parse ``file: section`` lines into process-model entries. ``block`` /
+    ``test`` default to the Maestro corner-table defaults (Global / All)."""
+    out: list[ModelEntry] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if ":" not in line:
+            raise ValueError(
+                f"line {line!r} is not in 'file: section' format"
+            )
+        file, _, section = line.partition(":")
+        file, section = file.strip(), section.strip()
+        if not file or not section:
+            raise ValueError(
+                f"line {line!r} must give both a model file and a section"
+            )
+        out.append(ModelEntry(
+            file=file, block="Global", test="All", section=(section,),
+        ))
+    return tuple(out)
 
 
 class _ColumnPickerDialog(QDialog):

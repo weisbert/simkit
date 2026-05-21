@@ -59,14 +59,60 @@ class CornerModelTableModelTest(unittest.TestCase):
         self.model = CornerModelTableModel(self.cm)
 
     def test_dimensions(self):
-        # 3 columns; vars = d_en_dummy, div_sel, temperature
+        # 3 columns; rows = temperature + 1 model file + d_en_dummy + div_sel
         self.assertEqual(self.model.columnCount(), 3)
-        self.assertEqual(self.model.rowCount(), 3)
+        self.assertEqual(self.model.rowCount(), 4)
 
-    def test_register_vars_sort_first(self):
-        rows = [self.model.var_at(r) for r in range(self.model.rowCount())]
-        # register vars (d_en_dummy, div_sel) precede the PVT var temperature
-        self.assertEqual(rows.index("temperature"), 2)
+    def test_row_groups_temperature_models_then_design(self):
+        # Cadence grouping: temperature, then model files, then design vars.
+        self.assertEqual(self.model.row_kind(0), "var")
+        self.assertEqual(self.model.var_at(0), "temperature")
+        self.assertEqual(self.model.row_kind(1), "model")
+        self.assertEqual(self.model.model_at(1), "rf018.scs")
+        design = [
+            self.model.var_at(r) for r in range(2, self.model.rowCount())
+        ]
+        self.assertEqual(set(design), {"d_en_dummy", "div_sel"})
+
+    def test_model_file_row_shows_section_per_column(self):
+        row = self._model_row("rf018.scs")
+        # TT column → section tt, SS_1 column → section ss
+        self.assertEqual(
+            self.model.data(self.model.index(row, 0), Qt.DisplayRole), "tt"
+        )
+        self.assertEqual(
+            self.model.data(self.model.index(row, 1), Qt.DisplayRole), "ss"
+        )
+
+    def test_model_file_cell_is_editable_and_retargets_section(self):
+        row = self._model_row("rf018.scs")
+        idx = self.model.index(row, 0)
+        self.assertTrue(bool(self.model.flags(idx) & Qt.ItemIsEditable))
+        self.assertTrue(self.model.setData(idx, "ff", Qt.EditRole))
+        self.assertEqual(
+            self.model.data(self.model.index(row, 0), Qt.DisplayRole), "ff"
+        )
+        # the other column is untouched
+        self.assertEqual(
+            self.model.data(self.model.index(row, 1), Qt.DisplayRole), "ss"
+        )
+
+    def test_edit_role_prefills_the_current_value(self):
+        # 1c — the cell editor must open with the current value, not blank.
+        row = self._row_of("temperature")
+        self.assertEqual(
+            self.model.data(self.model.index(row, 0), Qt.EditRole), "55"
+        )
+        mrow = self._model_row("rf018.scs")
+        self.assertEqual(
+            self.model.data(self.model.index(mrow, 0), Qt.EditRole), "tt"
+        )
+
+    def _model_row(self, file: str) -> int:
+        for r in range(self.model.rowCount()):
+            if self.model.model_at(r) == file:
+                return r
+        raise AssertionError(f"model file {file!r} not in model")
 
     def test_header_is_effective_name(self):
         names = [
