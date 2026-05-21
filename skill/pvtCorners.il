@@ -152,6 +152,22 @@
 )
 
 
+(procedure (_pvtCornersTestScope allTests disabledTests)
+  "Return allTests with disabledTests removed, preserving allTests order.
+   nil disabledTests => nil so the caller omits the 'tests' key (= every
+   test). Ref: axlGetCornerDisabledTests adexlSKILLref.pdf p.319."
+  (prog (acc)
+    (cond
+      ((null disabledTests) (return nil)))
+    (setq acc nil)
+    (foreach tn allTests
+      (cond
+        ((null (member tn disabledTests)) (setq acc (cons tn acc)))))
+    (return (reverse acc))
+  )
+)
+
+
 ;; ---------- push-side encoders (inverse of the parsers above) -------------
 
 (procedure (_pvtCornersJoinWithSpace tokens)
@@ -358,13 +374,14 @@
 )
 
 
-(procedure (_pvtCornersReadRow sdb cornerName)
+(procedure (_pvtCornersReadRow sdb cornerName allTests)
   "Build the JSON object for one corner row. Returns a pvtJson-emit-ready
-   table with keys row_name / vars / models, or nil if the corner can't be
-   resolved or has no var/model content."
+   table with keys row_name / enabled / vars / models / tests, or nil if the
+   corner can't be resolved or has no var/model content. `allTests` is the
+   list of every test name (used to invert the disabled-test list)."
   ;; Ref: axlGetCorner adexlSKILLref.pdf p.315.
   (prog (ch varsAlist modelsList varsObj modelsArr rowObj
-         jsonVarsAlist jsonModelsList enabled)
+         jsonVarsAlist jsonModelsList enabled disabledRaw scopedTests)
     (setq ch (errset (axlGetCorner sdb cornerName) nil))
     (cond
       ((or (null ch) (null (car ch))) (return nil)))
@@ -408,14 +425,24 @@
     ;; otherwise stringify as "true"/empty.
     (setq enabled (car (errset (axlGetEnabled (car ch)) nil)))
 
+    ;; NEW (2026 UX): per-corner Test scope. Cadence stores the DISABLED
+    ;; tests; the union carries the ENABLED list, omitted entirely when the
+    ;; corner runs every test. Ref: axlGetCornerDisabledTests p.319.
+    (setq disabledRaw
+      (car (errset (axlGetCornerDisabledTests (car ch)) nil)))
+    (setq scopedTests (_pvtCornersTestScope allTests (cadr disabledRaw)))
+
     (setq rowObj (makeTable 'pvtUnionRow PVT_JSON_NULL))
     (setarray rowObj "row_name" cornerName)
     (setarray rowObj "enabled"
       (cond (enabled PVT_JSON_TRUE) (t PVT_JSON_FALSE)))
     (setarray rowObj "vars"     varsObj)
     (setarray rowObj "models"   modelsArr)
+    (cond
+      (scopedTests (setarray rowObj "tests" scopedTests)))
     (setarray rowObj _PVT_JSON_KEYS_PROP
-      (list "row_name" "enabled" "vars" "models"))
+      (append (list "row_name" "enabled" "vars" "models")
+              (cond (scopedTests (list "tests")) (t nil))))
     (return rowObj)
   )
 )
@@ -424,7 +451,7 @@
 (procedure (_pvtCornersBuildUnionTable sess sdb unionName projectName)
   "Build the top-level union JSON table per spec §3.2. Returns a pvtJson
    table or nil if `axlGetCorners` is empty / fails."
-  (prog (raw cnames rows row tbid lib cell view envelope keyOrder)
+  (prog (raw cnames rows row tbid lib cell view envelope keyOrder allTests)
     (setq raw (errset (axlGetCorners sdb) nil))
     (cond
       ((or (null raw) (null (car raw)))
@@ -433,9 +460,13 @@
     (cond
       ((null cnames) (return nil)))
 
+    ;; The global test list — every row inverts its disabled-test set
+    ;; against this. Ref: axlGetTests adexlSKILLref.pdf p.282.
+    (setq allTests (cadr (car (errset (axlGetTests sdb) nil))))
+
     (setq rows nil)
     (foreach cname cnames
-      (setq row (_pvtCornersReadRow sdb cname))
+      (setq row (_pvtCornersReadRow sdb cname allTests))
       (cond
         (row (setq rows (cons row rows)))))
     (setq rows (reverse rows))
@@ -567,9 +598,10 @@
 )
 
 
-(procedure (_pvtCornersPushRow sdb rowObj)
+(procedure (_pvtCornersPushRow sdb rowObj allTests)
   ;; Push one parsed JSON row table into the SDB. Returns (pvtOk t) on
-  ;; success or pvtErr on failure.
+  ;; success or pvtErr on failure. `allTests` is every test name — used to
+  ;; apply the row's per-corner Test scope.
   (prog (rowName varsObj modelsList ch varKeys mh
          mFile mFileAbs mBlock mTest mSection)
     (setq rowName (_pvtCornersExtractJsonField rowObj "row_name"))
@@ -643,6 +675,23 @@
                           (sec
                             (errset (axlSetModelSection mh sec) nil)))))))))))))
 
+    ;; --- tests axis (per-corner Test scope, 2026 UX) -----------------------
+    ;; A non-empty 'tests' list scopes the corner to exactly those tests;
+    ;; absent / empty restores the all-tests default. Cadence has no direct
+    ;; "scope" call — disable the complement test-by-test.
+    ;; Ref: axlSetCornerTestEnabled adexlSKILLref.pdf p.339.
+    (let ((testsField (_pvtCornersExtractJsonField rowObj "tests")))
+      (cond
+        ((and (listp testsField) testsField)
+          (foreach tn allTests
+            (errset
+              (axlSetCornerTestEnabled ch tn
+                (cond ((member tn testsField) t) (t nil)))
+              nil)))
+        (t
+          (foreach tn allTests
+            (errset (axlSetCornerTestEnabled ch tn t) nil)))))
+
     (return (pvtOk t))
   )
 )
@@ -703,7 +752,8 @@
   ;;                        adds — just parse-validate).
   ;; Returns (pvtOk t_unionName) on success or pvtErr.
   (prog (sessResult resolvedSess sdb parsed rowsArr rowResult rowFailed
-         unionName liveCorners liveNames keepNames toDelete delResult)
+         unionName liveCorners liveNames keepNames toDelete delResult
+         allTests)
     (cond
       ((null unionJsonPath)
         (return (pvtErr 'pvt_validation
@@ -763,6 +813,10 @@
                   "axlGetMainSetupDB returned nil for the resolved session"
                   nil))))
 
+    ;; Global test list — each row applies its Test scope against this.
+    ;; Ref: axlGetTests adexlSKILLref.pdf p.282.
+    (setq allTests (cadr (car (errset (axlGetTests sdb) nil))))
+
     ;; --- replace pass: drop live rows not in the keep set ----------------
     (cond
       (replace
@@ -792,7 +846,7 @@
     (foreach rowObj rowsArr
       (cond
         ((null rowFailed)
-          (setq rowResult (_pvtCornersPushRow sdb rowObj))
+          (setq rowResult (_pvtCornersPushRow sdb rowObj allTests))
           (cond
             ((pvtIsErr rowResult) (setq rowFailed rowResult))))))
 

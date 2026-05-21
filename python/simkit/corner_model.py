@@ -1070,6 +1070,7 @@ def materialize_column_rows(
             sweep_var_keys=frozenset(sweep),
             sweep_model_indices=column.model_sweep_indices,
             enabled=column.enabled,
+            tests=column.tests,
         )]
 
     rows: list[UnionRow] = []
@@ -1086,6 +1087,7 @@ def materialize_column_rows(
             sweep_var_keys=frozenset(sweep),
             sweep_model_indices=column.model_sweep_indices,
             enabled=column.enabled,
+            tests=column.tests,
         ))
     return rows
 
@@ -1247,6 +1249,7 @@ def make_unmanaged_column(row: UnionRow) -> Column:
         name=row.row_name,
         pvt_sweep_keys=row.sweep_var_keys,
         model_sweep_indices=row.sweep_model_indices,
+        tests=row.tests,
     )
 
 
@@ -1272,10 +1275,30 @@ def empty_cornermodel(
     )
 
 
+def union_var_order(union: Union) -> tuple[str, ...]:
+    """Reconstruct Maestro's global variable-row order from a pulled union.
+
+    ``axlGetVars`` lists each corner's variables in Maestro's display order,
+    so merging the per-row sequences — keeping every row's relative order —
+    recovers the global order even when no single corner has every variable.
+    """
+    order: list[str] = []
+    for row in union.rows:
+        prev = -1
+        for var in row.vars:
+            if var in order:
+                prev = order.index(var)
+            else:
+                prev += 1
+                order.insert(prev, var)
+    return tuple(order)
+
+
 def cornermodel_from_union(union: Union, name: str = "corners") -> CornerModel:
     """Seed a cornermodel from a ``Union`` — every union row becomes an
     unmanaged column. Used to populate the Corners tab from Maestro's
-    current corners when the project has no ``.cornermodel.json`` yet."""
+    current corners when the project has no ``.cornermodel.json`` yet. The
+    variable-row order is adopted from Maestro (2026 UX item 3)."""
     return CornerModel(
         cornermodel_schema_version=1,
         name=name,
@@ -1283,6 +1306,7 @@ def cornermodel_from_union(union: Union, name: str = "corners") -> CornerModel:
         testbench_id=union.testbench_id,
         modes={},
         columns=tuple(make_unmanaged_column(r) for r in union.rows),
+        var_order=union_var_order(union),
     )
 
 

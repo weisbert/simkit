@@ -8,6 +8,7 @@ capture — rather than a hand-authored dict.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -259,6 +260,41 @@ def test_make_unmanaged_column_from_foreign(tmp_path):
     assert col.name == "TT_pvt"
     assert col.pvt_vars["VDD"] == ("3", "2.8")
     assert "VDD" in col.pvt_sweep_keys
+
+
+def test_make_unmanaged_column_carries_tests():
+    col = make_unmanaged_column(union.UnionRow(
+        row_name="Foreign", vars={"temperature": ("55",)}, models=(),
+        tests=("Test", "Test_trans"),
+    ))
+    assert col.tests == ("Test", "Test_trans")
+
+
+def test_materialize_carries_column_tests(tmp_path):
+    cm = _write_load(tmp_path, _base())
+    scoped = replace(cm.columns[0], tests=("Test",))
+    cm2 = replace(cm, columns=(scoped,) + cm.columns[1:])
+    u = materialize(cm2)
+    assert u.rows[0].tests == ("Test",)
+    assert u.rows[1].tests == ()
+
+
+def test_union_var_order_merges_row_orderings():
+    from simkit.corner_model import union_var_order
+    u = union.Union(
+        union_schema_version=1, name="n", project="p", testbench_id="t",
+        rows=(
+            union.UnionRow(row_name="A",
+                           vars={"temperature": ("55",), "vdd": ("0.9",)},
+                           models=()),
+            union.UnionRow(row_name="B",
+                           vars={"temperature": ("-40",), "gain": ("10",),
+                                 "vdd": ("1.1",)},
+                           models=()),
+        ),
+    )
+    # row B places `gain` before `vdd`; the merge respects that.
+    assert union_var_order(u) == ("temperature", "gain", "vdd")
 
 
 def test_adopt_column_three_way_split():

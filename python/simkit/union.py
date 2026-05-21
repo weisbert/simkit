@@ -71,6 +71,10 @@ class UnionRow:
     # the 2026-05-13 pull extension. Captured via axlGetEnabled on pull;
     # emitted by `pvt corners build` to the CSV `Enable,...` row.
     enabled: bool = True
+    # Tests the corner is scoped to (the enabled-tests list). Empty means
+    # the corner runs in every test — the Maestro default. Captured on pull
+    # as all tests minus axlGetCornerDisabledTests.
+    tests: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -233,6 +237,17 @@ def _validate_row(path: Path, idx: int, raw: object) -> UnionRow:
             f"{where}: 'enabled' must be a JSON boolean (got {type(enabled).__name__})"
         )
 
+    raw_tests = raw.get("tests", [])
+    if not isinstance(raw_tests, list):
+        raise UnionValidationError(f"{where}: 'tests' must be a JSON array")
+    tests_out: list[str] = []
+    for t in raw_tests:
+        if not isinstance(t, str) or not t.strip():
+            raise UnionValidationError(
+                f"{where}: each 'tests' entry must be a non-empty string"
+            )
+        tests_out.append(t)
+
     vars_out: dict[str, tuple[str, ...]] = {}
     sweep_var_keys: set[str] = set()
     for vname, vval in raw_vars.items():
@@ -265,6 +280,7 @@ def _validate_row(path: Path, idx: int, raw: object) -> UnionRow:
         sweep_var_keys=frozenset(sweep_var_keys),
         sweep_model_indices=frozenset(sweep_model_indices),
         enabled=enabled,
+        tests=tuple(tests_out),
     )
 
 

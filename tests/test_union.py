@@ -644,5 +644,32 @@ class FileAbsFieldTests(TempDirMixin, unittest.TestCase):
         self.assertIn("must be a string if present", str(ctx.exception))
 
 
+class TestsFieldTests(TempDirMixin, unittest.TestCase):
+    """The per-corner ``tests`` scope field (2026 UX item 5)."""
+
+    def test_tests_absent_defaults_empty(self):
+        u = load_union(self._write(_min_doc()))
+        self.assertEqual(u.rows[0].tests, ())
+
+    def test_tests_parsed(self):
+        doc = _min_doc()
+        doc["rows"][0]["tests"] = ["Test", "Test_trans"]
+        u = load_union(self._write(doc))
+        self.assertEqual(u.rows[0].tests, ("Test", "Test_trans"))
+
+    def test_tests_not_array_rejected(self):
+        doc = _min_doc()
+        doc["rows"][0]["tests"] = "Test"
+        with self.assertRaises(UnionValidationError) as ctx:
+            load_union(self._write(doc))
+        self.assertIn("'tests' must be a JSON array", str(ctx.exception))
+
+    def test_tests_blank_entry_rejected(self):
+        doc = _min_doc()
+        doc["rows"][0]["tests"] = ["Test", "  "]
+        with self.assertRaises(UnionValidationError):
+            load_union(self._write(doc))
+
+
 if __name__ == "__main__":
     unittest.main()

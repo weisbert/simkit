@@ -969,7 +969,10 @@ class MainWindow(QMainWindow):
         self.append_log(f"[corner-model] pull queued → {out_path.name}")
 
     def _on_corner_model_pulled(self, sidecar_path: Path) -> None:
-        from simkit.corner_model import classify_pull, cornermodel_from_union
+        from simkit.corner_model import (
+            classify_pull, cornermodel_from_union, set_var_order,
+            union_var_order,
+        )
         try:
             u = load_union(sidecar_path)
         except Exception as exc:  # noqa: BLE001
@@ -992,6 +995,19 @@ class MainWindow(QMainWindow):
             )
             return
         result = classify_pull(cm, u, self.corner_manager.profile())
+        # The variable-row order always follows Maestro on a pull, even while
+        # interactive value reconciliation is still deferred (2026 UX item 3).
+        pulled_order = union_var_order(u)
+        if pulled_order and pulled_order != cm.var_order:
+            reordered = set_var_order(cm, pulled_order)
+            self.corner_manager.load_model(
+                reordered, self.corner_manager.profile(),
+                self._cornermodel_path,
+            )
+            self._persist_cornermodel(reordered)
+            self.append_log(
+                "[corner-model] variable order re-synced to Maestro"
+            )
         self.append_log(
             f"[corner-model] pull classified: {len(result.matched)} matched, "
             f"{len(result.foreign)} foreign, {len(result.missing)} missing — "
@@ -2021,6 +2037,8 @@ def _serialize_union(u: Any) -> str:
             row_dict["models"] = [_model_to_jsonable(m) for m in r.models]
         if not r.enabled:
             row_dict["enabled"] = False
+        if r.tests:
+            row_dict["tests"] = list(r.tests)
         rows_out.append(row_dict)
     return json.dumps(
         {
