@@ -27,6 +27,7 @@ from simkit.corner_model import (
     make_unmanaged_column,
     materialize,
     materialize_column,
+    mode_from_column,
     save_cornermodel,
     set_column_model_section,
     set_mode_var,
@@ -293,6 +294,49 @@ def test_set_column_model_section_unknown_file_raises(tmp_path):
     cm = _write_load(tmp_path, _base())
     with pytest.raises(CornerModelValidationError):
         set_column_model_section(cm, 0, "nonexistent.scs", "ff")
+
+
+# --- New Mode from a column ----------------------------------------------
+
+
+def _unmanaged_cm(tmp_path: Path) -> CornerModel:
+    return _write_load(tmp_path, {
+        "cornermodel_schema_version": 1, "name": "lo_corners",
+        "project": "1AXX", "testbench_id": "sim_yusheng/Test/maestro",
+        "modes": {},
+        "columns": [
+            {"mode": None, "name": "RX_TT", "enabled": True,
+             "pvt_vars": {"d_en": "1", "div_sel": "2", "temperature": "55"},
+             "models": [{"file": "rf018.scs", "section": "tt"}]},
+        ],
+    })
+
+
+def test_mode_from_column_classifies_and_adopts(tmp_path):
+    cm = _unmanaged_cm(tmp_path)
+    out = mode_from_column(
+        cm, 0, "BT_2G_RX", {"d_en": "1", "div_sel": "2"}, "TT",
+    )
+    assert out.modes["BT_2G_RX"].vars == {"d_en": "1", "div_sel": "2"}
+    col = out.columns[0]
+    assert col.mode == "BT_2G_RX"
+    assert effective_name(col) == "BT_2G_RX_TT"
+    # registers left pvt_vars; temperature stayed PVT; models preserved
+    assert set(col.pvt_vars) == {"temperature"}
+    assert col.models[0].file == "rf018.scs"
+
+
+def test_mode_from_column_keeps_edited_register_value(tmp_path):
+    cm = _unmanaged_cm(tmp_path)
+    # the user edited d_en's value away from the column's "1"
+    out = mode_from_column(cm, 0, "BT_2G_RX", {"d_en": "9"}, "TT")
+    assert out.modes["BT_2G_RX"].vars == {"d_en": "9"}
+
+
+def test_mode_from_column_no_registers_raises(tmp_path):
+    cm = _unmanaged_cm(tmp_path)
+    with pytest.raises(CornerModelValidationError):
+        mode_from_column(cm, 0, "BT_2G_RX", {}, "TT")
 
 
 # --- serialisation round-trip --------------------------------------------

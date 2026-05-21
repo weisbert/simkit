@@ -517,7 +517,7 @@ class MainWindow(QMainWindow):
         chosen = QFileDialog.getExistingDirectory(
             self,
             "New Project — choose the project directory",
-            str(Path.home()),
+            str(Path.cwd()),
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
         )
         if not chosen:
@@ -594,7 +594,7 @@ class MainWindow(QMainWindow):
         chosen = QFileDialog.getExistingDirectory(
             self,
             "Open Project — select the .pvtproject directory",
-            str(Path.home()),
+            str(Path.cwd()),
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
         )
         if not chosen:
@@ -625,7 +625,7 @@ class MainWindow(QMainWindow):
         step; load_module already populates the tab on open."""
         chosen, _ = QFileDialog.getOpenFileName(
             self, "Open Corner Model — select a .cornermodel.json",
-            str(Path.home()), "Corner model (*.cornermodel.json)",
+            str(Path.cwd()), "Corner model (*.cornermodel.json)",
         )
         if chosen:
             self.open_corner_model(Path(chosen))

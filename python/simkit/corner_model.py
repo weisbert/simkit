@@ -1471,6 +1471,54 @@ def add_mode(
     return replace(model, modes=new_modes)
 
 
+def mode_from_column(
+    model: CornerModel, column_index: int, mode_name: str,
+    register_vars: dict[str, str], pvt_label: str,
+) -> CornerModel:
+    """Create a new mode by classifying an existing column's variables.
+
+    ``register_vars`` (var -> scalar value) becomes the new mode's register
+    set; the source column is converted to a managed column of that mode,
+    keeping only its non-register variables as per-column PVT vars. This is
+    the GUI's "New Mode from a column" action — the user has already defined
+    every variable in Cadence, so a mode is *derived* from a corner rather
+    than retyped (spec §7.2, 2026 UX feedback).
+    """
+    if not _PVT_LABEL_RE.match(pvt_label):
+        raise CornerModelValidationError(
+            f"mode_from_column: pvt_label {pvt_label!r} must match "
+            f"^[A-Za-z0-9_]+$"
+        )
+    column = model.columns[column_index]
+    # add_mode validates the mode name + register var names / values.
+    new_model = add_mode(model, mode_name, register_vars)
+    kept_pvt = {
+        v: tup for v, tup in column.pvt_vars.items()
+        if v not in register_vars
+    }
+    kept_sweep = frozenset(column.pvt_sweep_keys & set(kept_pvt))
+    managed = Column(
+        mode=mode_name, enabled=column.enabled, pvt_vars=kept_pvt,
+        models=column.models, pvt_label=pvt_label,
+        pvt_sweep_keys=kept_sweep,
+        model_sweep_indices=column.model_sweep_indices,
+        correlated_axes=column.correlated_axes,
+    )
+    new_name = effective_name(managed)
+    others = {
+        effective_name(c) for i, c in enumerate(new_model.columns)
+        if i != column_index
+    }
+    if new_name in others:
+        raise CornerModelValidationError(
+            f"mode_from_column: column name {new_name!r} collides with an "
+            f"existing column"
+        )
+    cols = list(new_model.columns)
+    cols[column_index] = managed
+    return replace(new_model, columns=tuple(cols))
+
+
 def add_column(model: CornerModel, column: Column) -> CornerModel:
     """Return a new cornermodel with ``column`` appended (spec §7.2 New column).
 

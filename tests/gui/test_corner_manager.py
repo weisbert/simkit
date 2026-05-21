@@ -72,7 +72,8 @@ class CornerManagerViewTest(unittest.TestCase):
 
     def test_displays_modes_and_columns(self):
         self.assertEqual(self.view.modes_list.count(), 1)
-        self.assertEqual(self.view.table_model.columnCount(), 2)
+        # 2 corners + the name column + the Filter-corner column
+        self.assertEqual(self.view.table_model.columnCount(), 4)
         # modes panel shows the selected mode's register vars
         self.assertEqual(self.view.mode_vars.rowCount(), 2)
 
@@ -104,24 +105,48 @@ class CornerManagerViewTest(unittest.TestCase):
             i for i in range(model.rowCount())
             if model.var_at(i) == "d_en_dummy"
         )
+        # corner data columns start at model column 2
         self.assertEqual(
-            model.data(model.index(row, 0), Qt.DisplayRole), "0"
+            model.data(model.index(row, 2), Qt.DisplayRole), "0"
         )
         self.assertEqual(
-            model.data(model.index(row, 1), Qt.DisplayRole), "0"
+            model.data(model.index(row, 3), Qt.DisplayRole), "0"
         )
 
-    def test_new_mode_adds_a_mode(self):
+    def test_new_mode_from_column(self):
+        # _make_cm has columns, so New Mode derives a mode from a column.
         with mock.patch.object(
-            cm_mod.QInputDialog, "getText",
-            return_value=("BT_2G_TX", True),
+            cm_mod._NewModeDialog, "exec_",
+            return_value=cm_mod.QDialog.Accepted,
         ), mock.patch.object(
-            cm_mod.QInputDialog, "getMultiLineText",
-            return_value=("d_en_dummy=0\ndiv_sel=4", True),
+            cm_mod._NewModeDialog, "selected_column_index", return_value=0,
+        ), mock.patch.object(
+            cm_mod._NewModeDialog, "mode_name", return_value="BT_2G_TX",
+        ), mock.patch.object(
+            cm_mod._NewModeDialog, "register_vars",
+            return_value={"temperature": "55"},
+        ), mock.patch.object(
+            cm_mod._NewModeDialog, "pvt_label", return_value="TT",
         ):
             self.view._on_new_mode()
         self.assertEqual(self.view.modes_list.count(), 2)
         self.assertIn("BT_2G_TX", self.view.cornermodel().modes)
+
+    def test_new_mode_manual_fallback_when_no_columns(self):
+        from simkit.corner_model import empty_cornermodel
+        blank = empty_cornermodel(
+            name="x", project="1AXX", testbench_id="l/c/v",
+        )
+        view = CornerManagerView(blank)
+        self.addCleanup(view.deleteLater)
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=("M1", True),
+        ), mock.patch.object(
+            cm_mod.QInputDialog, "getMultiLineText",
+            return_value=("d_en=1", True),
+        ):
+            view._on_new_mode()
+        self.assertIn("M1", view.cornermodel().modes)
 
     def test_new_column_adds_a_column(self):
         with mock.patch.object(
@@ -135,7 +160,7 @@ class CornerManagerViewTest(unittest.TestCase):
             side_effect=[("temperature=-40", True), ("rf018.scs: ff", True)],
         ):
             self.view._on_new_column()
-        self.assertEqual(self.view.table_model.columnCount(), 3)
+        self.assertEqual(self.view.table_model.columnCount(), 5)
         new_col = self.view.cornermodel().columns[-1]
         self.assertEqual(new_col.models[0].file, "rf018.scs")
         self.assertEqual(new_col.models[0].section, ("ff",))
@@ -221,7 +246,7 @@ class CornerManagerStage2Test(unittest.TestCase):
         ):
             self.view._on_apply_template()
         # seed + VCO_TT + VCO_PVT
-        self.assertEqual(self.view.table_model.columnCount(), 3)
+        self.assertEqual(self.view.table_model.columnCount(), 5)
         self.assertTrue(
             any(b.template == "vco_full"
                 for b in self.view.cornermodel().template_bindings)
@@ -250,7 +275,7 @@ class CornerManagerStage2Test(unittest.TestCase):
             self.view._on_unbind_template()
         self.assertEqual(self.view.cornermodel().template_bindings, ())
         # columns kept (D3 freeze)
-        self.assertEqual(self.view.table_model.columnCount(), 3)
+        self.assertEqual(self.view.table_model.columnCount(), 5)
 
 
 def _make_stage3_cm() -> "object":
@@ -402,17 +427,19 @@ class CornerManagerStage4Test(unittest.TestCase):
         self.assertTrue(rx.enabled)
         self.assertFalse(tx.enabled)
 
-    def test_column_filter_by_name_hides_columns(self):
+    def test_corner_name_filter_hides_columns(self):
         self.view.resize(800, 400)
         self.view.show()
         _QAPP.processEvents()
-        self.view.filter_edit.setText("BT_2G_RX")
-        # BT_2G_TX_TT column hidden, BT_2G_RX_TT shown
+        model = self.view.table_model
+        # the corner-name filter cell is (0, 1)
+        model.setData(model.index(0, 1), "BT_2G_RX", Qt.EditRole)
+        _QAPP.processEvents()
         hidden = [
             self.view.table.isColumnHidden(c)
-            for c in range(self.view.table_model.columnCount())
+            for c in range(2, model.columnCount())
         ]
-        self.assertEqual(hidden.count(True), 1)
+        self.assertEqual(hidden.count(True), 1)   # BT_2G_TX_TT hidden
         self.view.hide()
 
     def test_filter_to_run_set(self):
@@ -420,13 +447,13 @@ class CornerManagerStage4Test(unittest.TestCase):
         _QAPP.processEvents()
         self.view.run_sets_list.setCurrentRow(0)
         self.view._on_filter_set()
-        names = [
-            (self.view.table_model.column_at(c).mode,
-             self.view.table.isColumnHidden(c))
-            for c in range(self.view.table_model.columnCount())
+        model = self.view.table_model
+        visible = [
+            model.column_at(c).mode
+            for c in range(2, model.columnCount())
+            if not self.view.table.isColumnHidden(c)
         ]
         # only BT_2G_RX_TT (in RX_only) visible
-        visible = [m for m, h in names if not h]
         self.assertEqual(visible, ["BT_2G_RX"])
         self.view.hide()
 
@@ -481,26 +508,33 @@ class CornerManagerStage5Test(unittest.TestCase):
         self._warning_mock = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_row_filter_hides_nonmatching_rows(self):
+    def test_variable_name_filter_hides_rows(self):
+        from simkit.gui.corner_filter import FilterMode
         self.view.resize(800, 400)
         self.view.show()
         _QAPP.processEvents()
-        self.view.row_filter_edit.setText("ldo*")
         model = self.view.table_model
+        # the variable-name filter cell is (0, 0)
+        model.setData(model.index(0, 0), "ldo*", Qt.EditRole)
+        model.set_filter_options(0, 0, mode=FilterMode.WILDCARD)
+        _QAPP.processEvents()
         visible = [
-            model.var_at(r) for r in range(model.rowCount())
+            model.var_at(r) for r in range(1, model.rowCount())
             if not self.view.table.isRowHidden(r)
         ]
         self.assertEqual(visible, ["ldo_vset"])
         self.view.hide()
 
-    def test_row_filter_or_expression(self):
+    def test_variable_name_filter_any_words(self):
+        from simkit.gui.corner_filter import FilterMode
         self.view.show()
         _QAPP.processEvents()
-        self.view.row_filter_edit.setText("ldo or div")
         model = self.view.table_model
+        model.setData(model.index(0, 0), "ldo div", Qt.EditRole)
+        model.set_filter_options(0, 0, mode=FilterMode.ANY_WORDS)
+        _QAPP.processEvents()
         visible = {
-            model.var_at(r) for r in range(model.rowCount())
+            model.var_at(r) for r in range(1, model.rowCount())
             if not self.view.table.isRowHidden(r)
         }
         self.assertEqual(visible, {"ldo_vset", "div12"})
@@ -509,12 +543,16 @@ class CornerManagerStage5Test(unittest.TestCase):
     def test_check_status_label_present(self):
         self.assertIn("Check", self.view.check_label.text())
 
-    def test_row_drag_persists_var_order(self):
+    def test_clear_filters_button_resets_visibility(self):
         self.view.show()
         _QAPP.processEvents()
-        header = self.view.table.verticalHeader()
-        header.moveSection(0, header.count() - 1)   # drag row 0 to the end
-        self.assertNotEqual(self.view.cornermodel().var_order, ())
+        model = self.view.table_model
+        model.setData(model.index(0, 0), "nomatch_xyz", Qt.EditRole)
+        _QAPP.processEvents()
+        self.view.btn_clear_filters.click()
+        _QAPP.processEvents()
+        self.assertFalse(model.has_active_filters())
+        self.assertFalse(self.view.table.isRowHidden(1))
         self.view.hide()
 
     def test_export_then_import_library(self):
@@ -716,18 +754,22 @@ class CornerManagerAuthoringTest(unittest.TestCase):
         self.assertIn("All_TT", run_sets)
         self.assertEqual(run_sets["All_TT"].columns, ("BT_2G_RX_TT",))
 
-    def test_column_filter_supports_or_grammar(self):
-        # pain point f — the column filter shares the row filter's grammar.
-        self.view.filter_edit.setText("TT or SS")
+    def test_corner_name_filter_modes(self):
+        from simkit.gui.corner_filter import FilterMode
+        model = self.view.table_model
+        # _make_basic_cm has BT_2G_RX_TT and BT_2G_RX_SS
+        model.setData(model.index(0, 1), "TT SS", Qt.EditRole)
+        model.set_filter_options(0, 1, mode=FilterMode.ANY_WORDS)
         hidden = [
             self.view.table.isColumnHidden(c)
-            for c in range(self.view.table_model.columnCount())
+            for c in range(2, model.columnCount())
         ]
         self.assertEqual(hidden, [False, False])
-        self.view.filter_edit.setText("TT")
+        model.set_filter_options(0, 1, mode=FilterMode.CONTAINS)
+        model.setData(model.index(0, 1), "TT", Qt.EditRole)
         hidden = [
             self.view.table.isColumnHidden(c)
-            for c in range(self.view.table_model.columnCount())
+            for c in range(2, model.columnCount())
         ]
         # only the BT_2G_RX_TT column stays visible
         self.assertEqual(hidden.count(False), 1)

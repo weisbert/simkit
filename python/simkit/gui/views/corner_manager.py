@@ -13,7 +13,6 @@ project has none yet), so the Corners tab is usable with no load step.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 from pathlib import Path
 from typing import Optional
@@ -21,8 +20,10 @@ from typing import Optional
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -30,6 +31,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableView,
@@ -64,12 +66,13 @@ from simkit.corner_model import (
     import_library,
     library_to_dict,
     load_library,
+    mode_from_column,
     run_set_membership,
     set_mode_var,
-    set_var_order,
     set_variant_var,
     unbind_template,
 )
+from simkit.gui.corner_filter import MENU_ORDER
 from simkit.gui.corner_model_table import CornerModelTableModel
 
 
@@ -92,10 +95,10 @@ class CornerManagerView(QWidget):
         self._loading_mode_vars = False
         self._loading_variant_vars = False
         self._set_filter: Optional[str] = None
-        self._reordering = False
         self._build_ui()
         self._refresh_side_panels()
         self._refresh_check_status()
+        self._apply_filters()
 
     def profile(self) -> object:
         """The bound PVT profile (or None) — main_window reads it for push."""
@@ -167,37 +170,36 @@ class CornerManagerView(QWidget):
             top.addWidget(b)
         outer.addLayout(top)
 
-        filt = QHBoxLayout()
-        filt.addWidget(QLabel("Column filter:"))
-        self.filter_edit = QLineEdit()
-        self.filter_edit.setPlaceholderText(
-            "Filter columns by name — supports and / or / * (e.g. RX or TX)"
+        hint = QHBoxLayout()
+        hint.addWidget(QLabel(
+            "Filters are embedded in the table — type in a Filter cell; "
+            "right-click it to pick the match mode."
+        ))
+        hint.addStretch(1)
+        self.btn_clear_filters = QPushButton("Clear filters")
+        self.btn_clear_filters.setToolTip(
+            "Clear every embedded filter cell and the run-set filter."
         )
-        filt.addWidget(self.filter_edit)
-        self.btn_clear_filter = QPushButton("Show all columns")
-        filt.addWidget(self.btn_clear_filter)
-        outer.addLayout(filt)
-
-        rowfilt = QHBoxLayout()
-        rowfilt.addWidget(QLabel("Row filter:"))
-        self.row_filter_edit = QLineEdit()
-        self.row_filter_edit.setPlaceholderText(
-            "Filter rows by variable / model-file name — supports "
-            "and / or / * wildcards (e.g. ldo* or div12)"
-        )
-        rowfilt.addWidget(self.row_filter_edit)
-        outer.addLayout(rowfilt)
+        hint.addWidget(self.btn_clear_filters)
+        outer.addLayout(hint)
 
         # The corner table is the subject of the view — it fills the body.
+        # Its filter frame (row 0, columns 0-1) is woven into the grid.
         self.table = QTableView()
         self.table_model = CornerModelTableModel(
             self._cm, self._profile, self
         )
         self.table.setModel(self.table_model)
         self.table.verticalHeader().setDefaultSectionSize(24)
-        # Stage 5: drag variable rows to reorder (pain-point g).
-        self.table.verticalHeader().setSectionsMovable(True)
+        # Variable names live in column 0 now — the row header is redundant.
+        self.table.verticalHeader().hide()
+        # #3.4 — columns are interactively resizable.
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Interactive
+        )
+        self.table.horizontalHeader().setDefaultSectionSize(96)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         outer.addWidget(self.table, 1)
 
         self.check_label = QLabel()
@@ -241,12 +243,11 @@ class CornerManagerView(QWidget):
         self.btn_unbind_template.clicked.connect(self._on_unbind_template)
         self.btn_new_run_set.clicked.connect(self._on_new_run_set)
         self.btn_apply_run_set.clicked.connect(self._on_apply_run_set)
-        self.filter_edit.textChanged.connect(self._apply_column_filter)
         self.btn_filter_set.clicked.connect(self._on_filter_set)
-        self.btn_clear_filter.clicked.connect(self._on_clear_filter)
-        self.row_filter_edit.textChanged.connect(self._apply_row_filter)
-        self.table.verticalHeader().sectionMoved.connect(
-            self._on_row_section_moved
+        self.btn_clear_filters.clicked.connect(self._on_clear_all_filters)
+        self.table_model.filtersChanged.connect(self._apply_filters)
+        self.table.customContextMenuRequested.connect(
+            self._on_table_context_menu
         )
         self.btn_export_lib.clicked.connect(self._on_export_library)
         self.btn_import_lib.clicked.connect(self._on_import_library)
@@ -410,16 +411,10 @@ class CornerManagerView(QWidget):
         self._source_path = source_path
         self._set_filter = None
         self.title_label.setText(self._title_text())
-        self.filter_edit.blockSignals(True)
-        self.row_filter_edit.blockSignals(True)
-        self.filter_edit.clear()
-        self.row_filter_edit.clear()
-        self.filter_edit.blockSignals(False)
-        self.row_filter_edit.blockSignals(False)
+        self.table_model.clear_all_filters()
         self.table_model.set_cornermodel(model, profile)
         self._refresh_side_panels()
-        self._apply_column_filter()
-        self._apply_row_filter()
+        self._apply_filters()
         self._refresh_check_status()
 
     # --- modes panel -----------------------------------------------------
@@ -524,32 +519,66 @@ class CornerManagerView(QWidget):
         name = self._selected_run_set_name()
         if name is None:
             QMessageBox.warning(
-                self, "Column filter", "Select a run set first."
+                self, "Filter to run set", "Select a run set first."
             )
             return
         self._set_filter = name
-        self._apply_column_filter()
+        self._apply_filters()
 
-    def _on_clear_filter(self) -> None:
+    def _on_clear_all_filters(self) -> None:
         self._set_filter = None
-        self.filter_edit.clear()
-        self._apply_column_filter()
+        self.table_model.clear_all_filters()
+        self._apply_filters()
 
-    def _apply_column_filter(self) -> None:
-        # The column filter shares the row filter's and / or / * grammar
-        # (pain point f) so the two filters read consistently.
-        expr = self.filter_edit.text()
+    def _apply_filters(self) -> None:
+        """Re-apply row / column visibility from the table's embedded filter
+        cells, ANDed with the active run-set filter (if any)."""
+        model = self.table_model
         members = (
             run_set_membership(self._cm, self._set_filter)
             if self._set_filter in self._cm.run_sets else None
         )
-        for c in range(self.table_model.columnCount()):
-            col = self.table_model.column_at(c)
-            name = effective_name(col)
-            hide = not self._row_matches(name, expr)
-            if members is not None and name not in members:
-                hide = True
-            self.table.setColumnHidden(c, hide)
+        n_cols = model.columnCount() - 2
+        n_rows = model.rowCount() - 1
+        for j in range(n_cols):
+            visible = model.is_data_col_visible(j)
+            if visible and members is not None:
+                col = model.column_at(j + 2)
+                if col is not None and effective_name(col) not in members:
+                    visible = False
+            self.table.setColumnHidden(j + 2, not visible)
+        for i in range(n_rows):
+            self.table.setRowHidden(i + 1, not model.is_data_row_visible(i))
+
+    def _on_table_context_menu(self, pos) -> None:
+        """Right-click a filter cell → pick its match mode / case flag."""
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        matcher = self.table_model.matcher_at(index.row(), index.column())
+        if matcher is None:
+            return  # not a filter cell
+        row, col = index.row(), index.column()
+        menu = QMenu(self)
+        for mode in MENU_ORDER:
+            act = menu.addAction(mode.value)
+            act.setCheckable(True)
+            act.setChecked(mode is matcher.mode)
+            act.triggered.connect(
+                lambda _c, m=mode: self.table_model.set_filter_options(
+                    row, col, mode=m
+                )
+            )
+        menu.addSeparator()
+        cs = menu.addAction("Case sensitive")
+        cs.setCheckable(True)
+        cs.setChecked(matcher.case_sensitive)
+        cs.triggered.connect(
+            lambda checked: self.table_model.set_filter_options(
+                row, col, case_sensitive=checked
+            )
+        )
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
 
     # --- variants panel --------------------------------------------------
 
@@ -777,8 +806,7 @@ class CornerManagerView(QWidget):
         self._cm = new_cm
         self.table_model.set_cornermodel(new_cm)
         self._refresh_side_panels()
-        self._apply_column_filter()  # the model reset un-hid every column
-        self._apply_row_filter()
+        self._apply_filters()  # the model reset un-hid every row / column
         self._refresh_check_status()
         self.cornermodel_edited.emit(new_cm)
 
@@ -787,12 +815,11 @@ class CornerManagerView(QWidget):
         itself; just keep our copy + side panels in sync and notify."""
         self._cm = new_cm
         self._refresh_side_panels()
-        self._apply_column_filter()
-        self._apply_row_filter()
+        self._apply_filters()
         self._refresh_check_status()
         self.cornermodel_edited.emit(new_cm)
 
-    # --- Stage 5: row filter / row reorder / check / library ------------
+    # --- check status / library -----------------------------------------
 
     def _refresh_check_status(self) -> None:
         base = (
@@ -809,50 +836,6 @@ class CornerManagerView(QWidget):
             self.check_label.setText(
                 f"Check: {len(issues)} issue(s) — {head}"
             )
-
-    @staticmethod
-    def _row_matches(var: str, expr: str) -> bool:
-        expr = expr.strip().lower()
-        if not expr:
-            return True
-        var_l = var.lower()
-        for or_term in expr.split(" or "):
-            ok = True
-            for and_term in or_term.split(" and "):
-                t = and_term.strip()
-                if not t:
-                    continue
-                if "*" in t or "?" in t:
-                    if not fnmatch.fnmatch(var_l, t):
-                        ok = False
-                        break
-                elif t not in var_l:
-                    ok = False
-                    break
-            if ok:
-                return True
-        return False
-
-    def _apply_row_filter(self) -> None:
-        expr = self.row_filter_edit.text()
-        for r in range(self.table_model.rowCount()):
-            label = self.table_model.row_label(r) or ""
-            self.table.setRowHidden(r, not self._row_matches(label, expr))
-
-    def _on_row_section_moved(self, *_args) -> None:
-        if self._reordering:
-            return
-        header = self.table.verticalHeader()
-        ordered: list[str] = []
-        for visual in range(self.table_model.rowCount()):
-            var = self.table_model.var_at(header.logicalIndex(visual))
-            if var is not None:
-                ordered.append(var)
-        self._reordering = True
-        try:
-            self._apply(set_var_order(self._cm, tuple(ordered)))
-        finally:
-            self._reordering = False
 
     def _on_export_library(self) -> None:
         path, ok = QInputDialog.getText(
@@ -972,6 +955,31 @@ class CornerManagerView(QWidget):
     # --- new mode / new column ------------------------------------------
 
     def _on_new_mode(self) -> None:
+        # A mode is best *derived* from a corner the user already authored in
+        # Cadence — pick a column, classify its vars. Only fall back to typing
+        # vars by hand when the project has no column to derive from yet.
+        if self._cm.columns:
+            self._new_mode_from_column()
+        else:
+            self._new_mode_manual()
+
+    def _new_mode_from_column(self) -> None:
+        dialog = _NewModeDialog(self._cm, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        try:
+            new_cm = mode_from_column(
+                self._cm, dialog.selected_column_index(),
+                dialog.mode_name(), dialog.register_vars(),
+                dialog.pvt_label(),
+            )
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "New mode failed", str(exc))
+            return
+        self._apply(new_cm)
+
+    def _new_mode_manual(self) -> None:
+        # Blank-project bootstrap — there is no column to derive a mode from.
         name, ok = QInputDialog.getText(
             self, "New Mode", "Mode name (^[A-Za-z][A-Za-z0-9_]*$):"
         )
@@ -1126,6 +1134,125 @@ class _ColumnPickerDialog(QDialog):
             for i in range(self._list.count())
             if self._list.item(i).checkState() == Qt.Checked
         )
+
+
+_PVT_NAME_HINTS = (
+    "temperature", "temp", "vdd", "vss", "vcc", "vbat", "vdda",
+    "vddd", "vref", "voltage", "vsup",
+)
+
+
+def _default_is_pvt(var: str) -> bool:
+    """Heuristic for which vars to pre-tick as PVT — temperature / supply
+    names. The user can re-tick freely; this only sets the default."""
+    v = var.lower()
+    return any(hint in v for hint in _PVT_NAME_HINTS)
+
+
+def _derive_mode_label(column_name: str) -> tuple[str, str]:
+    """Guess a (mode, column-label) split from a corner name like
+    ``RX_TT`` → ``("RX", "TT")``. Falls back to the whole name."""
+    mode, _, label = column_name.rpartition("_")
+    if mode and label:
+        return mode, label
+    return column_name, column_name
+
+
+class _NewModeDialog(QDialog):
+    """New Mode authored *from* an existing corner column (痛点 — the user
+    has already defined every variable in Cadence). Tick the PVT variables;
+    the rest, with editable values, become the new mode's registers."""
+
+    def __init__(self, model: CornerModel, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("New Mode — from a corner column")
+        self.setMinimumWidth(460)
+        self._columns = list(model.columns)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel(
+            "Derive a mode from a corner you already authored: tick the "
+            "PVT variables — the rest become the mode's registers."
+        ))
+        form = QFormLayout()
+        self._column_combo = QComboBox()
+        for col in self._columns:
+            self._column_combo.addItem(effective_name(col))
+        form.addRow("Source column:", self._column_combo)
+        self._mode_edit = QLineEdit()
+        form.addRow("New mode name:", self._mode_edit)
+        self._label_edit = QLineEdit()
+        form.addRow("Column label:", self._label_edit)
+        layout.addLayout(form)
+
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(["Variable", "Value", "PVT?"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.Stretch
+        )
+        self._table.verticalHeader().setDefaultSectionSize(24)
+        layout.addWidget(self._table)
+        layout.addWidget(QLabel(
+            "Unticked → mode registers (value editable). "
+            "Ticked → per-column PVT variables."
+        ))
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._column_combo.currentIndexChanged.connect(self._reload)
+        if self._columns:
+            self._reload(0)
+
+    def _reload(self, index: int) -> None:
+        if not (0 <= index < len(self._columns)):
+            return
+        col = self._columns[index]
+        default_mode, default_label = _derive_mode_label(effective_name(col))
+        self._mode_edit.setText(default_mode)
+        self._label_edit.setText(default_label)
+        self._table.setRowCount(0)
+        for var in sorted(col.pvt_vars):
+            tup = col.pvt_vars[var]
+            if len(tup) != 1:
+                continue   # a swept var cannot be a scalar register
+            row = self._table.rowCount()
+            self._table.insertRow(row)
+            name_item = QTableWidgetItem(var)
+            name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            self._table.setItem(row, 0, name_item)
+            self._table.setItem(row, 1, QTableWidgetItem(tup[0]))
+            pvt_item = QTableWidgetItem()
+            pvt_item.setFlags(
+                Qt.ItemIsSelectable | Qt.ItemIsEnabled
+                | Qt.ItemIsUserCheckable
+            )
+            pvt_item.setCheckState(
+                Qt.Checked if _default_is_pvt(var) else Qt.Unchecked
+            )
+            self._table.setItem(row, 2, pvt_item)
+
+    def selected_column_index(self) -> int:
+        return self._column_combo.currentIndex()
+
+    def mode_name(self) -> str:
+        return self._mode_edit.text().strip()
+
+    def pvt_label(self) -> str:
+        return self._label_edit.text().strip()
+
+    def register_vars(self) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for row in range(self._table.rowCount()):
+            if self._table.item(row, 2).checkState() == Qt.Checked:
+                continue   # ticked → PVT, not a register
+            var = self._table.item(row, 0).text()
+            out[var] = self._table.item(row, 1).text().strip()
+        return out
 
 
 def _split_label_line(line: str) -> tuple[str, str]:
