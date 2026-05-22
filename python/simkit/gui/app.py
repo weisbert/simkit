@@ -211,10 +211,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except Exception as exc:  # noqa: BLE001
                 log.warning("could not save module session: %s", exc)
 
-        # Global: update last_visited + recent + geometry.
-        if module_path is not None:
-            app_state.last_visited = str(module_path)
-            app_state.push_recent(str(module_path))
+        # Global: update last_visited + recent + geometry. Read the project
+        # the window currently has open — a project opened mid-session via
+        # File ▸ Open Project is not the `module_path` captured at launch.
+        try:
+            current_project = window.current_project_path() or module_path
+        except Exception as exc:  # noqa: BLE001
+            log.debug("could not read current project path: %s", exc)
+            current_project = module_path
+        if current_project is not None:
+            app_state.last_visited = str(current_project)
+            app_state.push_recent(str(current_project))
         try:
             app_state.window_geometry = _bytes_to_b64(
                 bytes(window.saveGeometry())

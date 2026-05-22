@@ -200,6 +200,20 @@ def test_apply_milestone_without_module_is_safe(qtbot):
     w._apply_milestone("anything", "PDR")  # must not raise
 
 
+def test_current_project_path_tracks_loaded_module(qtbot, tmp_path):
+    # app.py persists last_visited from current_project_path() so a project
+    # opened mid-session re-opens next launch.
+    from simkit.gui.loaders import load_module
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+    assert w.current_project_path() is None
+
+    pvtproject = _build_module_with_run(tmp_path)
+    w.load_module(load_module(pvtproject))
+    assert w.current_project_path() == pvtproject.resolve()
+
+
 # --- Spec A5: Restart bridge button ------------------------------------------
 
 def test_restart_bridge_button_hidden_when_green(qtbot):

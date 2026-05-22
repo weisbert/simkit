@@ -1222,6 +1222,13 @@ class MainWindow(QMainWindow):
     def current_baseline_run_id(self) -> Optional[str]:
         return self.results_tab.baseline_run_id()
 
+    def current_project_path(self) -> Optional[Path]:
+        """The ``.pvtproject`` currently loaded, or None. Tracks projects
+        opened mid-session — not just the one passed at launch."""
+        if self._loaded_module is None:
+            return None
+        return Path(self._loaded_module.project_path)
+
     # ----------------------------------------------------------------
     # Left tree
     # ----------------------------------------------------------------
