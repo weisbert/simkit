@@ -197,18 +197,42 @@ class MainWindow(QMainWindow):
 
         top_bar_layout.addStretch(1)
 
-        # Maestro session input — required for every bridge call. Persisted
-        # via ModuleSession so the user types it once per module.
+        # Maestro session — auto-detected from open Maestro windows; the
+        # user switches with ◀ ▶ instead of typing 'fnxSession0'.
+        self._sessions: list[str] = []
+        self._session_idx: int = -1
+        self._preferred_session: Optional[str] = None
         top_bar_layout.addWidget(QLabel("Session:"))
-        self.session_input = QLineEdit(objectName="sessionInput")
-        self.session_input.setPlaceholderText("e.g. fnxSession0")
-        self.session_input.setToolTip(
-            "Maestro session — the name of an open Maestro simulation "
-            "window. Pull / Run / Apply all act on this session; "
-            "leave it blank and runs cannot start."
+        self.btn_session_prev = QPushButton("◀", objectName="sessionPrev")
+        self.btn_session_prev.setFixedWidth(28)
+        self.btn_session_prev.setToolTip("Previous Maestro session")
+        self.session_label = QLabel(objectName="sessionLabel")
+        self.session_label.setFixedWidth(150)
+        self.session_label.setAlignment(Qt.AlignCenter)
+        self.session_label.setStyleSheet(
+            "QLabel#sessionLabel { border: 1px solid palette(mid); "
+            "padding: 2px; }"
         )
-        self.session_input.setFixedWidth(160)
-        top_bar_layout.addWidget(self.session_input)
+        self.session_label.setToolTip(
+            "The live Maestro session Pull / Run / Apply act on — "
+            "auto-detected from open Maestro windows. Use ◀ ▶ to switch "
+            "between sessions, ⟳ to re-scan."
+        )
+        self.btn_session_next = QPushButton("▶", objectName="sessionNext")
+        self.btn_session_next.setFixedWidth(28)
+        self.btn_session_next.setToolTip("Next Maestro session")
+        self.btn_session_refresh = QPushButton("⟳", objectName="sessionRescan")
+        self.btn_session_refresh.setFixedWidth(28)
+        self.btn_session_refresh.setToolTip(
+            "Re-scan Maestro for open sessions"
+        )
+        for _w in (self.btn_session_prev, self.session_label,
+                   self.btn_session_next, self.btn_session_refresh):
+            top_bar_layout.addWidget(_w)
+        self.btn_session_prev.clicked.connect(lambda: self._step_session(-1))
+        self.btn_session_next.clicked.connect(lambda: self._step_session(1))
+        self.btn_session_refresh.clicked.connect(self._detect_sessions)
+        self._refresh_session_widget()
 
         self.status_dot = QLabel(objectName="statusDot")
         self.status_dot.setFixedSize(14, 14)
@@ -464,7 +488,7 @@ class MainWindow(QMainWindow):
         self._worker = worker
         worker.op_complete.connect(self._on_op_complete)
         worker.op_failed.connect(self._on_op_failed)
-        self._auto_detect_session()
+        self._detect_sessions()
 
         self._error_translator = ErrorTranslator(self)
         worker.op_failed.connect(self._error_translator.on_op_failed)
@@ -1106,7 +1130,16 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Apply persisted ModuleSession bits to the live UI."""
         if session_name:
-            self.session_input.setText(session_name)
+            self._preferred_session = session_name
+            if session_name in self._sessions:
+                self._session_idx = self._sessions.index(session_name)
+            elif not self._sessions:
+                # Detection has not landed yet — show it provisionally so a
+                # Pull right after restore still has a session; the pending
+                # _detect_sessions reconciles the list when it returns.
+                self._sessions = [session_name]
+                self._session_idx = 0
+            self._refresh_session_widget()
         if baseline:
             self.results_tab.set_baseline(baseline)
         if last_review and self._loaded_module is not None:
@@ -1131,35 +1164,60 @@ class MainWindow(QMainWindow):
                     self.left_tree.scrollTo(ci)
                     return
 
-    def _auto_detect_session(self) -> None:
-        """Probe Maestro for the currently-focused session; prefill if empty.
-
-        Asynchronous via BridgeWorker — never blocks the UI thread. Only
-        fills if the user hasn't typed anything yet (don't overwrite their
-        explicit choice). Failures are silent (just no auto-fill).
-        """
+    def _detect_sessions(self) -> None:
+        """Scan Maestro's open windows for live sessions and populate the
+        ◀ ▶ switcher. Asynchronous via BridgeWorker — never blocks the UI;
+        a failure just leaves the switcher empty."""
         if self._worker is None:
             return
-        if self.current_session_name():
-            return  # user already provided one
         self._queue_op(
-            "pvt_runner_get_window_session",
-            on_ok=self._on_session_autodetected,
-            on_err=None,  # silent fail — user can still type manually
+            "pvt_runner_list_window_sessions",
+            on_ok=self._on_sessions_listed,
+            on_err=None,  # silent fail — switcher stays empty
         )
 
-    def _on_session_autodetected(self, sess: object) -> None:
-        if not isinstance(sess, str) or not sess:
+    def _on_sessions_listed(self, result: object) -> None:
+        sessions = sorted({
+            s for s in (result or []) if isinstance(s, str) and s
+        })
+        want = self.current_session_name() or self._preferred_session
+        self._sessions = sessions
+        if want in sessions:
+            self._session_idx = sessions.index(want)
+        else:
+            self._session_idx = 0 if sessions else -1
+        self._refresh_session_widget()
+        if sessions:
+            self.append_log(
+                f"[session] detected {len(sessions)} open: "
+                f"{', '.join(sessions)}"
+            )
+
+    def _refresh_session_widget(self) -> None:
+        n = len(self._sessions)
+        if 0 <= self._session_idx < n:
+            cur = self._sessions[self._session_idx]
+            tag = f"   {self._session_idx + 1}/{n}" if n > 1 else ""
+            self.session_label.setText(f"{cur}{tag}")
+        else:
+            self.session_label.setText("(no session)")
+        self.btn_session_prev.setEnabled(n > 1)
+        self.btn_session_next.setEnabled(n > 1)
+
+    def _step_session(self, delta: int) -> None:
+        n = len(self._sessions)
+        if n == 0:
             return
-        # Race: user may have typed during the probe. Don't clobber.
-        if self.current_session_name():
-            return
-        self.session_input.setText(sess)
-        self.append_log(f"[session] auto-detected '{sess}' from Maestro")
+        self._session_idx = (self._session_idx + delta) % n
+        self._refresh_session_widget()
+        self.append_log(
+            f"[session] switched to '{self._sessions[self._session_idx]}'"
+        )
 
     def current_session_name(self) -> Optional[str]:
-        text = self.session_input.text().strip()
-        return text or None
+        if 0 <= self._session_idx < len(self._sessions):
+            return self._sessions[self._session_idx]
+        return None
 
     def current_baseline_run_id(self) -> Optional[str]:
         return self.results_tab.baseline_run_id()

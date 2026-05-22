@@ -632,6 +632,32 @@ def pvt_runner_get_window_session(
     return str(sess)
 
 
+def pvt_runner_list_window_sessions(
+    *, workspace: Any = None,
+) -> list[str]:
+    """Every open Maestro session, found by walking the Virtuoso window list.
+
+    The GUI session switcher uses this so the user picks a live session with
+    ◀ / ▶ instead of typing 'fnxSession0' verbatim. No SKILL load needed —
+    hiGetWindowList / axlGetWindowSession are built-ins.
+    """
+    ws = workspace if workspace is not None else _open_workspace()
+    try:
+        raw = ws["evalstring"](
+            "(let (out) "
+            "(foreach w (hiGetWindowList) "
+            "(let ((r (errset (axlGetWindowSession w) t))) "
+            "(when (and r (car r) (stringp (car r))) "
+            "(unless (member (car r) out) (setq out (cons (car r) out)))))) "
+            '(buildString out ","))'
+        )
+    except Exception:
+        return []
+    if not isinstance(raw, str) or not raw:
+        return []
+    return sorted({s for s in raw.split(",") if s})
+
+
 def pvt_runner_snapshot_test_state(
     *, session: str, workspace: Any = None,
 ) -> list[tuple[str, bool]]:

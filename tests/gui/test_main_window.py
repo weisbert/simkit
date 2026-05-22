@@ -278,12 +278,23 @@ def test_bridge_status_dot_tooltip_explains_each_state(qtbot):
 
 # --- G-7: vocabulary tooltips + glossary -------------------------------------
 
-def test_session_input_has_explanatory_tooltip(qtbot):
+def test_session_switcher_has_explanatory_tooltip(qtbot):
     w = MainWindow()
     qtbot.addWidget(w)
-    tip = w.session_input.toolTip()
+    tip = w.session_label.toolTip()
     assert "session" in tip.lower()
     assert tip != ""
+
+
+def test_session_switcher_cycles_detected_sessions(qtbot):
+    w = MainWindow()
+    qtbot.addWidget(w)
+    w._on_sessions_listed(["fnxSession0", "fnxSession1"])
+    assert w.current_session_name() == "fnxSession0"
+    w._step_session(1)
+    assert w.current_session_name() == "fnxSession1"
+    w._step_session(1)                       # wraps around
+    assert w.current_session_name() == "fnxSession0"
 
 
 def test_help_menu_opens_glossary(qtbot):
@@ -698,7 +709,7 @@ def test_corner_push_snapshots_before_pushing(qtbot, tmp_path):
     qtbot.addWidget(w)
     w.load_module(load_module(pvtproject))
     w._worker = _RecordingWorker()
-    w.session_input.setText("fnxSession0")
+    w._on_sessions_listed(["fnxSession0"])
 
     w._on_corner_model_push(_cm_with_one_column())
 
