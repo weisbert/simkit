@@ -10,8 +10,15 @@ For the next conversation. Read this first, then read
 - `523e90a` retire Corner Sets, unify on multi-mode Axes.
 - `2547c80` unify corner & dimension authoring — see below.
 - `b1e205e` always-on Run Set side panel — see below.
+- `6311394` delete-mode — Modes dialog gets a Delete Mode button;
+  `corner_model.remove_mode` cascades (mode + its columns + variants +
+  run-set memberships).
+- `073f8de` session ◀ ▶ switcher — the free-text Session box is gone;
+  simkit scans Maestro windows (`pvt_runner_list_window_sessions`) and
+  the user picks a live session with ◀ ▶ / ⟳. Live-verified the bridge
+  fn returns `['fnxSession0']`.
 
-Offline tests green: full suite **1928 passed**.
+Offline tests green: full suite **1931 passed**.
 
 ## What changed (commit b1e205e) — Run Set panel
 
