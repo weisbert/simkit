@@ -1,0 +1,83 @@
+{
+  "cornermodel_schema_version": 1,
+  "name": "beacon_pvt",
+  "project": "YOUR_PROJECT",
+  "testbench_id": "YOUR/TESTBENCH/maestro",
+  "modes": {
+    "Beacon": {
+      "vars": {
+        "d_en_dummy": "1"
+      }
+    }
+  },
+  "correlated_axes": {
+    "Process": {
+      "model_file": "/path/to/your/pdk/models.scs",
+      "members": [],
+      "tuples": [
+        {"label": "TT", "values": {}, "section": "tt"},
+        {"label": "SS", "values": {}, "section": "ss"},
+        {"label": "FF", "values": {}, "section": "ff"},
+        {"label": "FS", "values": {}, "section": "fs"},
+        {"label": "SF", "values": {}, "section": "sf"}
+      ]
+    },
+    "Temperature": {
+      "members": ["temperature"],
+      "tuples": [
+        {"label": "T55", "values": {"temperature": "55"}},
+        {"label": "Tn40", "values": {"temperature": "-40"}},
+        {"label": "T125", "values": {"temperature": "125"}}
+      ]
+    },
+    "Voltage": {
+      "members": ["vdd"],
+      "tuples": [
+        {"label": "Vnom", "values": {"vdd": "1.0"}},
+        {"label": "Vhigh", "values": {"vdd": "1.1"}},
+        {"label": "Vlow", "values": {"vdd": "0.9"}}
+      ]
+    }
+  },
+  "columns": [
+    {"mode": "Beacon", "pvt_label": "TT", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["TT"], "Temperature": ["T55"], "Voltage": ["Vnom"]}},
+
+    {"mode": "Beacon", "pvt_label": "SS_1", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["SS"], "Temperature": ["T125"], "Voltage": ["Vlow"]}},
+
+    {"mode": "Beacon", "pvt_label": "SS_2", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["SS"], "Temperature": ["T125", "Tn40"], "Voltage": ["Vlow"]}},
+
+    {"mode": "Beacon", "pvt_label": "SS_3", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["SS"], "Temperature": ["T55", "Tn40", "T125"], "Voltage": ["Vlow"]}},
+
+    {"mode": "Beacon", "pvt_label": "FF_1", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["FF"], "Temperature": ["Tn40"], "Voltage": ["Vhigh"]}},
+
+    {"mode": "Beacon", "pvt_label": "FF_2", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["FF"], "Temperature": ["T125", "Tn40"], "Voltage": ["Vhigh"]}},
+
+    {"mode": "Beacon", "pvt_label": "FF_3", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["FF"], "Temperature": ["T55", "Tn40", "T125"], "Voltage": ["Vlow"]}},
+
+    {"mode": "Beacon", "pvt_label": "NT_PVT", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["TT", "SS", "FF", "FS", "SF"], "Temperature": ["T55"], "Voltage": ["Vnom", "Vhigh", "Vlow"]}},
+
+    {"mode": "Beacon", "pvt_label": "PVT_16", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["SS", "FF", "FS", "SF"], "Temperature": ["Tn40", "T125"], "Voltage": ["Vhigh", "Vlow"]}},
+
+    {"mode": "Beacon", "pvt_label": "PVT_45", "enabled": true,
+     "correlated_axes": ["Process", "Temperature", "Voltage"],
+     "selected_levels": {"Process": ["TT", "SS", "FF", "FS", "SF"], "Temperature": ["T55", "Tn40", "T125"], "Voltage": ["Vnom", "Vhigh", "Vlow"]}}
+  ]
+}
