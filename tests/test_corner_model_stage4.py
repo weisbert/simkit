@@ -74,6 +74,34 @@ def test_apply_run_set_all(tmp_path):
     assert all(c.enabled for c in cm2.columns)
 
 
+def test_apply_run_set_additive_keeps_non_members(tmp_path):
+    from dataclasses import replace
+    cm = _write_load(tmp_path, _base())
+    # everything enabled to start; additive must not disable the non-member
+    cm = replace(cm, columns=tuple(
+        replace(c, enabled=True) for c in cm.columns
+    ))
+    cm2 = apply_run_set(cm, "RX_only", additive=True)
+    by_name = {effective_name(c): c for c in cm2.columns}
+    assert by_name["BT_2G_RX_TT"].enabled is True
+    assert by_name["BT_2G_TX_TT"].enabled is True   # untouched, not disabled
+
+
+def test_set_columns_enabled_batch(tmp_path):
+    from simkit.corner_model import set_columns_enabled
+    cm = _write_load(tmp_path, _base())
+    cm2 = set_columns_enabled(cm, (0,), False)
+    assert cm2.columns[0].enabled is False
+    assert cm2.columns[1].enabled is cm.columns[1].enabled   # others untouched
+
+
+def test_remove_run_set(tmp_path):
+    from simkit.corner_model import remove_run_set
+    cm = _write_load(tmp_path, _base())
+    cm2 = remove_run_set(cm, "RX_only")
+    assert "RX_only" not in cm2.run_sets
+
+
 def test_add_run_set(tmp_path):
     cm = _write_load(tmp_path, _base())
     cm2 = add_run_set(cm, "TX_only", ("BT_2G_TX_TT",))

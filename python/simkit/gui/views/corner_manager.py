@@ -35,10 +35,13 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QButtonGroup,
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QShortcut,
+    QSplitter,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -69,11 +72,13 @@ from simkit.corner_model import (
     move_column,
     reclassify_mode,
     remove_correlated_axis,
+    remove_run_set,
     rename_column,
     rename_variable,
     reorder_columns,
     remove_variable,
     run_set_membership,
+    set_columns_enabled,
     update_correlated_axis,
     set_column_enabled,
     set_mode_var,
@@ -143,11 +148,7 @@ class CornerManagerView(QWidget):
             "TT/SS/FF…, Temperature, Voltage). A corner is a crossing of "
             "dimensions; one edit here updates every corner that uses it."
         )
-        self.btn_run_sets = QPushButton("Run Sets…")
-        self.btn_run_sets.setToolTip(
-            "Manage run sets — named cross-mode corner selections."
-        )
-        for b in (self.btn_modes, self.btn_dimensions, self.btn_run_sets):
+        for b in (self.btn_modes, self.btn_dimensions):
             top.addWidget(b)
         self.btn_new_corner = QPushButton("New Corner")
         self.btn_new_corner.setToolTip(
@@ -217,8 +218,18 @@ class CornerManagerView(QWidget):
         header.setSectionsMovable(True)
         header.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.setSelectionBehavior(QAbstractItemView.SelectItems)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
-        outer.addWidget(self.table, 1)
+        # The Run Set panel is always on, docked left of the corner table —
+        # signoff switches Enable states constantly (痛点 d).
+        self.run_set_panel = _RunSetPanel(self)
+        body = QSplitter(Qt.Horizontal)
+        body.addWidget(self.run_set_panel)
+        body.addWidget(self.table)
+        body.setStretchFactor(0, 0)
+        body.setStretchFactor(1, 1)
+        body.setSizes([200, 800])
+        outer.addWidget(body, 1)
 
         self.check_label = QLabel()
         outer.addWidget(self.check_label)
@@ -226,12 +237,9 @@ class CornerManagerView(QWidget):
         # Editor pop-ups — built once, hidden until a toolbar button raises
         # them; non-modal so corner-table edits stay live behind.
         self._build_modes_dialog()
-        self._build_run_sets_dialog()
 
         self.btn_modes.clicked.connect(
             lambda: self._open_dialog(self._modes_dialog))
-        self.btn_run_sets.clicked.connect(
-            lambda: self._open_dialog(self._run_sets_dialog))
 
         self.modes_list.currentItemChanged.connect(self._on_mode_selected)
         self.mode_vars.itemChanged.connect(self._on_mode_var_changed)
@@ -240,9 +248,6 @@ class CornerManagerView(QWidget):
         self.btn_new_mode.clicked.connect(self._on_new_mode)
         self.btn_edit_mode.clicked.connect(self._on_edit_mode)
         self.btn_new_corner.clicked.connect(self._on_new_corner)
-        self.btn_new_run_set.clicked.connect(self._on_new_run_set)
-        self.btn_apply_run_set.clicked.connect(self._on_apply_run_set)
-        self.btn_filter_set.clicked.connect(self._on_filter_set)
         self.btn_clear_filters.clicked.connect(self._on_clear_all_filters)
         self.table_model.filtersChanged.connect(self._apply_filters)
         self.table.customContextMenuRequested.connect(
@@ -316,26 +321,6 @@ class CornerManagerView(QWidget):
         self.mode_vars.verticalHeader().setDefaultSectionSize(24)
         v.addWidget(self.mode_vars)
 
-    def _build_run_sets_dialog(self) -> None:
-        self._run_sets_dialog = QDialog(self)
-        self._run_sets_dialog.setWindowTitle("Run Sets")
-        self._run_sets_dialog.resize(440, 340)
-        v = QVBoxLayout(self._run_sets_dialog)
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("Run sets (cross-mode corner selection)"))
-        hdr.addStretch(1)
-        self.btn_new_run_set = QPushButton("New Run Set")
-        hdr.addWidget(self.btn_new_run_set)
-        v.addLayout(hdr)
-        self.run_sets_list = QListWidget()
-        v.addWidget(self.run_sets_list)
-        btns = QHBoxLayout()
-        self.btn_apply_run_set = QPushButton("Switch to this run set")
-        self.btn_filter_set = QPushButton("Filter table to this run set")
-        btns.addWidget(self.btn_apply_run_set)
-        btns.addWidget(self.btn_filter_set)
-        v.addLayout(btns)
-
     # --- model swap ------------------------------------------------------
 
     def load_model(
@@ -380,77 +365,14 @@ class CornerManagerView(QWidget):
 
     def _refresh_side_panels(self) -> None:
         self._refresh_modes_panel()
-        self._refresh_run_sets_panel()
+        self.run_set_panel.refresh()
 
-    # --- run-sets panel + column filter ---------------------------------
-
-    def _refresh_run_sets_panel(self) -> None:
-        prev = self.run_sets_list.currentItem()
-        prev_name = prev.text().split("  ")[0] if prev is not None else None
-        self.run_sets_list.clear()
-        names = sorted(self._cm.run_sets)
-        for name in names:
-            count = len(self._cm.run_sets[name].columns)
-            self.run_sets_list.addItem(f"{name}  ({count} cols)")
-        if prev_name in names:
-            self.run_sets_list.setCurrentRow(names.index(prev_name))
-
-    def _selected_run_set_name(self) -> Optional[str]:
-        item = self.run_sets_list.currentItem()
-        if item is None:
-            return None
-        return item.text().split("  ")[0]
-
-    def _on_new_run_set(self) -> None:
-        if not self._cm.columns:
-            QMessageBox.warning(
-                self, "New Run Set", "Add a corner column first."
-            )
-            return
-        name, ok = QInputDialog.getText(
-            self, "New Run Set", "Run set name (^[A-Za-z][A-Za-z0-9_]*$):"
-        )
-        if not ok or not name.strip():
-            return
-        all_names = [effective_name(c) for c in self._cm.columns]
-        dialog = _ColumnPickerDialog(
-            "New Run Set — select corner columns",
-            "Tick the corner columns this run set should enable:",
-            all_names, parent=self,
-        )
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        try:
-            new_cm = add_run_set(
-                self._cm, name.strip(), dialog.checked_columns()
-            )
-        except CornerModelError as exc:
-            QMessageBox.warning(self, "New run set failed", str(exc))
-            return
-        self._apply(new_cm)
-
-    def _on_apply_run_set(self) -> None:
-        name = self._selected_run_set_name()
-        if name is None:
-            QMessageBox.warning(
-                self, "Switch run set", "Select a run set first."
-            )
-            return
-        self._apply(apply_run_set(self._cm, name))
-
-    def _on_filter_set(self) -> None:
-        name = self._selected_run_set_name()
-        if name is None:
-            QMessageBox.warning(
-                self, "Filter to run set", "Select a run set first."
-            )
-            return
-        self._set_filter = name
-        self._apply_filters()
+    # --- column filter ---------------------------------------------------
 
     def _on_clear_all_filters(self) -> None:
         self._set_filter = None
         self.table_model.clear_all_filters()
+        self.run_set_panel.refresh()
         self._apply_filters()
 
     def _apply_filters(self) -> None:
@@ -542,6 +464,17 @@ class CornerManagerView(QWidget):
         menu.addAction(
             f"{toggle} {name!r}", lambda: self._toggle_column_enabled(j)
         )
+        selected = self._selected_column_indices()
+        if len(selected) > 1:
+            sel = tuple(selected)
+            menu.addAction(
+                f"Enable {len(sel)} selected corners",
+                lambda: self._set_selected_enabled(sel, True),
+            )
+            menu.addAction(
+                f"Disable {len(sel)} selected corners",
+                lambda: self._set_selected_enabled(sel, False),
+            )
         menu.addSeparator()
         act_left = menu.addAction(
             "Move Left", lambda: self._shift_column(j, -1)
@@ -642,6 +575,22 @@ class CornerManagerView(QWidget):
     def _toggle_column_enabled(self, j: int) -> None:
         column = self._cm.columns[j]
         self._apply(set_column_enabled(self._cm, j, not column.enabled))
+
+    def _selected_column_indices(self) -> list[int]:
+        """Data-column indices with at least one selected cell in the table."""
+        out: set[int] = set()
+        sm = self.table.selectionModel()
+        if sm is not None:
+            for idx in sm.selectedIndexes():
+                j = self.table_model.column_index_at(idx.column())
+                if j is not None:
+                    out.add(j)
+        return sorted(out)
+
+    def _set_selected_enabled(
+        self, indices: tuple[int, ...], enabled: bool
+    ) -> None:
+        self._apply(set_columns_enabled(self._cm, indices, enabled))
 
     def _shift_column(self, j: int, delta: int) -> None:
         new_cm = move_column(self._cm, j, delta)
@@ -1126,6 +1075,173 @@ def _parse_var_lines(text: str) -> dict[str, str]:
             raise ValueError(f"line {line!r} is missing the var name")
         out[key] = value
     return out
+
+
+class _RunSetPanel(QWidget):
+    """The always-on Run Set panel, docked left of the corner table. Click a
+    run set to switch the table's Enable states; Exclusive turns the rest
+    off, Additive keeps them. Save the current Enable state as a set, or
+    pick corners explicitly via New (痛点 d)."""
+
+    def __init__(self, view: "CornerManagerView") -> None:
+        super().__init__(view)
+        self._view = view
+        self.setMaximumWidth(230)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(2, 2, 2, 2)
+        v.addWidget(QLabel("Run Sets"))
+        self._list = QListWidget()
+        self._list.setToolTip(
+            "Click a run set to switch the corner table's Enable states."
+        )
+        v.addWidget(self._list, 1)
+
+        v.addWidget(QLabel("Switch mode:"))
+        self._radio_exclusive = QRadioButton("Exclusive — others off")
+        self._radio_additive = QRadioButton("Additive — others kept")
+        self._radio_exclusive.setChecked(True)
+        grp = QButtonGroup(self)
+        grp.addButton(self._radio_exclusive)
+        grp.addButton(self._radio_additive)
+        v.addWidget(self._radio_exclusive)
+        v.addWidget(self._radio_additive)
+
+        self._btn_new = QPushButton("New…")
+        self._btn_new.setToolTip("Pick corners explicitly to form a run set.")
+        self._btn_save = QPushButton("Save current as…")
+        self._btn_save.setToolTip(
+            "Save the corner table's current Enable state as a run set."
+        )
+        self._btn_del = QPushButton("Delete")
+        self._btn_filter = QPushButton("Filter table to set")
+        self._btn_filter.setCheckable(True)
+        for b in (self._btn_new, self._btn_save, self._btn_del,
+                  self._btn_filter):
+            v.addWidget(b)
+
+        self._list.itemClicked.connect(self._on_switch)
+        self._btn_new.clicked.connect(self._on_new)
+        self._btn_save.clicked.connect(self._on_save_current)
+        self._btn_del.clicked.connect(self._on_delete)
+        self._btn_filter.toggled.connect(self._on_filter_toggled)
+        self.refresh()
+
+    def _cm(self) -> CornerModel:
+        return self._view.cornermodel()
+
+    def _names(self) -> list[str]:
+        return sorted(self._cm().run_sets)
+
+    def refresh(self) -> None:
+        names = self._names()
+        prev = self._selected_name()
+        self._list.blockSignals(True)
+        self._list.clear()
+        for name in names:
+            count = len(self._cm().run_sets[name].columns)
+            self._list.addItem(f"{name}  ({count} cols)")
+        if prev in names:
+            self._list.setCurrentRow(names.index(prev))
+        self._list.blockSignals(False)
+        self._btn_filter.blockSignals(True)
+        self._btn_filter.setChecked(self._view._set_filter is not None)
+        self._btn_filter.blockSignals(False)
+        self._btn_del.setEnabled(bool(names))
+        self._btn_filter.setEnabled(bool(names))
+
+    def _selected_name(self) -> Optional[str]:
+        item = self._list.currentItem()
+        return None if item is None else item.text().split("  (")[0]
+
+    def _on_switch(self, item: QListWidgetItem) -> None:
+        name = item.text().split("  (")[0]
+        try:
+            new_cm = apply_run_set(
+                self._cm(), name, self._radio_additive.isChecked()
+            )
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Switch run set failed", str(exc))
+            return
+        self._view._apply(new_cm)
+
+    def _on_new(self) -> None:
+        cm = self._cm()
+        if not cm.columns:
+            QMessageBox.warning(self, "New Run Set", "Add a corner first.")
+            return
+        name, ok = QInputDialog.getText(
+            self, "New Run Set",
+            "Run set name (^[A-Za-z][A-Za-z0-9_]*$):",
+        )
+        if not ok or not name.strip():
+            return
+        all_names = [effective_name(c) for c in cm.columns]
+        dlg = _ColumnPickerDialog(
+            "New Run Set — select corners",
+            "Tick the corners this run set enables:",
+            all_names, parent=self,
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        try:
+            new_cm = add_run_set(cm, name.strip(), dlg.checked_columns())
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "New run set failed", str(exc))
+            return
+        self._view._apply(new_cm)
+
+    def _on_save_current(self) -> None:
+        cm = self._cm()
+        if not cm.columns:
+            QMessageBox.warning(self, "Save run set", "Add a corner first.")
+            return
+        name, ok = QInputDialog.getText(
+            self, "Save current Enable state as a run set",
+            "Run set name (^[A-Za-z][A-Za-z0-9_]*$):",
+        )
+        if not ok or not name.strip():
+            return
+        members = tuple(
+            effective_name(c) for c in cm.columns if c.enabled
+        )
+        try:
+            new_cm = add_run_set(cm, name.strip(), members)
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Save run set failed", str(exc))
+            return
+        self._view._apply(new_cm)
+
+    def _on_delete(self) -> None:
+        name = self._selected_name()
+        if name is None:
+            QMessageBox.information(
+                self, "Delete run set", "Select a run set."
+            )
+            return
+        if QMessageBox.question(
+            self, "Delete run set", f"Delete run set {name!r}?"
+        ) != QMessageBox.Yes:
+            return
+        if self._view._set_filter == name:
+            self._view._set_filter = None
+        self._view._apply(remove_run_set(self._cm(), name))
+
+    def _on_filter_toggled(self, checked: bool) -> None:
+        if checked:
+            name = self._selected_name()
+            if name is None:
+                QMessageBox.information(
+                    self, "Filter to run set", "Select a run set first."
+                )
+                self._btn_filter.blockSignals(True)
+                self._btn_filter.setChecked(False)
+                self._btn_filter.blockSignals(False)
+                return
+            self._view._set_filter = name
+        else:
+            self._view._set_filter = None
+        self._view._apply_filters()
 
 
 class _ColumnPickerDialog(QDialog):

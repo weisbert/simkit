@@ -2178,17 +2178,52 @@ def add_run_set(
     return replace(model, run_sets=new_sets)
 
 
-def apply_run_set(model: CornerModel, set_name: str) -> CornerModel:
-    """Switch to a run-set: ``column.enabled = effective_name ∈ set`` for
-    every column (spec §2.2). Columns not in the set are disabled."""
+def remove_run_set(model: CornerModel, name: str) -> CornerModel:
+    """Return a new cornermodel with run-set ``name`` removed."""
+    if name not in model.run_sets:
+        raise CornerModelValidationError(
+            f"remove_run_set: no such run-set {name!r}"
+        )
+    return replace(model, run_sets={
+        k: v for k, v in model.run_sets.items() if k != name
+    })
+
+
+def apply_run_set(
+    model: CornerModel, set_name: str, additive: bool = False
+) -> CornerModel:
+    """Switch to a run-set (spec §2.2).
+
+    Exclusive (default): ``column.enabled = effective_name ∈ set`` for every
+    column — non-members are disabled. Additive: members are enabled, every
+    other column keeps its current enabled state."""
     if set_name not in model.run_sets:
         raise CornerModelValidationError(
             f"apply_run_set: no such run-set {set_name!r}"
         )
     members = set(model.run_sets[set_name].columns)
     new_columns = tuple(
-        replace(c, enabled=(effective_name(c) in members))
+        replace(c, enabled=True) if effective_name(c) in members
+        else (c if additive else replace(c, enabled=False))
         for c in model.columns
+    )
+    return replace(model, columns=new_columns)
+
+
+def set_columns_enabled(
+    model: CornerModel, indices: tuple[int, ...], enabled: bool
+) -> CornerModel:
+    """Batch-set ``enabled`` on the columns at ``indices`` (ad-hoc, no named
+    run-set) — the GUI's right-click Enable / Disable selected corners."""
+    idx = set(indices)
+    for i in idx:
+        if not (0 <= i < len(model.columns)):
+            raise CornerModelValidationError(
+                f"set_columns_enabled: index {i} out of range"
+            )
+    new_columns = tuple(
+        replace(c, enabled=enabled) if i in idx else c
+        for i, c in enumerate(model.columns)
     )
     return replace(model, columns=new_columns)
 

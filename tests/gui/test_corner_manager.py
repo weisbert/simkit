@@ -374,21 +374,27 @@ class CornerManagerStage4Test(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def test_run_sets_panel_populated(self):
-        self.assertEqual(self.view.run_sets_list.count(), 1)
-        self.assertIn("RX_only", self.view.run_sets_list.item(0).text())
+        panel = self.view.run_set_panel
+        self.assertEqual(panel._list.count(), 1)
+        self.assertIn("RX_only", panel._list.item(0).text())
 
-    def test_apply_run_set_changes_enabled(self):
-        self.view.run_sets_list.setCurrentRow(0)
-        self.view._on_apply_run_set()
-        by_name = {
-            c.pvt_label: c for c in self.view.cornermodel().columns
-        }
+    def test_apply_run_set_exclusive_disables_others(self):
+        panel = self.view.run_set_panel
+        panel._on_switch(panel._list.item(0))          # exclusive default
         rx = next(c for c in self.view.cornermodel().columns
                   if c.mode == "BT_2G_RX")
         tx = next(c for c in self.view.cornermodel().columns
                   if c.mode == "BT_2G_TX")
         self.assertTrue(rx.enabled)
         self.assertFalse(tx.enabled)
+
+    def test_apply_run_set_additive_keeps_others(self):
+        panel = self.view.run_set_panel
+        panel._radio_additive.setChecked(True)
+        panel._on_switch(panel._list.item(0))
+        tx = next(c for c in self.view.cornermodel().columns
+                  if c.mode == "BT_2G_TX")
+        self.assertTrue(tx.enabled)        # additive left TX untouched
 
     def test_corner_name_filter_hides_columns(self):
         self.view.resize(800, 400)
@@ -408,8 +414,9 @@ class CornerManagerStage4Test(unittest.TestCase):
     def test_filter_to_run_set(self):
         self.view.show()
         _QAPP.processEvents()
-        self.view.run_sets_list.setCurrentRow(0)
-        self.view._on_filter_set()
+        panel = self.view.run_set_panel
+        panel._list.setCurrentRow(0)
+        panel._btn_filter.setChecked(True)
         model = self.view.table_model
         visible = [
             model.column_at(c).mode
@@ -420,7 +427,7 @@ class CornerManagerStage4Test(unittest.TestCase):
         self.assertEqual(visible, ["BT_2G_RX"])
         self.view.hide()
 
-    def test_new_run_set_via_dialog(self):
+    def test_new_run_set_via_panel(self):
         with mock.patch.object(
             cm_mod.QInputDialog, "getText",
             return_value=("TX_only", True),
@@ -431,8 +438,33 @@ class CornerManagerStage4Test(unittest.TestCase):
             cm_mod._ColumnPickerDialog, "checked_columns",
             return_value=("BT_2G_TX_TT",),
         ):
-            self.view._on_new_run_set()
+            self.view.run_set_panel._on_new()
         self.assertIn("TX_only", self.view.cornermodel().run_sets)
+
+    def test_save_current_enable_state_as_run_set(self):
+        from simkit.corner_model import set_column_enabled, effective_name
+        self.view._apply(set_column_enabled(self.view.cornermodel(), 0, False))
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=("snap", True),
+        ):
+            self.view.run_set_panel._on_save_current()
+        rs = self.view.cornermodel().run_sets["snap"]
+        enabled_now = {
+            effective_name(c) for c in self.view.cornermodel().columns
+            if c.enabled
+        }
+        self.assertEqual(set(rs.columns), enabled_now)
+
+    def test_batch_enable_selected_corners(self):
+        from simkit.corner_model import set_columns_enabled
+        # disable everything, then batch-enable columns 0 and 1
+        cm = self.view.cornermodel()
+        for j in range(len(cm.columns)):
+            cm = set_columns_enabled(cm, (j,), False)
+        self.view._apply(cm)
+        self.view._set_selected_enabled((0, 1), True)
+        cols = self.view.cornermodel().columns
+        self.assertTrue(cols[0].enabled and cols[1].enabled)
 
 
 def _make_stage5_cm() -> "object":
@@ -621,7 +653,7 @@ class CornerManagerAuthoringTest(unittest.TestCase):
             cm_mod._ColumnPickerDialog, "checked_columns",
             return_value=("BT_2G_RX_TT",),
         ):
-            self.view._on_new_run_set()
+            self.view.run_set_panel._on_new()
         run_sets = self.view.cornermodel().run_sets
         self.assertIn("All_TT", run_sets)
         self.assertEqual(run_sets["All_TT"].columns, ("BT_2G_RX_TT",))
