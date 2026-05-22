@@ -1217,11 +1217,21 @@ class CornerManagerView(QWidget):
         dialog = _NewModeDialog(self._cm, self)
         if dialog.exec_() != QDialog.Accepted:
             return
+        regs = dialog.register_vars()
+        multi = sorted(v for v, val in regs.items() if "," in val)
+        if multi:
+            QMessageBox.warning(
+                self, "New mode failed",
+                f"A register must be a single value — {', '.join(multi)} "
+                f"{'is' if len(multi) == 1 else 'are'} multi-valued. Either "
+                f"tick them as PVT to keep the sweep per-column, or edit "
+                f"them down to one value.",
+            )
+            return
         try:
             new_cm = mode_from_column(
                 self._cm, dialog.selected_column_index(),
-                dialog.mode_name(), dialog.register_vars(),
-                dialog.pvt_label(),
+                dialog.mode_name(), regs, dialog.pvt_label(),
             )
         except CornerModelError as exc:
             QMessageBox.warning(self, "New mode failed", str(exc))
@@ -1418,6 +1428,13 @@ class _NewModeDialog(QDialog):
         self.setWindowTitle("New Mode — from a corner column")
         self.setMinimumWidth(460)
         self._columns = list(model.columns)
+        # Every design variable across the cornermodel — so a sparse corner
+        # can still seed a full register set (a corner only stores the vars
+        # it overrides; the others are blank for the user to fill).
+        all_vars: set[str] = set()
+        for c in model.columns:
+            all_vars |= set(c.pvt_vars)
+        self._all_vars = sorted(all_vars)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
@@ -1443,9 +1460,11 @@ class _NewModeDialog(QDialog):
         self._table.verticalHeader().setDefaultSectionSize(24)
         layout.addWidget(self._table)
         layout.addWidget(QLabel(
-            "Unticked → mode registers (value editable). "
-            "Ticked → per-column PVT variables. The 'Process · <file>' "
-            "rows are the P of PVT — always per-column, never a register."
+            "Unticked + a value → mode register. Unticked + blank → left "
+            "out of the mode. Ticked → per-column PVT variable. A register "
+            "must be a single value — tick a swept var as PVT, or edit it "
+            "down to one value. The 'Process · <file>' rows are the P of "
+            "PVT — always per-column, never a register."
         ))
 
         buttons = QDialogButtonBox(
@@ -1467,23 +1486,32 @@ class _NewModeDialog(QDialog):
         self._mode_edit.setText(default_mode)
         self._label_edit.setText(default_label)
         self._table.setRowCount(0)
-        for var in sorted(col.pvt_vars):
-            tup = col.pvt_vars[var]
-            if len(tup) != 1:
-                continue   # a swept var cannot be a scalar register
+        # List every design variable, not only the ones this column
+        # overrides — the selected column pre-fills the values it has, the
+        # rest stay blank and editable for the user to type a register value.
+        for var in self._all_vars:
+            tup = col.pvt_vars.get(var)
             row = self._table.rowCount()
             self._table.insertRow(row)
             name_item = QTableWidgetItem(var)
             name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self._table.setItem(row, 0, name_item)
-            self._table.setItem(row, 1, QTableWidgetItem(tup[0]))
+            self._table.setItem(
+                row, 1,
+                QTableWidgetItem("" if tup is None else ", ".join(tup)),
+            )
             pvt_item = QTableWidgetItem()
             pvt_item.setFlags(
                 Qt.ItemIsSelectable | Qt.ItemIsEnabled
                 | Qt.ItemIsUserCheckable
             )
+            # A swept (multi-value) var defaults to PVT — a register is a
+            # single scalar, so the user unticks a sweep only to commit it
+            # to one value.
+            multi = tup is not None and len(tup) > 1
             pvt_item.setCheckState(
-                Qt.Checked if _default_is_pvt(var) else Qt.Unchecked
+                Qt.Checked if (_default_is_pvt(var) or multi)
+                else Qt.Unchecked
             )
             self._table.setItem(row, 2, pvt_item)
         # Process (the P of PVT) is stored as model.section, not a var —
@@ -1512,12 +1540,16 @@ class _NewModeDialog(QDialog):
         return self._label_edit.text().strip()
 
     def register_vars(self) -> dict[str, str]:
+        """Unticked rows with a value become the mode's registers. An
+        unticked row left blank is simply left out of the mode."""
         out: dict[str, str] = {}
         for row in range(self._table.rowCount()):
             if self._table.item(row, 2).checkState() == Qt.Checked:
                 continue   # ticked → PVT, not a register
             var = self._table.item(row, 0).text()
-            out[var] = self._table.item(row, 1).text().strip()
+            value = self._table.item(row, 1).text().strip()
+            if value:
+                out[var] = value
         return out
 
 
