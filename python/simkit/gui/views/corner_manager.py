@@ -1755,7 +1755,11 @@ class _DimensionGridDialog(QDialog):
             self._table.removeColumn(1)
             self._has_section = False
 
-    def _add_member(self, initial: Optional[str] = None) -> None:
+    def _add_member(
+        self, _checked: bool = False, *, initial: Optional[str] = None
+    ) -> None:
+        # _checked absorbs the bool QPushButton.clicked emits — without it
+        # the bool lands in `initial` and is misread as the variable name.
         if initial is not None:
             name = initial
         else:

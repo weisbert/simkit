@@ -910,6 +910,22 @@ class CornerManagerDimensionsTest(unittest.TestCase):
         self.assertEqual(ax.tuples[0].section, "tt")
         self.assertEqual(ax.tuples[0].values, {"CT": "100"})
 
+    def test_add_member_slot_does_not_crash_on_clicked_bool(self):
+        # The "+ Variable" button's clicked(bool) signal passes a bool. It
+        # must not be misread as the variable name (that fed a bool into
+        # re.match and crashed the process).
+        from PyQt5.QtWidgets import QInputDialog
+        dlg = cm_mod._DimensionGridDialog()
+        before = dlg._table.columnCount()
+        with mock.patch.object(
+            QInputDialog, "getText", return_value=("", False)
+        ):
+            dlg._add_member(False)   # the clicked-signal bool
+        self.assertEqual(dlg._table.columnCount(), before)
+        # the explicit-name path still adds a column
+        dlg._add_member(initial="vbias")
+        self.assertIn("vbias", dlg._member_names())
+
     def test_new_corner_crosses_dimensions_with_level_subset(self):
         from PyQt5.QtWidgets import QMessageBox
         from simkit.corner_model import column_point_count
