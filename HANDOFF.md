@@ -1,16 +1,28 @@
-# Handoff — 2026-05-22 (corner & dimension unified)
+# Handoff — 2026-05-22 (corner & dimension unified, Run Set panel)
 
 For the next conversation. Read this first, then read
-`docs/corner_manager_user_story.md` (痛点 a + h).
+`docs/corner_manager_user_story.md` (痛点 a + d + h).
 
 ## Branch & state
 
 `main`, all committed and clean. Recent commits:
 
 - `523e90a` retire Corner Sets, unify on multi-mode Axes.
-- `2547c80` **unify corner & dimension authoring** — the work below.
+- `2547c80` unify corner & dimension authoring — see below.
+- `b1e205e` always-on Run Set side panel — see below.
 
-Offline tests green: full suite **1922 passed**.
+Offline tests green: full suite **1928 passed**.
+
+## What changed (commit b1e205e) — Run Set panel
+
+Run Sets were buried in a pop-up; signoff switches Enable constantly, so
+the control is now docked. A persistent `_RunSetPanel` sits left of the
+corner table (in a splitter): run-set list (click to switch), an
+Exclusive/Additive toggle, New / Save current as / Delete / Filter.
+`apply_run_set` gained an `additive` flag (members on, others kept vs the
+exclusive whole-table switch). Batch Enable: select corner columns,
+right-click "Enable/Disable N selected" (`set_columns_enabled`). The
+`Run Sets…` toolbar button + dialog are gone.
 
 ## What changed (commit 2547c80)
 
