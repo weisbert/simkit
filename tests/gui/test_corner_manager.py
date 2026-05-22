@@ -305,11 +305,21 @@ class CornerManagerNewModeFromModeTest(unittest.TestCase):
         # _make_cm columns carry a model file — the New Mode dialog must
         # show Process so the user sees the P of PVT (2026 UX #2).
         dialog = cm_mod._NewModeDialog(self.view.cornermodel())
-        names = [
-            dialog._table.item(r, 0).text()
-            for r in range(dialog._table.rowCount())
+        proc_rows = [
+            r for r in range(dialog._table.rowCount())
+            if dialog._table.item(r, 0).text().startswith("Process")
         ]
-        self.assertTrue(any(n.startswith("Process") for n in names))
+        self.assertTrue(proc_rows)
+        for r in proc_rows:
+            # Process belongs to the corner — its PVT? cell is a plain,
+            # non-checkable "process" tag, not a (locked-looking) checkbox.
+            tag = dialog._table.item(r, 2)
+            self.assertEqual(tag.text(), "process")
+            self.assertFalse(bool(tag.flags() & Qt.ItemIsUserCheckable))
+        # ...and a Process row never leaks into the new mode's registers.
+        self.assertFalse(
+            any(k.startswith("Process") for k in dialog.register_vars())
+        )
 
     def test_new_mode_dialog_lists_all_vars_for_sparse_corner(self):
         # A sparse corner (only temperature) must still expose every design

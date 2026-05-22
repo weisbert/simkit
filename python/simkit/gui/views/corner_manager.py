@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from PyQt5.QtCore import pyqtSignal
-from PyQt5.QtGui import QKeySequence
+from PyQt5.QtGui import QColor, QKeySequence
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -1358,7 +1358,7 @@ class _NewModeDialog(QDialog):
     def __init__(self, model: CornerModel, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("New Mode — from a corner column")
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(400)
         self._columns = list(model.columns)
         # Every design variable across the cornermodel — so a sparse corner
         # can still seed a full register set (a corner only stores the vars
@@ -1369,10 +1369,12 @@ class _NewModeDialog(QDialog):
         self._all_vars = sorted(all_vars)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        intro = QLabel(
             "Derive a mode from a corner you already authored: tick the "
             "PVT variables — the rest become the mode's registers."
-        ))
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         form = QFormLayout()
         self._column_combo = QComboBox()
         for col in self._columns:
@@ -1386,18 +1388,24 @@ class _NewModeDialog(QDialog):
 
         self._table = QTableWidget(0, 3)
         self._table.setHorizontalHeaderLabels(["Variable", "Value", "PVT?"])
-        self._table.horizontalHeader().setSectionResizeMode(
-            0, QHeaderView.Stretch
-        )
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        self._table.setColumnWidth(0, 200)
+        self._table.setColumnWidth(1, 110)
+        self._table.setColumnWidth(2, 60)
         self._table.verticalHeader().setDefaultSectionSize(24)
         layout.addWidget(self._table)
-        layout.addWidget(QLabel(
-            "Unticked + a value → mode register. Unticked + blank → left "
-            "out of the mode. Ticked → per-column PVT variable. A register "
-            "must be a single value — tick a swept var as PVT, or edit it "
-            "down to one value. The 'Process · <file>' rows are the P of "
-            "PVT — always per-column, never a register."
-        ))
+        help_label = QLabel(
+            "Each row is a variable from the corner. Tick \"PVT?\" if it "
+            "changes from corner to corner (process / voltage / "
+            "temperature). Leave it unticked to lock it as one of this "
+            "mode's register values. An unticked row left blank is "
+            "skipped. Process rows always belong to the corner, never "
+            "the mode."
+        )
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.Ok | QDialogButtonBox.Cancel
@@ -1453,14 +1461,17 @@ class _NewModeDialog(QDialog):
             self._table.insertRow(row)
             name_item = QTableWidgetItem(f"Process · {entry.file}")
             name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+            name_item.setData(Qt.UserRole, "process")
             self._table.setItem(row, 0, name_item)
             val_item = QTableWidgetItem(", ".join(entry.section))
             val_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
             self._table.setItem(row, 1, val_item)
-            pvt_item = QTableWidgetItem()
-            pvt_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
-            pvt_item.setCheckState(Qt.Checked)
-            self._table.setItem(row, 2, pvt_item)
+            # Process belongs to the corner, never the mode — show a plain,
+            # non-clickable tag instead of a checkbox that looks live.
+            tag_item = QTableWidgetItem("process")
+            tag_item.setFlags(Qt.ItemIsEnabled)
+            tag_item.setForeground(QColor(Qt.gray))
+            self._table.setItem(row, 2, tag_item)
 
     def selected_column_index(self) -> int:
         return self._column_combo.currentIndex()
@@ -1476,12 +1487,14 @@ class _NewModeDialog(QDialog):
         unticked row left blank is simply left out of the mode."""
         out: dict[str, str] = {}
         for row in range(self._table.rowCount()):
+            name_item = self._table.item(row, 0)
+            if name_item.data(Qt.UserRole) == "process":
+                continue   # process belongs to the corner, never the mode
             if self._table.item(row, 2).checkState() == Qt.Checked:
                 continue   # ticked → PVT, not a register
-            var = self._table.item(row, 0).text()
             value = self._table.item(row, 1).text().strip()
             if value:
-                out[var] = value
+                out[name_item.text()] = value
         return out
 
 
