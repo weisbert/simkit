@@ -21,11 +21,14 @@ from simkit.corner_model import (
     column_display_vars,
     column_point_count,
     effective_name,
+    empty_cornermodel,
     load_cornermodel,
     materialize,
     materialize_column_rows,
+    remove_correlated_axis,
     to_dict,
     unbind_template,
+    update_correlated_axis,
 )
 
 
@@ -209,6 +212,32 @@ def test_add_correlated_axis_and_template(tmp_path):
     )
     cm3 = add_pvt_template(cm2, tmpl)
     assert "mini" in cm3.pvt_templates
+
+
+def test_update_and_remove_correlated_axis():
+    ax = CorrelatedAxis(
+        name="v", members=("VDD",),
+        tuples=(CorrelatedTuple(label="nom", values={"VDD": "1.0"}),),
+    )
+    cm = add_correlated_axis(empty_cornermodel(), ax)
+    grown = CorrelatedAxis(
+        name="v", members=("VDD",),
+        tuples=(
+            CorrelatedTuple(label="nom", values={"VDD": "1.0"}),
+            CorrelatedTuple(label="hi", values={"VDD": "1.1"}),
+        ),
+    )
+    cm = update_correlated_axis(cm, grown)
+    assert len(cm.correlated_axes["v"].tuples) == 2
+    cm = remove_correlated_axis(cm, "v")
+    assert "v" not in cm.correlated_axes
+
+
+def test_remove_correlated_axis_in_use_rejected(tmp_path):
+    cm = _write_load(tmp_path, _base())
+    cm = apply_template(cm, "VCO", "vco_full")   # generates an axis column
+    with pytest.raises(CornerModelValidationError):
+        remove_correlated_axis(cm, "proc_ct")
 
 
 # --- round-trip + reconciliation -----------------------------------------

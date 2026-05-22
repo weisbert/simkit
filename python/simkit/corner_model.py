@@ -1965,6 +1965,30 @@ def remove_variable(model: CornerModel, var: str) -> CornerModel:
 # ---------------------------------------------------------------------------
 
 
+def _check_axis_well_formed(axis: CorrelatedAxis, fn: str) -> None:
+    """Shared validation for add / update of a correlated axis."""
+    if not _VAR_NAME_RE.match(axis.name):
+        raise CornerModelValidationError(
+            f"{fn}: axis name {axis.name!r} must match "
+            f"^[A-Za-z][A-Za-z0-9_]*$"
+        )
+    if not axis.members:
+        raise CornerModelValidationError(
+            f"{fn}: axis {axis.name!r} needs at least one member variable"
+        )
+    if not axis.tuples:
+        raise CornerModelValidationError(
+            f"{fn}: axis {axis.name!r} needs at least one level"
+        )
+    member_set = set(axis.members)
+    for ct in axis.tuples:
+        if set(ct.values) != member_set:
+            raise CornerModelValidationError(
+                f"{fn}: level {ct.label!r} must give a value for exactly "
+                f"the members {sorted(member_set)}"
+            )
+
+
 def add_correlated_axis(
     model: CornerModel, axis: CorrelatedAxis
 ) -> CornerModel:
@@ -1973,15 +1997,45 @@ def add_correlated_axis(
         raise CornerModelValidationError(
             f"add_correlated_axis: {axis.name!r} already exists"
         )
-    member_set = set(axis.members)
-    for ct in axis.tuples:
-        if set(ct.values) != member_set:
-            raise CornerModelValidationError(
-                f"add_correlated_axis: tuple {ct.label!r} values must cover "
-                f"exactly the members {sorted(member_set)}"
-            )
+    _check_axis_well_formed(axis, "add_correlated_axis")
     new_axes = dict(model.correlated_axes)
     new_axes[axis.name] = axis
+    return replace(model, correlated_axes=new_axes)
+
+
+def update_correlated_axis(
+    model: CornerModel, axis: CorrelatedAxis
+) -> CornerModel:
+    """Return a new cornermodel with correlated axis ``axis.name`` replaced."""
+    if axis.name not in model.correlated_axes:
+        raise CornerModelValidationError(
+            f"update_correlated_axis: {axis.name!r} does not exist"
+        )
+    _check_axis_well_formed(axis, "update_correlated_axis")
+    new_axes = dict(model.correlated_axes)
+    new_axes[axis.name] = axis
+    return replace(model, correlated_axes=new_axes)
+
+
+def remove_correlated_axis(model: CornerModel, name: str) -> CornerModel:
+    """Return a new cornermodel with correlated axis ``name`` removed.
+
+    Raises if a column still crosses the axis — delete those columns first."""
+    if name not in model.correlated_axes:
+        raise CornerModelValidationError(
+            f"remove_correlated_axis: {name!r} does not exist"
+        )
+    users = [
+        effective_name(c) for c in model.columns
+        if name in c.correlated_axes
+    ]
+    if users:
+        raise CornerModelValidationError(
+            f"remove_correlated_axis: {name!r} is still used by "
+            f"{', '.join(users)}"
+        )
+    new_axes = dict(model.correlated_axes)
+    del new_axes[name]
     return replace(model, correlated_axes=new_axes)
 
 

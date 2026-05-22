@@ -51,10 +51,13 @@ from simkit.corner_model import (
     Column,
     CornerModel,
     CornerModelError,
+    CorrelatedAxis,
+    CorrelatedTuple,
     ModelEntry,
     PvtTemplate,
     TemplateColumn,
     add_column,
+    add_correlated_axis,
     add_mode,
     add_pvt_template,
     add_run_set,
@@ -71,11 +74,13 @@ from simkit.corner_model import (
     mode_from_column,
     move_column,
     reclassify_mode,
+    remove_correlated_axis,
     rename_column,
     rename_variable,
     reorder_columns,
     remove_variable,
     run_set_membership,
+    update_correlated_axis,
     set_column_enabled,
     set_mode_var,
     set_pvt_var,
@@ -145,11 +150,18 @@ class CornerManagerView(QWidget):
             "Design it once, then apply it to every mode — no need to "
             "rebuild the same corners per mode."
         )
+        self.btn_axes = QPushButton("Axes…")
+        self.btn_axes.setToolTip(
+            "Define correlated axes — variables that move together, like CT "
+            "with process — and build aggregated corner columns by crossing "
+            "axes (5 × 3 × 3 = 45 points, not a 405-way blow-up)."
+        )
         self.btn_run_sets = QPushButton("Run Sets…")
         self.btn_run_sets.setToolTip(
             "Manage run sets — named cross-mode corner selections."
         )
-        for b in (self.btn_modes, self.btn_templates, self.btn_run_sets):
+        for b in (self.btn_modes, self.btn_templates, self.btn_axes,
+                  self.btn_run_sets):
             top.addWidget(b)
         self.btn_new_column = QPushButton("New Column")
         self.btn_new_column.setToolTip(
@@ -241,6 +253,7 @@ class CornerManagerView(QWidget):
         self.modes_list.currentItemChanged.connect(self._on_mode_selected)
         self.mode_vars.itemChanged.connect(self._on_mode_var_changed)
         self.table_model.cornermodelChanged.connect(self._on_table_edited)
+        self.btn_axes.clicked.connect(self._on_axes)
         self.btn_new_mode.clicked.connect(self._on_new_mode)
         self.btn_edit_mode.clicked.connect(self._on_edit_mode)
         self.btn_new_column.clicked.connect(self._on_new_column)
@@ -909,6 +922,13 @@ class CornerManagerView(QWidget):
                 self.table_model.setData(idx, value, Qt.EditRole)
 
     # --- corner sets (templates) ----------------------------------------
+
+    # --- correlated axes ------------------------------------------------
+
+    def _on_axes(self) -> None:
+        """Open the Axes manager — define correlated axes and build
+        aggregated corner columns by crossing them (痛点 h)."""
+        _AxesDialog(self).exec_()
 
     def _on_new_template(self) -> None:
         if not self._cm.modes:
@@ -1759,3 +1779,433 @@ def _parse_template_columns(text: str) -> tuple[TemplateColumn, ...]:
     return tuple(cols)
 
 
+
+class _AxisGridDialog(QDialog):
+    """Author one correlated axis as a small grid: each member variable is a
+    column, each level is a row. Members move together — one level (row)
+    assigns them all at once (痛点 h)."""
+
+    def __init__(
+        self, axis: Optional[CorrelatedAxis] = None,
+        taken_names: tuple[str, ...] = (),
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._editing = axis is not None
+        self._taken = set(taken_names)
+        self._axis: Optional[CorrelatedAxis] = None
+        self.setWindowTitle("Edit Axis" if self._editing else "New Axis")
+        self.setMinimumWidth(440)
+
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(
+            "An axis is a small table: each member variable is a column, "
+            "each level is a row. Members move together — picking a level "
+            "sets every member at once."
+        ))
+        form = QFormLayout()
+        self._name_edit = QLineEdit(axis.name if self._editing else "")
+        if self._editing:
+            self._name_edit.setReadOnly(True)
+        form.addRow("Axis name:", self._name_edit)
+        v.addLayout(form)
+
+        self._table = QTableWidget(0, 1, self)
+        self._table.setHorizontalHeaderLabels(["Level"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.Stretch
+        )
+        self._table.verticalHeader().setDefaultSectionSize(24)
+        self._table.horizontalHeader().sectionDoubleClicked.connect(
+            self._rename_member
+        )
+        v.addWidget(self._table)
+
+        btns = QHBoxLayout()
+        for label, slot in (
+            ("+ Level", self._add_level),
+            ("+ Variable", self._add_member),
+            ("Remove Level", self._remove_level),
+            ("Remove Variable", self._remove_member),
+        ):
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            btns.addWidget(b)
+        v.addLayout(btns)
+        v.addWidget(QLabel(
+            "Double-click a variable header to rename it."
+        ))
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        bb.accepted.connect(self._on_ok)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+        if self._editing:
+            self._load(axis)
+        else:
+            self._add_member(initial="var1")
+            self._add_level()
+
+    def _member_names(self) -> list[str]:
+        return [
+            self._table.horizontalHeaderItem(c).text()
+            for c in range(1, self._table.columnCount())
+        ]
+
+    def _add_member(self, initial: Optional[str] = None) -> None:
+        if initial is not None:
+            name = initial
+        else:
+            name, ok = QInputDialog.getText(
+                self, "Add variable", "Member variable name:"
+            )
+            if not ok or not name.strip():
+                return
+            name = name.strip()
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", name):
+            QMessageBox.warning(
+                self, "Add variable",
+                f"{name!r} is not a valid variable name.",
+            )
+            return
+        if name in self._member_names():
+            QMessageBox.warning(
+                self, "Add variable", f"{name!r} is already a member."
+            )
+            return
+        c = self._table.columnCount()
+        self._table.insertColumn(c)
+        self._table.setHorizontalHeaderItem(c, QTableWidgetItem(name))
+
+    def _add_level(self) -> None:
+        self._table.insertRow(self._table.rowCount())
+
+    def _remove_member(self) -> None:
+        c = self._table.currentColumn()
+        if c <= 0:
+            QMessageBox.information(
+                self, "Remove variable",
+                "Select a cell in the member-variable column to remove.",
+            )
+            return
+        if self._table.columnCount() <= 2:
+            QMessageBox.warning(
+                self, "Remove variable",
+                "An axis needs at least one member variable.",
+            )
+            return
+        self._table.removeColumn(c)
+
+    def _remove_level(self) -> None:
+        r = self._table.currentRow()
+        if r >= 0:
+            self._table.removeRow(r)
+
+    def _rename_member(self, section: int) -> None:
+        if section <= 0:
+            return
+        cur = self._table.horizontalHeaderItem(section).text()
+        name, ok = QInputDialog.getText(
+            self, "Rename variable", "Member variable name:", text=cur
+        )
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", name):
+            QMessageBox.warning(
+                self, "Rename variable",
+                f"{name!r} is not a valid variable name.",
+            )
+            return
+        if name != cur and name in self._member_names():
+            QMessageBox.warning(
+                self, "Rename variable", f"{name!r} is already a member."
+            )
+            return
+        self._table.setHorizontalHeaderItem(section, QTableWidgetItem(name))
+
+    def _load(self, axis: CorrelatedAxis) -> None:
+        for member in axis.members:
+            c = self._table.columnCount()
+            self._table.insertColumn(c)
+            self._table.setHorizontalHeaderItem(c, QTableWidgetItem(member))
+        for ct in axis.tuples:
+            r = self._table.rowCount()
+            self._table.insertRow(r)
+            self._table.setItem(r, 0, QTableWidgetItem(ct.label))
+            for c in range(1, self._table.columnCount()):
+                member = self._table.horizontalHeaderItem(c).text()
+                self._table.setItem(
+                    r, c, QTableWidgetItem(ct.values.get(member, ""))
+                )
+
+    def _cell(self, row: int, col: int) -> str:
+        item = self._table.item(row, col)
+        return item.text().strip() if item is not None else ""
+
+    def _on_ok(self) -> None:
+        name = self._name_edit.text().strip()
+        if not self._editing:
+            if not re.match(r"^[A-Za-z][A-Za-z0-9_]*$", name):
+                QMessageBox.warning(
+                    self, "New Axis",
+                    "Axis name must start with a letter and use only "
+                    "letters, digits, and underscores.",
+                )
+                return
+            if name in self._taken:
+                QMessageBox.warning(
+                    self, "New Axis",
+                    f"An axis named {name!r} already exists.",
+                )
+                return
+        members = self._member_names()
+        if not members:
+            QMessageBox.warning(
+                self, "Axis", "Add at least one member variable."
+            )
+            return
+        if self._table.rowCount() == 0:
+            QMessageBox.warning(self, "Axis", "Add at least one level.")
+            return
+        tuples: list[CorrelatedTuple] = []
+        seen: set[str] = set()
+        for r in range(self._table.rowCount()):
+            label = self._cell(r, 0)
+            if not label:
+                QMessageBox.warning(
+                    self, "Axis", f"Row {r + 1}: the Level needs a name."
+                )
+                return
+            if label in seen:
+                QMessageBox.warning(
+                    self, "Axis", f"Level {label!r} is used twice."
+                )
+                return
+            seen.add(label)
+            values: dict[str, str] = {}
+            for c in range(1, self._table.columnCount()):
+                val = self._cell(r, c)
+                if not val:
+                    QMessageBox.warning(
+                        self, "Axis",
+                        f"Level {label!r}: variable {members[c - 1]!r} "
+                        f"has no value.",
+                    )
+                    return
+                values[members[c - 1]] = val
+            tuples.append(CorrelatedTuple(label=label, values=values))
+        self._axis = CorrelatedAxis(
+            name=name, members=tuple(members), tuples=tuple(tuples)
+        )
+        self.accept()
+
+    def axis(self) -> Optional[CorrelatedAxis]:
+        return self._axis
+
+
+class _AxesDialog(QDialog):
+    """Manage correlated axes and build aggregated corner columns by
+    crossing them — the user-friendly replacement for the free-text
+    Corner Set authoring (痛点 a + h)."""
+
+    def __init__(self, view: "CornerManagerView") -> None:
+        super().__init__(view)
+        self._view = view
+        self.setWindowTitle("Axes")
+        self.setMinimumWidth(480)
+
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(
+            "An axis bundles variables that move together (e.g. CT with "
+            "process). Build an aggregated corner by crossing axes — the "
+            "point count is the product of the levels, never a blow-up."
+        ))
+
+        v.addWidget(QLabel("Axes"))
+        self._axis_list = QListWidget()
+        v.addWidget(self._axis_list)
+        ab = QHBoxLayout()
+        self._btn_new = QPushButton("New Axis")
+        self._btn_edit = QPushButton("Edit")
+        self._btn_del = QPushButton("Delete")
+        for b in (self._btn_new, self._btn_edit, self._btn_del):
+            ab.addWidget(b)
+        v.addLayout(ab)
+
+        v.addWidget(QLabel("───  Build an aggregated corner  ───"))
+        v.addWidget(QLabel("Tick the axes to cross:"))
+        self._cross_list = QListWidget()
+        v.addWidget(self._cross_list)
+        form = QFormLayout()
+        self._corner_name = QLineEdit()
+        form.addRow("Corner label:", self._corner_name)
+        self._mode_combo = QComboBox()
+        form.addRow("Mode:", self._mode_combo)
+        v.addLayout(form)
+        self._count_label = QLabel()
+        v.addWidget(self._count_label)
+        self._btn_create = QPushButton("Create corner column")
+        v.addWidget(self._btn_create)
+
+        bb = QDialogButtonBox(QDialogButtonBox.Close)
+        bb.rejected.connect(self.reject)
+        v.addWidget(bb)
+
+        self._btn_new.clicked.connect(self._on_new_axis)
+        self._btn_edit.clicked.connect(self._on_edit_axis)
+        self._btn_del.clicked.connect(self._on_delete_axis)
+        self._btn_create.clicked.connect(self._on_create_corner)
+        self._cross_list.itemChanged.connect(self._update_count)
+        self._refresh()
+
+    def _cm(self) -> CornerModel:
+        return self._view.cornermodel()
+
+    def _axis_names(self) -> list[str]:
+        return sorted(self._cm().correlated_axes)
+
+    def _refresh(self) -> None:
+        cm = self._cm()
+        names = self._axis_names()
+        self._axis_list.clear()
+        for name in names:
+            ax = cm.correlated_axes[name]
+            self._axis_list.addItem(
+                f"{name}  —  {len(ax.tuples)} levels "
+                f"({', '.join(ax.members)})"
+            )
+        self._cross_list.blockSignals(True)
+        self._cross_list.clear()
+        for name in names:
+            ax = cm.correlated_axes[name]
+            item = QListWidgetItem(f"{name}   ({len(ax.tuples)} levels)")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setData(Qt.UserRole, name)
+            item.setCheckState(Qt.Unchecked)
+            self._cross_list.addItem(item)
+        self._cross_list.blockSignals(False)
+        self._mode_combo.clear()
+        self._mode_combo.addItems(sorted(cm.modes))
+        self._update_count()
+
+    def _selected_axis(self) -> Optional[str]:
+        row = self._axis_list.currentRow()
+        names = self._axis_names()
+        if 0 <= row < len(names):
+            return names[row]
+        return None
+
+    def _checked_axes(self) -> list[str]:
+        return [
+            self._cross_list.item(i).data(Qt.UserRole)
+            for i in range(self._cross_list.count())
+            if self._cross_list.item(i).checkState() == Qt.Checked
+        ]
+
+    def _update_count(self, *_args) -> None:
+        cm = self._cm()
+        checked = self._checked_axes()
+        if not checked:
+            self._count_label.setText("Tick one or more axes to cross.")
+            self._btn_create.setEnabled(False)
+            return
+        counts = [len(cm.correlated_axes[n].tuples) for n in checked]
+        total = 1
+        for c in counts:
+            total *= c
+        self._count_label.setText(
+            f"{' × '.join(str(c) for c in counts)} = {total} corner points"
+        )
+        if not cm.modes:
+            self._count_label.setText(
+                self._count_label.text() + "   (create a mode first)"
+            )
+        self._btn_create.setEnabled(bool(cm.modes))
+
+    def _on_new_axis(self) -> None:
+        dlg = _AxisGridDialog(
+            taken_names=tuple(self._axis_names()), parent=self
+        )
+        if dlg.exec_() != QDialog.Accepted or dlg.axis() is None:
+            return
+        try:
+            new_cm = add_correlated_axis(self._cm(), dlg.axis())
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "New Axis failed", str(exc))
+            return
+        self._view._apply(new_cm)
+        self._refresh()
+
+    def _on_edit_axis(self) -> None:
+        name = self._selected_axis()
+        if name is None:
+            QMessageBox.information(self, "Edit Axis", "Select an axis.")
+            return
+        dlg = _AxisGridDialog(
+            axis=self._cm().correlated_axes[name], parent=self
+        )
+        if dlg.exec_() != QDialog.Accepted or dlg.axis() is None:
+            return
+        try:
+            new_cm = update_correlated_axis(self._cm(), dlg.axis())
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Edit Axis failed", str(exc))
+            return
+        self._view._apply(new_cm)
+        self._refresh()
+
+    def _on_delete_axis(self) -> None:
+        name = self._selected_axis()
+        if name is None:
+            QMessageBox.information(self, "Delete Axis", "Select an axis.")
+            return
+        if QMessageBox.question(
+            self, "Delete Axis", f"Delete axis {name!r}?"
+        ) != QMessageBox.Yes:
+            return
+        try:
+            new_cm = remove_correlated_axis(self._cm(), name)
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Delete Axis failed", str(exc))
+            return
+        self._view._apply(new_cm)
+        self._refresh()
+
+    def _on_create_corner(self) -> None:
+        checked = self._checked_axes()
+        if not checked:
+            return
+        label = self._corner_name.text().strip()
+        if not re.match(r"^[A-Za-z0-9_]+$", label):
+            QMessageBox.warning(
+                self, "Create corner",
+                "The corner label must use only letters, digits, and "
+                "underscores.",
+            )
+            return
+        mode = self._mode_combo.currentText()
+        if not mode:
+            QMessageBox.warning(
+                self, "Create corner", "Create a mode first."
+            )
+            return
+        column = Column(
+            mode=mode, enabled=True, pvt_vars={}, models=(),
+            pvt_label=label, correlated_axes=tuple(checked),
+        )
+        try:
+            new_cm = add_column(self._cm(), column)
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Create corner failed", str(exc))
+            return
+        self._view._apply(new_cm)
+        QMessageBox.information(
+            self, "Axes",
+            f"Created aggregated corner {effective_name(column)!r}.",
+        )
+        self._corner_name.clear()
+        self._refresh()

@@ -344,6 +344,46 @@ class CornerManagerNewModeFromModeTest(unittest.TestCase):
         ]
         self.assertTrue(any(n.startswith("Process") for n in names))
 
+    def test_new_mode_dialog_lists_all_vars_for_sparse_corner(self):
+        # A sparse corner (only temperature) must still expose every design
+        # variable so it can seed a full register set; a swept var is shown
+        # (not skipped) and defaults to PVT.
+        data = {
+            "cornermodel_schema_version": 1, "name": "sparse",
+            "project": "1AXX", "testbench_id": "sim_yusheng/Test/maestro",
+            "modes": {},
+            "columns": [
+                {"mode": None, "name": "TT", "enabled": True,
+                 "pvt_vars": {"temperature": "55"}},
+                {"mode": None, "name": "FF", "enabled": True,
+                 "pvt_vars": {"temperature": "55",
+                              "VDD": ["3", "2.8"], "EN": "1"}},
+            ],
+        }
+        tmp = Path(tempfile.mkdtemp()) / "sparse.cornermodel.json"
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        cm = load_cornermodel(tmp)
+        dialog = cm_mod._NewModeDialog(cm)
+
+        dialog._column_combo.setCurrentIndex(0)   # the sparse TT column
+        rows = {
+            dialog._table.item(r, 0).text(): dialog._table.item(r, 1).text()
+            for r in range(dialog._table.rowCount())
+        }
+        # VDD / EN appear even though TT does not override them
+        self.assertEqual(rows.get("VDD"), "")
+        self.assertEqual(rows.get("EN"), "")
+
+        dialog._column_combo.setCurrentIndex(1)   # the FF column
+        swept = next(
+            r for r in range(dialog._table.rowCount())
+            if dialog._table.item(r, 0).text() == "VDD"
+        )
+        self.assertEqual(dialog._table.item(swept, 1).text(), "3, 2.8")
+        self.assertEqual(
+            dialog._table.item(swept, 2).checkState(), Qt.Checked
+        )
+
 
 def _make_stage4_cm() -> "object":
     data = {
@@ -850,3 +890,72 @@ class CornerManagerInteractionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CornerManagerAxesTest(unittest.TestCase):
+    """The Axes feature — author a correlated axis as a grid, cross axes
+    into an aggregated corner column (痛点 h)."""
+
+    def _cm(self):
+        from simkit.corner_model import empty_cornermodel, add_mode
+        return add_mode(
+            empty_cornermodel(name="vco", project="P"), "VCO", {"en": "1"}
+        )
+
+    def test_axis_grid_dialog_builds_axis(self):
+        from PyQt5.QtWidgets import QTableWidgetItem, QMessageBox
+        dlg = cm_mod._AxisGridDialog()
+        dlg._name_edit.setText("process")
+        dlg._table.setHorizontalHeaderItem(1, QTableWidgetItem("process"))
+        dlg._add_member(initial="CT")
+        dlg._add_level()
+        for r, (lab, p, ct) in enumerate(
+            [("TT", "tt", "100"), ("FF", "ff", "88")]
+        ):
+            dlg._table.setItem(r, 0, QTableWidgetItem(lab))
+            dlg._table.setItem(r, 1, QTableWidgetItem(p))
+            dlg._table.setItem(r, 2, QTableWidgetItem(ct))
+        with mock.patch.object(QMessageBox, "warning"):
+            dlg._on_ok()
+        ax = dlg.axis()
+        self.assertIsNotNone(ax)
+        self.assertEqual(ax.name, "process")
+        self.assertEqual(ax.members, ("process", "CT"))
+        self.assertEqual(len(ax.tuples), 2)
+        self.assertEqual(
+            ax.tuples[0].values, {"process": "tt", "CT": "100"}
+        )
+
+    def test_axes_dialog_crosses_axes_into_aggregated_corner(self):
+        from PyQt5.QtWidgets import QMessageBox
+        from simkit.corner_model import (
+            CorrelatedAxis, CorrelatedTuple, add_correlated_axis,
+            column_point_count,
+        )
+        view = CornerManagerView(self._cm())
+        cm = view.cornermodel()
+        cm = add_correlated_axis(cm, CorrelatedAxis(
+            "proc", ("process",),
+            tuple(CorrelatedTuple(lv, {"process": lv})
+                  for lv in ("tt", "ff", "ss", "fs", "sf")),
+        ))
+        cm = add_correlated_axis(cm, CorrelatedAxis(
+            "volt", ("VDD",),
+            tuple(CorrelatedTuple(lv, {"VDD": val})
+                  for lv, val in (("n", "1.0"), ("h", "1.1"), ("l", "0.9"))),
+        ))
+        view._apply(cm)
+
+        d = cm_mod._AxesDialog(view)
+        for i in range(d._cross_list.count()):
+            d._cross_list.item(i).setCheckState(Qt.Checked)
+        self.assertIn("5 × 3 = 15", d._count_label.text())
+        d._corner_name.setText("PVT15")
+        d._mode_combo.setCurrentText("VCO")
+        with mock.patch.object(QMessageBox, "information"):
+            d._on_create_corner()
+        col = view.cornermodel().columns[-1]
+        self.assertEqual(set(col.correlated_axes), {"proc", "volt"})
+        self.assertEqual(
+            column_point_count(view.cornermodel(), col, None), 15
+        )
