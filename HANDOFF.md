@@ -17,8 +17,14 @@ For the next conversation. Read this first, then read
   simkit scans Maestro windows (`pvt_runner_list_window_sessions`) and
   the user picks a live session with ◀ ▶ / ⟳. Live-verified the bridge
   fn returns `['fnxSession0']`.
+- `3498b39` rename-mode — double-click a mode in the Modes dialog to
+  rename it; `corner_model.rename_mode` cascades through column modes,
+  variant base_modes, and run-set memberships.
 
-Offline tests green: full suite **1931 passed**.
+Modes dialog now has the full set: New / Edit / Rename (double-click) /
+Delete.
+
+Offline tests green: full suite **1934 passed**.
 
 ## What changed (commit b1e205e) — Run Set panel
 
