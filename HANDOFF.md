@@ -1,4 +1,4 @@
-# Handoff — 2026-05-22 (Corner Sets retired, Axes unified)
+# Handoff — 2026-05-22 (corner & dimension unified)
 
 For the next conversation. Read this first, then read
 `docs/corner_manager_user_story.md` (痛点 a + h).
@@ -7,53 +7,51 @@ For the next conversation. Read this first, then read
 
 `main`, all committed and clean. Recent commits:
 
-- `dc39210` New Mode dialog lists every design variable.
-- `0df5426` Axes feature — author a correlated axis as a grid, cross
-  axes into an aggregated corner column.
-- `cd476bf` docs handoff.
-- `523e90a` **retire Corner Sets, unify on multi-mode Axes** — the
-  task below, now done.
+- `523e90a` retire Corner Sets, unify on multi-mode Axes.
+- `2547c80` **unify corner & dimension authoring** — the work below.
 
-Offline tests green: full suite **1919 passed**; corner + GUI subset
-**715 passed** (`QT_QPA_PLATFORM=offscreen PYTHONPATH=python
-.venv/bin/python3 -m pytest tests/gui tests/test_corner_model*.py
-tests/test_corners*.py -p no:cacheprovider -q`; use `timeout`, a real
-modal hangs offscreen Qt — mock `QMessageBox` in smoke tests).
+Offline tests green: full suite **1922 passed**.
 
-## What changed (commit 523e90a)
+## What changed (commit 2547c80)
 
-Corner Sets (PVT templates) and Axes overlapped — to a user they were
-the same idea. Unified on one concept: **Axes**.
+A corner and an axis were two concepts; to the user they are one — a
+corner is always a crossing of **dimensions**. The authoring is now one
+flow.
 
-- **Removed the whole PVT-template feature.** Data layer: `PvtTemplate`,
-  `TemplateColumn`, `TemplateBinding`, `add_pvt_template`,
-  `apply_template`, `unbind_template`, `Column.template`,
-  `pvt_templates` / `template_bindings` fields, and the cornerlib
-  export/import (`CornerLibrary`, `load/export/import_library`,
-  `library_to_dict`). GUI: the Corner Sets toolbar button + dialog, the
-  free-text column parsers, the apply / unbind / library handlers.
-- **Axes builder is now multi-mode.** `_AxesDialog` replaced the single
-  mode combo with a checkable mode list — one Create stamps the crossed
-  aggregated corner onto every ticked mode at once (痛点 a). Verified
-  live-style by smoke test: ticking VCO + LO stamps `PVT3` onto both.
+Data layer (`corner_model.py`):
+- A level (`CorrelatedTuple`) can carry a model-file `section`; a
+  dimension (`CorrelatedAxis`) an optional `model_file` — the
+  process-corner case (TT → section `tt`) is now expressible.
+- A corner (`Column`) records, per crossed dimension, the subset of
+  level labels it uses (`selected_levels`), and may carry inline
+  dimensions (`inline_axes`) not in the project library.
+- `materialize` crosses the selected subset and folds each chosen
+  level's section into the row's model file.
+- `assign_mode_to_column` folds a raw / pulled column into a mode.
 
-Only one reusable-corner concept remains: **Axes** (toolbar "Axes…").
+GUI (`corner_manager.py`):
+- `New Column` + `Axes…` merged. **`Dimensions…`** manages reusable
+  dimensions (a level grid; a "section" column appears when a Model file
+  is filled in). **`New Corner`** crosses dimensions in a tree, ticking
+  the levels each corner uses, and stamps onto every ticked mode.
+- Right-click a raw / foreign column → "Add to a mode".
+
+Runtime-verified: authoring `VCO_PN_PVT` (process × temp × voltage,
+5 × 2 × 3) yields a 30-point corner with per-level sections applied.
 
 ## NEXT — user acceptance
 
-The acceptance gate is unchanged: a real signoff cycle inside the GUI
-on the live Maestro session. The user dogfoods; restart `pvt gui` to
-pick up new code. `.pvtproject` for live probes:
-`workarea/simkit_1AXX/.pvtproject`; session `fnxSession0`. The literal
-6-stage GUI checklist (`docs/phase5_dogfood_checklist.md`) is still the
-per-stage hands-on acceptance.
+The acceptance gate is unchanged: a real signoff cycle inside the GUI on
+the live Maestro session. The user dogfoods; restart `pvt gui` to pick
+up new code. `.pvtproject` for live probes:
+`workarea/simkit_1AXX/.pvtproject`; session `fnxSession0`. NOT yet
+deployed to the red zone — needs the yellow→red deploy.
 
-## Deferred / known gaps
+## Known gaps / polish
 
-- **Model-file axis members** — a `.s5p` inductor file that follows
-  temperature is not supported; axes are var-only (`CorrelatedTuple`
-  carries vars, not models). Temperature-as-a-var works. Extending
-  `CorrelatedTuple` to carry model assignments is a follow-up.
-- Variable-row order cannot be pushed to Maestro — Maestro's corner
-  editor row order has no SKILL API (`axlPutVar` only appends). Treat
-  the simkit row order as a local display preference.
+- The New Mode dialog's process preview (`column_models(col)`, 1-arg)
+  does not resolve a dimension-built column's sections — cosmetic.
+- A section dimension's `model_file` is a single path; if a corner
+  already has its own model entry for that file the section overwrites
+  it (intended). Multiple section dimensions on one corner each target
+  their own file.
