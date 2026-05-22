@@ -198,18 +198,14 @@ def _make_stage2_cm() -> "object":
                 ],
             }
         },
-        "pvt_templates": {
-            "vco_full": {
-                "columns": [
-                    {"pvt_label": "TT", "pvt_vars": {"temperature": "55"}},
-                    {"pvt_label": "PVT", "pvt_vars": {"VDD": ["0.9", "1.0"]},
-                     "correlated_axes": ["proc_ct"]},
-                ]
-            }
-        },
         "columns": [
             {"mode": "VCO", "pvt_label": "seed", "enabled": True,
              "pvt_vars": {"temperature": "55"}},
+            {"mode": "VCO", "pvt_label": "TT", "enabled": True,
+             "pvt_vars": {"temperature": "55"}},
+            {"mode": "VCO", "pvt_label": "PVT", "enabled": True,
+             "pvt_vars": {"VDD": ["0.9", "1.0"]},
+             "correlated_axes": ["proc_ct"]},
         ],
     }
     tmp = Path(tempfile.mkdtemp())
@@ -236,29 +232,7 @@ class CornerManagerStage2Test(unittest.TestCase):
         self._warning_mock = patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_template_panel_populated(self):
-        self.assertEqual(self.view.templates_list.count(), 1)
-
-    def test_apply_template_generates_columns(self):
-        self.view.templates_list.setCurrentRow(0)
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getItem",
-            return_value=("VCO", True),
-        ):
-            self.view._on_apply_template()
-        # seed + VCO_TT + VCO_PVT
-        self.assertEqual(self.view.table_model.columnCount(), 5)
-        self.assertTrue(
-            any(b.template == "vco_full"
-                for b in self.view.cornermodel().template_bindings)
-        )
-
     def test_aggregation_column_point_count_in_ncorners_row(self):
-        self.view.templates_list.setCurrentRow(0)
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getItem", return_value=("VCO", True),
-        ):
-            self.view._on_apply_template()
         model = self.view.table_model
         col = next(
             c for c in range(model.columnCount())
@@ -272,17 +246,6 @@ class CornerManagerStage2Test(unittest.TestCase):
         self.assertEqual(
             model.data(model.index(nrow, col), Qt.DisplayRole), "4"
         )
-
-    def test_unbind_template_after_apply(self):
-        self.view.templates_list.setCurrentRow(0)
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getItem", return_value=("VCO", True),
-        ):
-            self.view._on_apply_template()
-            self.view._on_unbind_template()
-        self.assertEqual(self.view.cornermodel().template_bindings, ())
-        # columns kept (D3 freeze)
-        self.assertEqual(self.view.table_model.columnCount(), 5)
 
 
 class CornerManagerNewModeFromModeTest(unittest.TestCase):
@@ -496,7 +459,6 @@ def _make_stage5_cm() -> "object":
         "project": "1AXX",
         "testbench_id": "sim_yusheng/Test/maestro",
         "modes": {"M": {"vars": {"d_en": "1", "ldo_vset": "3", "div12": "1"}}},
-        "pvt_templates": {"lib_tmpl": {"columns": [{"pvt_label": "TT"}]}},
         "columns": [
             {"mode": "M", "pvt_label": "seed", "enabled": True,
              "pvt_vars": {"temperature": "55"}},
@@ -573,34 +535,6 @@ class CornerManagerStage5Test(unittest.TestCase):
         self.assertFalse(model.has_active_filters())
         self.assertFalse(self.view.table.isRowHidden(1))
         self.view.hide()
-
-    def test_export_then_import_library(self):
-        lib_path = self.tmp / "std.cornerlib.json"
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getText",
-            return_value=(str(lib_path), True),
-        ):
-            self.view._on_export_library()
-        self.assertTrue(lib_path.is_file())
-
-        # import into a fresh view (no templates) — should merge in lib_tmpl
-        fresh_data = {
-            "cornermodel_schema_version": 1, "name": "lo_corners",
-            "project": "1AXX", "testbench_id": "sim_yusheng/Test/maestro",
-            "modes": {"M": {"vars": {"d_en": "1"}}},
-            "columns": [{"mode": "M", "pvt_label": "seed", "enabled": True,
-                         "pvt_vars": {"temperature": "55"}}],
-        }
-        fp = self.tmp / "lo_corners.cornermodel.json"
-        fp.write_text(json.dumps(fresh_data), encoding="utf-8")
-        fresh_view = CornerManagerView(load_cornermodel(fp))
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getText",
-            return_value=(str(lib_path), True),
-        ):
-            fresh_view._on_import_library()
-        self.assertIn("lib_tmpl", fresh_view.cornermodel().pvt_templates)
-        fresh_view.deleteLater()
 
 
 def _make_stage6() -> tuple:
@@ -683,7 +617,7 @@ def _make_basic_cm() -> "object":
 
 
 class CornerManagerAuthoringTest(unittest.TestCase):
-    """GUI authoring of corner sets / run sets."""
+    """GUI authoring of run sets."""
 
     def setUp(self):
         patcher = mock.patch.object(
@@ -693,39 +627,6 @@ class CornerManagerAuthoringTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.view = CornerManagerView(_make_basic_cm())
         self.addCleanup(self.view.deleteLater)
-
-    def test_new_template_button_creates_a_pvt_template(self):
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getText", return_value=("rx_full", True),
-        ), mock.patch.object(
-            cm_mod.QInputDialog, "getMultiLineText",
-            return_value=("TT: temperature=55, VDD=0.9\n"
-                          "SS_1: temperature=125, VDD=0.85", True),
-        ):
-            self.view._on_new_template()
-        tmpl = self.view.cornermodel().pvt_templates.get("rx_full")
-        self.assertIsNotNone(tmpl)
-        self.assertEqual([c.pvt_label for c in tmpl.columns], ["TT", "SS_1"])
-
-    def test_new_template_then_apply_generates_columns(self):
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getText", return_value=("rx_full", True),
-        ), mock.patch.object(
-            cm_mod.QInputDialog, "getMultiLineText",
-            return_value=("LP: temperature=55, VDD=0.7", True),
-        ):
-            self.view._on_new_template()
-        self.view.templates_list.setCurrentRow(0)
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getItem", return_value=("BT_2G_RX", True),
-        ):
-            self.view._on_apply_template()
-        names = {
-            str(self.view.table_model.headerData(
-                c, Qt.Horizontal, Qt.DisplayRole)).split(" ·")[0]
-            for c in range(self.view.table_model.columnCount())
-        }
-        self.assertIn("BT_2G_RX_LP", names)
 
     def test_new_run_set_uses_column_picker(self):
         with mock.patch.object(
@@ -951,11 +852,46 @@ class CornerManagerAxesTest(unittest.TestCase):
             d._cross_list.item(i).setCheckState(Qt.Checked)
         self.assertIn("5 × 3 = 15", d._count_label.text())
         d._corner_name.setText("PVT15")
-        d._mode_combo.setCurrentText("VCO")
+        for i in range(d._mode_list.count()):
+            d._mode_list.item(i).setCheckState(Qt.Checked)
         with mock.patch.object(QMessageBox, "information"):
             d._on_create_corner()
         col = view.cornermodel().columns[-1]
         self.assertEqual(set(col.correlated_axes), {"proc", "volt"})
         self.assertEqual(
             column_point_count(view.cornermodel(), col, None), 15
+        )
+
+    def test_axes_create_stamps_onto_every_ticked_mode(self):
+        # Multi-mode: ticking several modes stamps the aggregated corner
+        # onto each at once — Axes covers reuse across modes (痛点 a).
+        from PyQt5.QtWidgets import QMessageBox
+        from simkit.corner_model import (
+            CorrelatedAxis, CorrelatedTuple, add_correlated_axis, add_mode,
+            effective_name,
+        )
+        cm = self._cm()
+        cm = add_mode(cm, "LO", {"en": "1"})
+        cm = add_mode(cm, "PA", {"en": "1"})
+        cm = add_correlated_axis(cm, CorrelatedAxis(
+            "proc", ("process",),
+            tuple(CorrelatedTuple(lv, {"process": lv})
+                  for lv in ("tt", "ff", "ss")),
+        ))
+        view = CornerManagerView(cm)
+        view._apply(cm)
+
+        d = cm_mod._AxesDialog(view)
+        d._cross_list.item(0).setCheckState(Qt.Checked)
+        d._corner_name.setText("PVT3")
+        for i in range(d._mode_list.count()):
+            d._mode_list.item(i).setCheckState(Qt.Checked)
+        with mock.patch.object(QMessageBox, "information"):
+            d._on_create_corner()
+        stamped = {
+            effective_name(c) for c in view.cornermodel().columns
+            if c.pvt_label == "PVT3"
+        }
+        self.assertEqual(
+            stamped, {"VCO_PVT3", "LO_PVT3", "PA_PVT3"}
         )

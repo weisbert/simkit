@@ -54,23 +54,15 @@ from simkit.corner_model import (
     CorrelatedAxis,
     CorrelatedTuple,
     ModelEntry,
-    PvtTemplate,
-    TemplateColumn,
     add_column,
     add_correlated_axis,
     add_mode,
-    add_pvt_template,
     add_run_set,
     apply_run_set,
-    apply_template,
     check_cornermodel,
     column_models,
     delete_column,
     effective_name,
-    export_library,
-    import_library,
-    library_to_dict,
-    load_library,
     mode_from_column,
     move_column,
     reclassify_mode,
@@ -85,7 +77,6 @@ from simkit.corner_model import (
     set_mode_var,
     set_pvt_var,
     set_var_order,
-    unbind_template,
 )
 from simkit.gui.corner_filter import MENU_ORDER
 from simkit.gui.corner_model_table import CornerModelTableModel
@@ -144,12 +135,6 @@ class CornerManagerView(QWidget):
             "their registers. A variant is just a mode derived from "
             "another — use New Mode ▸ from an existing mode."
         )
-        self.btn_templates = QPushButton("Corner Sets…")
-        self.btn_templates.setToolTip(
-            "A Corner Set is a reusable list of PVT corner columns. "
-            "Design it once, then apply it to every mode — no need to "
-            "rebuild the same corners per mode."
-        )
         self.btn_axes = QPushButton("Axes…")
         self.btn_axes.setToolTip(
             "Define correlated axes — variables that move together, like CT "
@@ -160,8 +145,7 @@ class CornerManagerView(QWidget):
         self.btn_run_sets.setToolTip(
             "Manage run sets — named cross-mode corner selections."
         )
-        for b in (self.btn_modes, self.btn_templates, self.btn_axes,
-                  self.btn_run_sets):
+        for b in (self.btn_modes, self.btn_axes, self.btn_run_sets):
             top.addWidget(b)
         self.btn_new_column = QPushButton("New Column")
         self.btn_new_column.setToolTip(
@@ -240,13 +224,10 @@ class CornerManagerView(QWidget):
         # Editor pop-ups — built once, hidden until a toolbar button raises
         # them; non-modal so corner-table edits stay live behind.
         self._build_modes_dialog()
-        self._build_templates_dialog()
         self._build_run_sets_dialog()
 
         self.btn_modes.clicked.connect(
             lambda: self._open_dialog(self._modes_dialog))
-        self.btn_templates.clicked.connect(
-            lambda: self._open_dialog(self._templates_dialog))
         self.btn_run_sets.clicked.connect(
             lambda: self._open_dialog(self._run_sets_dialog))
 
@@ -257,9 +238,6 @@ class CornerManagerView(QWidget):
         self.btn_new_mode.clicked.connect(self._on_new_mode)
         self.btn_edit_mode.clicked.connect(self._on_edit_mode)
         self.btn_new_column.clicked.connect(self._on_new_column)
-        self.btn_new_template.clicked.connect(self._on_new_template)
-        self.btn_apply_template.clicked.connect(self._on_apply_template)
-        self.btn_unbind_template.clicked.connect(self._on_unbind_template)
         self.btn_new_run_set.clicked.connect(self._on_new_run_set)
         self.btn_apply_run_set.clicked.connect(self._on_apply_run_set)
         self.btn_filter_set.clicked.connect(self._on_filter_set)
@@ -285,8 +263,6 @@ class CornerManagerView(QWidget):
         paste_sc = QShortcut(QKeySequence.Paste, self.table)
         paste_sc.setContext(Qt.WidgetWithChildrenShortcut)
         paste_sc.activated.connect(self._paste_selection)
-        self.btn_export_lib.clicked.connect(self._on_export_library)
-        self.btn_import_lib.clicked.connect(self._on_import_library)
         self.btn_pull.clicked.connect(self.pull_requested.emit)
         self.btn_push.clicked.connect(
             lambda: self.push_requested.emit(self._cm)
@@ -337,40 +313,6 @@ class CornerManagerView(QWidget):
         )
         self.mode_vars.verticalHeader().setDefaultSectionSize(24)
         v.addWidget(self.mode_vars)
-
-    def _build_templates_dialog(self) -> None:
-        self._templates_dialog = QDialog(self)
-        self._templates_dialog.setWindowTitle("Corner Sets")
-        self._templates_dialog.resize(440, 420)
-        v = QVBoxLayout(self._templates_dialog)
-        v.addWidget(QLabel(
-            "A Corner Set is a reusable list of PVT corner columns "
-            "(TT, SS_1, FF_1, …). Author it once, then apply it to every "
-            "mode so you do not rebuild the same corners per mode."
-        ))
-        hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("Corner Sets"))
-        hdr.addStretch(1)
-        self.btn_new_template = QPushButton("New Corner Set")
-        self.btn_new_template.setToolTip(
-            "Author a reusable list of PVT corner columns."
-        )
-        hdr.addWidget(self.btn_new_template)
-        v.addLayout(hdr)
-        self.templates_list = QListWidget()
-        v.addWidget(self.templates_list)
-        tmpl_btns = QHBoxLayout()
-        self.btn_apply_template = QPushButton("Apply to a mode")
-        self.btn_unbind_template = QPushButton("Unbind")
-        tmpl_btns.addWidget(self.btn_apply_template)
-        tmpl_btns.addWidget(self.btn_unbind_template)
-        v.addLayout(tmpl_btns)
-        lib_btns = QHBoxLayout()
-        self.btn_export_lib = QPushButton("Export to file")
-        self.btn_import_lib = QPushButton("Import from file")
-        lib_btns.addWidget(self.btn_export_lib)
-        lib_btns.addWidget(self.btn_import_lib)
-        v.addLayout(lib_btns)
 
     def _build_run_sets_dialog(self) -> None:
         self._run_sets_dialog = QDialog(self)
@@ -436,7 +378,6 @@ class CornerManagerView(QWidget):
 
     def _refresh_side_panels(self) -> None:
         self._refresh_modes_panel()
-        self._refresh_templates_panel()
         self._refresh_run_sets_panel()
 
     # --- run-sets panel + column filter ---------------------------------
@@ -921,64 +862,12 @@ class CornerManagerView(QWidget):
                     continue
                 self.table_model.setData(idx, value, Qt.EditRole)
 
-    # --- corner sets (templates) ----------------------------------------
-
     # --- correlated axes ------------------------------------------------
 
     def _on_axes(self) -> None:
         """Open the Axes manager — define correlated axes and build
         aggregated corner columns by crossing them (痛点 h)."""
         _AxesDialog(self).exec_()
-
-    def _on_new_template(self) -> None:
-        if not self._cm.modes:
-            QMessageBox.warning(
-                self, "New Corner Set", "Create a mode first."
-            )
-            return
-        name, ok = QInputDialog.getText(
-            self, "New Corner Set",
-            "Corner set name (^[A-Za-z][A-Za-z0-9_]*$):"
-        )
-        if not ok or not name.strip():
-            return
-        cols_text, ok = QInputDialog.getMultiLineText(
-            self, "New Corner Set — corner columns",
-            "One corner column per line — label: var=value, var=value\n"
-            "e.g.   TT: temperature=55, VDD=0.9",
-            "TT: temperature=55, VDD=0.9",
-        )
-        if not ok:
-            return
-        try:
-            columns = _parse_template_columns(cols_text)
-            new_cm = add_pvt_template(self._cm, PvtTemplate(
-                name=name.strip(), columns=columns,
-            ))
-        except (ValueError, CornerModelError) as exc:
-            QMessageBox.warning(self, "New corner set failed", str(exc))
-            return
-        self._apply(new_cm)
-
-    def _refresh_templates_panel(self) -> None:
-        prev = self._selected_template_name()
-        self.templates_list.clear()
-        names = sorted(self._cm.pvt_templates)
-        for name in names:
-            bound = sorted(
-                b.mode for b in self._cm.template_bindings
-                if b.template == name
-            )
-            suffix = f"  → {', '.join(bound)}" if bound else ""
-            self.templates_list.addItem(f"{name}{suffix}")
-        if prev in names:
-            self.templates_list.setCurrentRow(names.index(prev))
-
-    def _selected_template_name(self) -> Optional[str]:
-        item = self.templates_list.currentItem()
-        if item is None:
-            return None
-        return item.text().split("  → ")[0]
 
     def _on_mode_selected(self, *_args) -> None:
         item = self.modes_list.currentItem()
@@ -1039,7 +928,7 @@ class CornerManagerView(QWidget):
         self._refresh_check_status()
         self.cornermodel_edited.emit(new_cm)
 
-    # --- check status / library -----------------------------------------
+    # --- check status ---------------------------------------------------
 
     def _refresh_check_status(self) -> None:
         base = (
@@ -1056,104 +945,6 @@ class CornerManagerView(QWidget):
             self.check_label.setText(
                 f"Check: {len(issues)} issue(s) — {head}"
             )
-
-    def _on_export_library(self) -> None:
-        path, ok = QInputDialog.getText(
-            self, "Export template library",
-            "Path to write the .cornerlib.json:"
-        )
-        if not ok or not path.strip():
-            return
-        p = Path(path.strip()).expanduser()
-        stem = p.name
-        libname = (
-            stem[:-len(".cornerlib.json")]
-            if stem.endswith(".cornerlib.json") else "exported_lib"
-        )
-        try:
-            lib = export_library(self._cm, libname)
-            p.write_text(
-                json.dumps(library_to_dict(lib), indent=2, ensure_ascii=False)
-                + "\n",
-                encoding="utf-8",
-            )
-        except (CornerModelError, OSError) as exc:
-            QMessageBox.warning(
-                self, "Export template library failed", str(exc)
-            )
-
-    def _on_import_library(self) -> None:
-        path, ok = QInputDialog.getText(
-            self, "Import template library", "Path to the .cornerlib.json:"
-        )
-        if not ok or not path.strip():
-            return
-        try:
-            lib = load_library(path.strip())
-            new_cm = import_library(self._cm, lib)
-        except CornerModelError as exc:
-            QMessageBox.warning(
-                self, "Import template library failed", str(exc)
-            )
-            return
-        self._apply(new_cm)
-
-    # --- corner sets: apply / unbind ------------------------------------
-
-    def _on_apply_template(self) -> None:
-        tmpl = self._selected_template_name()
-        if tmpl is None:
-            QMessageBox.warning(
-                self, "Apply corner set", "Select a corner set first."
-            )
-            return
-        if not self._cm.modes:
-            QMessageBox.warning(
-                self, "Apply corner set", "Create a mode first."
-            )
-            return
-        mode, ok = QInputDialog.getItem(
-            self, "Apply corner set",
-            f"Apply corner set {tmpl} to which mode:",
-            sorted(self._cm.modes), 0, False,
-        )
-        if not ok:
-            return
-        try:
-            new_cm = apply_template(self._cm, mode, tmpl)
-        except CornerModelError as exc:
-            QMessageBox.warning(self, "Apply corner set failed", str(exc))
-            return
-        self._apply(new_cm)
-
-    def _on_unbind_template(self) -> None:
-        tmpl = self._selected_template_name()
-        if tmpl is None:
-            QMessageBox.warning(
-                self, "Unbind corner set", "Select a corner set first."
-            )
-            return
-        bound = [
-            b for b in self._cm.template_bindings if b.template == tmpl
-        ]
-        if not bound:
-            QMessageBox.warning(
-                self, "Unbind corner set",
-                f"Corner set {tmpl} is not applied to any mode."
-            )
-            return
-        labels = [b.variant or b.mode for b in bound]
-        label, ok = QInputDialog.getItem(
-            self, "Unbind corner set",
-            f"Unbind {tmpl} from which mode (its columns stay, frozen):",
-            labels, 0, False,
-        )
-        if not ok:
-            return
-        binding = bound[labels.index(label)]
-        self._apply(unbind_template(
-            self._cm, binding.mode, tmpl, variant=binding.variant
-        ))
 
     # --- new / edit mode, new column ------------------------------------
 
@@ -1729,57 +1520,6 @@ class _ReorderDialog(QDialog):
         )
 
 
-def _split_label_line(line: str) -> tuple[str, str]:
-    """Split ``label: rest`` into ``(label, rest)``."""
-    if ":" not in line:
-        raise ValueError(f"line {line!r} must be 'label: ...'")
-    label, _, rest = line.partition(":")
-    label = label.strip()
-    if not label:
-        raise ValueError(f"line {line!r} is missing the label")
-    return label, rest
-
-
-def _parse_kv_comma(segment: str) -> tuple[dict[str, str], list[str]]:
-    """Parse ``a=1, b=2, +axis`` → ``({a:1, b:2}, ['axis'])``."""
-    pairs: dict[str, str] = {}
-    axes: list[str] = []
-    for raw in segment.split(","):
-        tok = raw.strip()
-        if not tok:
-            continue
-        if tok.startswith("+"):
-            axes.append(tok[1:].strip())
-            continue
-        if "=" not in tok:
-            raise ValueError(
-                f"token {tok!r} is not var=value or +axisName"
-            )
-        key, _, value = tok.partition("=")
-        pairs[key.strip()] = value.strip()
-    return pairs, axes
-
-
-def _parse_template_columns(text: str) -> tuple[TemplateColumn, ...]:
-    """Parse the New-Template multi-line dialog into TemplateColumns."""
-    cols: list[TemplateColumn] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        label, rest = _split_label_line(line)
-        pairs, axes = _parse_kv_comma(rest)
-        cols.append(TemplateColumn(
-            pvt_label=label,
-            pvt_vars={k: (v,) for k, v in pairs.items()},
-            correlated_axes=tuple(axes),
-        ))
-    if not cols:
-        raise ValueError("a template needs at least one column")
-    return tuple(cols)
-
-
-
 class _AxisGridDialog(QDialog):
     """Author one correlated axis as a small grid: each member variable is a
     column, each level is a row. Members move together — one level (row)
@@ -2009,8 +1749,8 @@ class _AxisGridDialog(QDialog):
 
 class _AxesDialog(QDialog):
     """Manage correlated axes and build aggregated corner columns by
-    crossing them — the user-friendly replacement for the free-text
-    Corner Set authoring (痛点 a + h)."""
+    crossing them — one Create stamps the corner onto every ticked mode,
+    so a reusable corner set is just an axis crossing (痛点 a + h)."""
 
     def __init__(self, view: "CornerManagerView") -> None:
         super().__init__(view)
@@ -2043,12 +1783,13 @@ class _AxesDialog(QDialog):
         form = QFormLayout()
         self._corner_name = QLineEdit()
         form.addRow("Corner label:", self._corner_name)
-        self._mode_combo = QComboBox()
-        form.addRow("Mode:", self._mode_combo)
         v.addLayout(form)
+        v.addWidget(QLabel("Stamp the corner onto these modes:"))
+        self._mode_list = QListWidget()
+        v.addWidget(self._mode_list)
         self._count_label = QLabel()
         v.addWidget(self._count_label)
-        self._btn_create = QPushButton("Create corner column")
+        self._btn_create = QPushButton("Create corner columns")
         v.addWidget(self._btn_create)
 
         bb = QDialogButtonBox(QDialogButtonBox.Close)
@@ -2088,8 +1829,17 @@ class _AxesDialog(QDialog):
             item.setCheckState(Qt.Unchecked)
             self._cross_list.addItem(item)
         self._cross_list.blockSignals(False)
-        self._mode_combo.clear()
-        self._mode_combo.addItems(sorted(cm.modes))
+        prev_modes = set(self._checked_modes())
+        self._mode_list.blockSignals(True)
+        self._mode_list.clear()
+        for mode_name in sorted(cm.modes):
+            item = QListWidgetItem(mode_name)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(
+                Qt.Checked if mode_name in prev_modes else Qt.Unchecked
+            )
+            self._mode_list.addItem(item)
+        self._mode_list.blockSignals(False)
         self._update_count()
 
     def _selected_axis(self) -> Optional[str]:
@@ -2104,6 +1854,13 @@ class _AxesDialog(QDialog):
             self._cross_list.item(i).data(Qt.UserRole)
             for i in range(self._cross_list.count())
             if self._cross_list.item(i).checkState() == Qt.Checked
+        ]
+
+    def _checked_modes(self) -> list[str]:
+        return [
+            self._mode_list.item(i).text()
+            for i in range(self._mode_list.count())
+            if self._mode_list.item(i).checkState() == Qt.Checked
         ]
 
     def _update_count(self, *_args) -> None:
@@ -2187,25 +1944,30 @@ class _AxesDialog(QDialog):
                 "underscores.",
             )
             return
-        mode = self._mode_combo.currentText()
-        if not mode:
+        modes = self._checked_modes()
+        if not modes:
             QMessageBox.warning(
-                self, "Create corner", "Create a mode first."
+                self, "Create corner", "Tick at least one mode to stamp."
             )
             return
-        column = Column(
-            mode=mode, enabled=True, pvt_vars={}, models=(),
-            pvt_label=label, correlated_axes=tuple(checked),
-        )
-        try:
-            new_cm = add_column(self._cm(), column)
-        except CornerModelError as exc:
-            QMessageBox.warning(self, "Create corner failed", str(exc))
-            return
+        new_cm = self._cm()
+        created: list[str] = []
+        for mode in modes:
+            column = Column(
+                mode=mode, enabled=True, pvt_vars={}, models=(),
+                pvt_label=label, correlated_axes=tuple(checked),
+            )
+            try:
+                new_cm = add_column(new_cm, column)
+            except CornerModelError as exc:
+                QMessageBox.warning(self, "Create corner failed", str(exc))
+                return
+            created.append(effective_name(column))
         self._view._apply(new_cm)
         QMessageBox.information(
             self, "Axes",
-            f"Created aggregated corner {effective_name(column)!r}.",
+            f"Created {len(created)} aggregated corner column(s): "
+            f"{', '.join(created)}.",
         )
         self._corner_name.clear()
         self._refresh()

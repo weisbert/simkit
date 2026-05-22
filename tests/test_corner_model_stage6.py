@@ -11,7 +11,6 @@ from simkit import union
 from simkit.corner_model import (
     CornerModelSchemaVersionError,
     CornerModelValidationError,
-    apply_template,
     check_cornermodel,
     column_point_count,
     load_cornermodel,
@@ -175,20 +174,6 @@ def test_materialize_whole_model_with_profile(tmp_path):
     cm = _load_cm(tmp_path)
     u = materialize(cm, prof)
     assert union.explode(u)[0].vars["LDO_VSET"] == "20"
-
-
-# --- templates carry axis_levels -----------------------------------------
-
-
-def test_apply_template_carries_axis_levels(tmp_path):
-    d = _cm_dict()
-    d["pvt_templates"] = {"t": {"columns": [
-        {"pvt_label": "PVT", "axis_levels": {"voltage": "low"}}
-    ]}}
-    cm = _load_cm(tmp_path, d)
-    cm2 = apply_template(cm, "M", "t")
-    gen = next(c for c in cm2.columns if c.pvt_label == "PVT")
-    assert gen.axis_levels == {"voltage": "low"}
 
 
 # --- check_cornermodel ---------------------------------------------------

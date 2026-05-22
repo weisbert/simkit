@@ -12,7 +12,6 @@ from simkit.corner_model import (
     CornerModelValidationError,
     Variant,
     add_variant,
-    apply_template,
     effective_name,
     is_cell_red,
     load_cornermodel,
@@ -40,11 +39,6 @@ def _base() -> dict:
                 "base_mode": "BT_2G_RX",
                 "vars": {"d_div12_en": "0"},
             }
-        },
-        "pvt_templates": {
-            "pn_set": {"columns": [
-                {"pvt_label": "TT", "pvt_vars": {"temperature": "55"}},
-            ]}
         },
         "columns": [
             {"mode": "BT_2G_RX", "variant": "BT_2G_RX_PN",
@@ -168,21 +162,8 @@ def test_set_variant_var_global_edit(tmp_path):
     assert row.vars["d_div12_en"] == ("2",)
 
 
-def test_apply_template_to_variant(tmp_path):
-    cm = _write_load(tmp_path, _base())
-    cm2 = apply_template(cm, "BT_2G_RX", "pn_set", variant="BT_2G_RX_PN")
-    names = {effective_name(c) for c in cm2.columns}
-    assert "BT_2G_RX_PN_TT" in names
-    gen = next(c for c in cm2.columns if c.pvt_label == "TT")
-    assert gen.variant == "BT_2G_RX_PN"
-    assert any(
-        b.variant == "BT_2G_RX_PN" for b in cm2.template_bindings
-    )
-
-
 def test_to_dict_round_trip_stage3(tmp_path):
     cm = _write_load(tmp_path, _base())
-    cm = apply_template(cm, "BT_2G_RX", "pn_set", variant="BT_2G_RX_PN")
     out = tmp_path / "lo_corners.cornermodel.json"
     out.write_text(json.dumps(to_dict(cm)), encoding="utf-8")
     assert to_dict(load_cornermodel(out)) == to_dict(cm)

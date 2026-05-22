@@ -330,8 +330,6 @@ class CornerModelTableModel(QAbstractTableModel):
                 )
             if col.variant is not None:
                 bits.append(f"Variant: {col.variant}")
-            if col.template is not None:
-                bits.append(f"Generated from template {col.template}")
             if col.correlated_axes:
                 bits.append(
                     f"Correlated axes: {', '.join(col.correlated_axes)} "

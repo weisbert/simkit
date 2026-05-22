@@ -7,7 +7,7 @@ A *cornermodel* is a model layer on top of Phase 2's ``Union``: it adds the
 materialises down to a ``Union`` for explode / CSV / push. See ``materialize``.
 
 Stage 1 scope: modes + columns + global edit + auto-naming + reconciliation.
-Variants / PVT templates / sets / correlated axes are Stage 2-5 and absent here.
+Variants / correlated axes are Stage 2-5 and absent here.
 """
 
 from __future__ import annotations
@@ -83,39 +83,6 @@ class CorrelatedAxis:
 
 
 @dataclass(frozen=True)
-class TemplateColumn:
-    """One column-spec inside a PVT template (spec §2.2)."""
-
-    pvt_label: str
-    pvt_vars: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    pvt_sweep_keys: frozenset[str] = field(default_factory=frozenset)
-    correlated_axes: tuple[str, ...] = ()
-    # Stage 6: semantic axis→level tokens resolved through the PVT profile.
-    axis_levels: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class PvtTemplate:
-    """A reusable list of column-specs (spec §2.2, 痛点 a)."""
-
-    name: str
-    columns: tuple[TemplateColumn, ...]
-
-
-@dataclass(frozen=True)
-class TemplateBinding:
-    """An active template binding (Stage 2 §2.3 / Stage 3 §2.3).
-
-    ``variant`` is set when the binding targets a variant rather than the
-    plain mode — variants are first-class and can be template-applied.
-    """
-
-    mode: str
-    template: str
-    variant: str | None = None
-
-
-@dataclass(frozen=True)
 class Variant:
     """A mode's diff-overlay (Stage 3 §2.1, 痛点 c).
 
@@ -175,9 +142,10 @@ class PvtAxis:
 class PvtProfile:
     """Per-project PVT semantic→concrete mapping (Stage 6 §2).
 
-    Authored once at project kickoff. Templates reference semantic
+    Authored once at project kickoff. Columns reference semantic
     ``axis:level`` tokens; ``materialize`` resolves them through the profile,
-    so the same template ports to another project under a different profile.
+    so the same cornermodel ports to another project under a different
+    profile.
     """
 
     pvtprofile_schema_version: int
@@ -206,9 +174,8 @@ class Column:
     overrides: dict[str, str] = field(default_factory=dict)
     pvt_sweep_keys: frozenset[str] = field(default_factory=frozenset)
     model_sweep_indices: frozenset[int] = field(default_factory=frozenset)
-    # Stage 2: correlated axes referenced by this column + template provenance.
+    # Stage 2: correlated axes referenced by this column.
     correlated_axes: tuple[str, ...] = ()
-    template: str | None = None
     # Stage 3: the variant this column hangs on (its mode = variant.base_mode).
     variant: str | None = None
     # Stage 6: semantic axis→level tokens resolved through the PVT profile.
@@ -230,10 +197,8 @@ class CornerModel:
     testbench_id: str
     modes: dict[str, Mode]
     columns: tuple[Column, ...]
-    # Stage 2 additions — all default-empty so Stage 1 sidecars load unchanged.
+    # Stage 2 addition — default-empty so Stage 1 sidecars load unchanged.
     correlated_axes: dict[str, CorrelatedAxis] = field(default_factory=dict)
-    pvt_templates: dict[str, PvtTemplate] = field(default_factory=dict)
-    template_bindings: tuple[TemplateBinding, ...] = ()
     # Stage 3 addition.
     variants: dict[str, Variant] = field(default_factory=dict)
     # Stage 4 addition.
@@ -301,9 +266,7 @@ def load_cornermodel(
     modes = _validate_modes(p, data)
     variants = _validate_variants(p, data, modes)
     correlated_axes = _validate_correlated_axes(p, data)
-    pvt_templates = _validate_templates(p, data, correlated_axes)
     columns = _validate_columns(p, data, modes, correlated_axes, variants)
-    bindings = _validate_bindings(p, data, modes, pvt_templates, variants)
     run_sets = _validate_run_sets(p, data)
     var_order = _validate_var_order(p, data)
     pvt_profile = data.get("pvt_profile")
@@ -321,8 +284,6 @@ def load_cornermodel(
         modes=modes,
         columns=columns,
         correlated_axes=correlated_axes,
-        pvt_templates=pvt_templates,
-        template_bindings=bindings,
         variants=variants,
         run_sets=run_sets,
         var_order=var_order,
@@ -560,11 +521,6 @@ def _validate_column(
     )
     models, model_sweep_indices = _parse_models(where, raw.get("models", []))
     col_axes = _parse_column_axes(where, raw, correlated_axes)
-    template = raw.get("template")
-    if template is not None and not isinstance(template, str):
-        raise CornerModelValidationError(
-            f"{where}: 'template' provenance must be a string or absent"
-        )
 
     variant = raw.get("variant")
     if variant is not None:
@@ -594,7 +550,7 @@ def _validate_column(
             models, model_sweep_indices,
         )
     col = replace(
-        col, correlated_axes=col_axes, template=template, variant=variant,
+        col, correlated_axes=col_axes, variant=variant,
         axis_levels=_parse_axis_levels(where, raw),
         tests=_parse_tests(where, raw),
     )
@@ -802,7 +758,7 @@ def _parse_models(
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 loaders — correlated axes, PVT templates, bindings (spec §2)
+# Stage 2 loaders — correlated axes (spec §2)
 # ---------------------------------------------------------------------------
 
 
@@ -872,99 +828,6 @@ def _validate_correlated_axes(
             name=axis_name, members=members, tuples=tuple(tuples)
         )
     return out
-
-
-def _validate_templates(
-    path: Path, data: dict, correlated_axes: dict[str, CorrelatedAxis]
-) -> dict[str, PvtTemplate]:
-    raw = data.get("pvt_templates", {})
-    if not isinstance(raw, dict):
-        raise CornerModelValidationError(
-            f"{path}: 'pvt_templates' must be a JSON object"
-        )
-    out: dict[str, PvtTemplate] = {}
-    for tmpl_name, raw_tmpl in raw.items():
-        where = f"{path}: pvt_templates[{tmpl_name!r}]"
-        if not _MODEL_NAME_RE.match(tmpl_name):
-            raise CornerModelValidationError(
-                f"{where}: template name must match ^[a-z0-9_-]+$"
-            )
-        if not isinstance(raw_tmpl, dict):
-            raise CornerModelValidationError(f"{where}: must be a JSON object")
-        raw_cols = raw_tmpl.get("columns")
-        if not isinstance(raw_cols, list) or len(raw_cols) == 0:
-            raise CornerModelValidationError(
-                f"{where}: 'columns' must be a non-empty JSON array"
-            )
-        cols: list[TemplateColumn] = []
-        seen_labels: set[str] = set()
-        for c_i, raw_c in enumerate(raw_cols):
-            cw = f"{where}: columns[{c_i}]"
-            if not isinstance(raw_c, dict):
-                raise CornerModelValidationError(f"{cw}: must be a JSON object")
-            pvt_label = raw_c.get("pvt_label")
-            if not isinstance(pvt_label, str) \
-                    or not _PVT_LABEL_RE.match(pvt_label):
-                raise CornerModelValidationError(
-                    f"{cw}: 'pvt_label' must match ^[A-Za-z0-9_]+$"
-                )
-            if pvt_label in seen_labels:
-                raise CornerModelValidationError(
-                    f"{cw}: duplicate pvt_label {pvt_label!r}"
-                )
-            seen_labels.add(pvt_label)
-            pvt_vars, sweep = _parse_var_block(
-                cw, raw_c.get("pvt_vars", {}), "pvt_vars"
-            )
-            axes = _parse_column_axes(cw, raw_c, correlated_axes)
-            cols.append(TemplateColumn(
-                pvt_label=pvt_label, pvt_vars=pvt_vars,
-                pvt_sweep_keys=sweep, correlated_axes=axes,
-                axis_levels=_parse_axis_levels(cw, raw_c),
-            ))
-        out[tmpl_name] = PvtTemplate(name=tmpl_name, columns=tuple(cols))
-    return out
-
-
-def _validate_bindings(
-    path: Path, data: dict, modes: dict[str, Mode],
-    templates: dict[str, PvtTemplate], variants: dict[str, Variant],
-) -> tuple[TemplateBinding, ...]:
-    raw = data.get("template_bindings", [])
-    if not isinstance(raw, list):
-        raise CornerModelValidationError(
-            f"{path}: 'template_bindings' must be a JSON array"
-        )
-    out: list[TemplateBinding] = []
-    for i, raw_b in enumerate(raw):
-        where = f"{path}: template_bindings[{i}]"
-        if not isinstance(raw_b, dict):
-            raise CornerModelValidationError(f"{where}: must be a JSON object")
-        mode_name = raw_b.get("mode")
-        tmpl_name = raw_b.get("template")
-        variant = raw_b.get("variant")
-        if mode_name not in modes:
-            raise CornerModelValidationError(
-                f"{where}: mode {mode_name!r} is not defined"
-            )
-        if tmpl_name not in templates:
-            raise CornerModelValidationError(
-                f"{where}: template {tmpl_name!r} is not defined"
-            )
-        if variant is not None:
-            if variant not in variants:
-                raise CornerModelValidationError(
-                    f"{where}: variant {variant!r} is not defined"
-                )
-            if variants[variant].base_mode != mode_name:
-                raise CornerModelValidationError(
-                    f"{where}: binding mode {mode_name!r} != variant "
-                    f"{variant!r} base_mode"
-                )
-        out.append(TemplateBinding(
-            mode=mode_name, template=tmpl_name, variant=variant
-        ))
-    return tuple(out)
 
 
 # ---------------------------------------------------------------------------
@@ -1961,7 +1824,7 @@ def remove_variable(model: CornerModel, var: str) -> CornerModel:
 
 
 # ---------------------------------------------------------------------------
-# Stage 2 operations — correlated axes, templates, bind/unbind (spec §4)
+# Stage 2 operations — correlated axes (spec §4)
 # ---------------------------------------------------------------------------
 
 
@@ -2037,116 +1900,6 @@ def remove_correlated_axis(model: CornerModel, name: str) -> CornerModel:
     new_axes = dict(model.correlated_axes)
     del new_axes[name]
     return replace(model, correlated_axes=new_axes)
-
-
-def add_pvt_template(
-    model: CornerModel, template: PvtTemplate
-) -> CornerModel:
-    """Return a new cornermodel with a PVT template added."""
-    if template.name in model.pvt_templates:
-        raise CornerModelValidationError(
-            f"add_pvt_template: {template.name!r} already exists"
-        )
-    for tc in template.columns:
-        for axis_name in tc.correlated_axes:
-            if axis_name not in model.correlated_axes:
-                raise CornerModelValidationError(
-                    f"add_pvt_template: column {tc.pvt_label!r} references "
-                    f"undefined correlated axis {axis_name!r}"
-                )
-    new_templates = dict(model.pvt_templates)
-    new_templates[template.name] = template
-    return replace(model, pvt_templates=new_templates)
-
-
-def apply_template(
-    model: CornerModel, mode_name: str, template_name: str,
-    variant: str | None = None,
-) -> CornerModel:
-    """Generate the columns of ``template_name`` for ``mode_name`` (or for a
-    variant of it) and bind them (spec §4). A column whose effective name
-    already exists is reused — re-applying is idempotent on names."""
-    if mode_name not in model.modes:
-        raise CornerModelValidationError(
-            f"apply_template: mode {mode_name!r} is not defined"
-        )
-    if template_name not in model.pvt_templates:
-        raise CornerModelValidationError(
-            f"apply_template: template {template_name!r} is not defined"
-        )
-    if variant is not None:
-        if variant not in model.variants:
-            raise CornerModelValidationError(
-                f"apply_template: variant {variant!r} is not defined"
-            )
-        if model.variants[variant].base_mode != mode_name:
-            raise CornerModelValidationError(
-                f"apply_template: variant {variant!r} base_mode != "
-                f"{mode_name!r}"
-            )
-    template = model.pvt_templates[template_name]
-    mode_var_keys = set(model.modes[mode_name].vars)
-    existing = {effective_name(c) for c in model.columns}
-    new_columns: list[Column] = list(model.columns)
-
-    for tc in template.columns:
-        for axis_name in tc.correlated_axes:
-            members = set(model.correlated_axes[axis_name].members)
-            if members & (set(tc.pvt_vars) | mode_var_keys):
-                raise CornerModelValidationError(
-                    f"apply_template: axis {axis_name!r} members collide with "
-                    f"template column {tc.pvt_label!r} pvt_vars / mode regs"
-                )
-        column = Column(
-            mode=mode_name, enabled=True,
-            pvt_vars=dict(tc.pvt_vars), models=(),
-            pvt_label=tc.pvt_label,
-            pvt_sweep_keys=tc.pvt_sweep_keys,
-            correlated_axes=tc.correlated_axes,
-            template=template_name,
-            variant=variant,
-            axis_levels=dict(tc.axis_levels),
-        )
-        name = effective_name(column)
-        if name in existing:
-            continue  # already present — reuse, do not duplicate
-        existing.add(name)
-        new_columns.append(column)
-
-    new_bindings = list(model.template_bindings)
-    binding = TemplateBinding(
-        mode=mode_name, template=template_name, variant=variant
-    )
-    if binding not in new_bindings:
-        new_bindings.append(binding)
-    return replace(
-        model, columns=tuple(new_columns),
-        template_bindings=tuple(new_bindings),
-    )
-
-
-def unbind_template(
-    model: CornerModel, mode_name: str, template_name: str,
-    variant: str | None = None,
-) -> CornerModel:
-    """Drop the (mode/variant, template) binding and freeze its generated
-    columns — D3: columns stay, values kept, only ``template`` provenance is
-    cleared so they become plain managed columns."""
-    new_bindings = tuple(
-        b for b in model.template_bindings
-        if not (b.mode == mode_name and b.template == template_name
-                and b.variant == variant)
-    )
-    new_columns = tuple(
-        replace(c, template=None)
-        if (c.mode == mode_name and c.template == template_name
-            and c.variant == variant)
-        else c
-        for c in model.columns
-    )
-    return replace(
-        model, columns=new_columns, template_bindings=new_bindings
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2246,7 +1999,7 @@ def run_set_membership(model: CornerModel, set_name: str) -> set[str]:
 
 
 # ---------------------------------------------------------------------------
-# Stage 5 — var order, soft validation, cross-project library (spec §2/§4/§5)
+# Stage 5 — var order, soft validation (spec §2/§4)
 # ---------------------------------------------------------------------------
 
 
@@ -2358,111 +2111,6 @@ def check_cornermodel(
                         ),
                     ))
     return issues
-
-
-CORNERLIB_FILE_SUFFIX = ".cornerlib.json"
-_SUPPORTED_LIB_VERSIONS = frozenset({1})
-
-
-@dataclass(frozen=True)
-class CornerLibrary:
-    """A reusable, testbench-independent library of templates + axes (spec §5)."""
-
-    cornerlib_schema_version: int
-    name: str
-    correlated_axes: dict[str, CorrelatedAxis]
-    pvt_templates: dict[str, PvtTemplate]
-
-
-def load_library(path: Path | str) -> CornerLibrary:
-    p = Path(path).expanduser().resolve()
-    try:
-        with p.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as exc:
-        raise CornerModelMalformedError(f"{p}: invalid JSON — {exc}") from exc
-    except OSError as exc:
-        raise CornerModelMalformedError(f"{p}: cannot read — {exc}") from exc
-    if not isinstance(data, dict):
-        raise CornerModelMalformedError(f"{p}: top-level must be a JSON object")
-
-    raw_ver = data.get("cornerlib_schema_version")
-    if raw_ver not in _SUPPORTED_LIB_VERSIONS:
-        raise CornerModelSchemaVersionError(
-            f"{p}: cornerlib_schema_version {raw_ver!r} not supported"
-        )
-    lib_name = _require_str(p, data, "name")
-    axes = _validate_correlated_axes(p, data)
-    templates = _validate_templates(p, data, axes)
-    return CornerLibrary(
-        cornerlib_schema_version=raw_ver, name=lib_name,
-        correlated_axes=axes, pvt_templates=templates,
-    )
-
-
-def export_library(model: CornerModel, name: str) -> CornerLibrary:
-    """Extract the cornermodel's templates + axes into a reusable library."""
-    if not _MODEL_NAME_RE.match(name):
-        raise CornerModelValidationError(
-            f"export_library: name {name!r} must match ^[a-z0-9_-]+$"
-        )
-    return CornerLibrary(
-        cornerlib_schema_version=1, name=name,
-        correlated_axes=dict(model.correlated_axes),
-        pvt_templates=dict(model.pvt_templates),
-    )
-
-
-def library_to_dict(library: CornerLibrary) -> dict:
-    out: dict = {
-        "cornerlib_schema_version": library.cornerlib_schema_version,
-        "name": library.name,
-    }
-    if library.correlated_axes:
-        out["correlated_axes"] = {
-            ax.name: {
-                "members": list(ax.members),
-                "tuples": [
-                    {"label": t.label, "values": dict(t.values)}
-                    for t in ax.tuples
-                ],
-            }
-            for ax in library.correlated_axes.values()
-        }
-    if library.pvt_templates:
-        out["pvt_templates"] = {
-            t.name: {"columns": [
-                _template_column_to_dict(tc) for tc in t.columns
-            ]}
-            for t in library.pvt_templates.values()
-        }
-    return out
-
-
-def import_library(
-    model: CornerModel, library: CornerLibrary
-) -> CornerModel:
-    """Merge a library's axes + templates into a cornermodel (spec §5).
-
-    A name collision on either an axis or a template is a hard error — the
-    library never silently overwrites the project's own definitions.
-    """
-    axis_clash = set(library.correlated_axes) & set(model.correlated_axes)
-    if axis_clash:
-        raise CornerModelValidationError(
-            f"import_library: correlated axes {sorted(axis_clash)} already "
-            f"exist in the cornermodel"
-        )
-    tmpl_clash = set(library.pvt_templates) & set(model.pvt_templates)
-    if tmpl_clash:
-        raise CornerModelValidationError(
-            f"import_library: templates {sorted(tmpl_clash)} already exist"
-        )
-    new_axes = {**model.correlated_axes, **library.correlated_axes}
-    new_templates = {**model.pvt_templates, **library.pvt_templates}
-    return replace(
-        model, correlated_axes=new_axes, pvt_templates=new_templates
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -2641,8 +2289,6 @@ def to_dict(model: CornerModel) -> dict:
             ]
         if col.correlated_axes:
             entry["correlated_axes"] = list(col.correlated_axes)
-        if col.template is not None:
-            entry["template"] = col.template
         if col.variant is not None:
             entry["variant"] = col.variant
         if col.axis_levels:
@@ -2673,23 +2319,6 @@ def to_dict(model: CornerModel) -> dict:
             }
             for ax in model.correlated_axes.values()
         }
-    if model.pvt_templates:
-        out["pvt_templates"] = {
-            tmpl.name: {
-                "columns": [
-                    _template_column_to_dict(tc) for tc in tmpl.columns
-                ]
-            }
-            for tmpl in model.pvt_templates.values()
-        }
-    if model.template_bindings:
-        binds: list[dict] = []
-        for b in model.template_bindings:
-            entry = {"mode": b.mode, "template": b.template}
-            if b.variant is not None:
-                entry["variant"] = b.variant
-            binds.append(entry)
-        out["template_bindings"] = binds
     if model.variants:
         out["variants"] = {
             v.name: {"base_mode": v.base_mode, "vars": dict(v.vars)}
@@ -2707,20 +2336,6 @@ def to_dict(model: CornerModel) -> dict:
     if model.tests:
         out["tests"] = list(model.tests)
     return out
-
-
-def _template_column_to_dict(tc: TemplateColumn) -> dict:
-    entry: dict = {"pvt_label": tc.pvt_label}
-    if tc.pvt_vars:
-        entry["pvt_vars"] = {
-            v: (list(tup) if v in tc.pvt_sweep_keys else tup[0])
-            for v, tup in tc.pvt_vars.items()
-        }
-    if tc.correlated_axes:
-        entry["correlated_axes"] = list(tc.correlated_axes)
-    if tc.axis_levels:
-        entry["axis_levels"] = dict(tc.axis_levels)
-    return entry
 
 
 def _model_to_dict(entry: ModelEntry, is_sweep: bool) -> dict:
