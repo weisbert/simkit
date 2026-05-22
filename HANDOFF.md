@@ -1,80 +1,52 @@
-# Handoff — 2026-05-22 (Axes feature + retire Corner Sets)
+# Handoff — 2026-05-22 (Corner Sets retired, Axes unified)
 
 For the next conversation. Read this first, then read
 `docs/corner_manager_user_story.md` (痛点 a + h).
 
 ## Branch & state
 
-`main`. Last commit **`46e8b38`** (`gui: corner manager — editing
-fixes, Pull merge, drag-reorder`). **4 files are uncommitted** — two
-logical changes that should be committed first, before the next task:
+`main`, all committed and clean. Recent commits:
 
-- **New Mode dialog fix** (`corner_manager.py` only): `_NewModeDialog`
-  now lists every design variable (not just the source column's), so a
-  sparse corner like TT can seed a full register set; multi-value vars
-  are shown (default PVT-ticked) instead of skipped; blank = left out;
-  `_new_mode_from_column` rejects a multi-valued register. + 1 test.
-- **Axes feature** (`corner_model.py` + `corner_manager.py` + 2 test
-  files): the new user-friendly correlated-axis feature — see below.
+- `dc39210` New Mode dialog lists every design variable.
+- `0df5426` Axes feature — author a correlated axis as a grid, cross
+  axes into an aggregated corner column.
+- `cd476bf` docs handoff.
+- `523e90a` **retire Corner Sets, unify on multi-mode Axes** — the
+  task below, now done.
 
-Offline tests green: corner + GUI suites **706 passed**
-(`QT_QPA_PLATFORM=offscreen PYTHONPATH=python .venv/bin/python3 -m
-pytest tests/gui tests/test_corner_model*.py tests/test_corners*.py
--p no:cacheprovider -q`; use `timeout`, a real modal hangs offscreen Qt
-— mock `QMessageBox` in smoke tests).
+Offline tests green: full suite **1919 passed**; corner + GUI subset
+**715 passed** (`QT_QPA_PLATFORM=offscreen PYTHONPATH=python
+.venv/bin/python3 -m pytest tests/gui tests/test_corner_model*.py
+tests/test_corners*.py -p no:cacheprovider -q`; use `timeout`, a real
+modal hangs offscreen Qt — mock `QMessageBox` in smoke tests).
 
-## What the Axes feature is (already built, uncommitted)
+## What changed (commit 523e90a)
 
-A user-friendly replacement for the confusing free-text "Corner Set"
-authoring. Toolbar button **"Axes…"** → `_AxesDialog`:
+Corner Sets (PVT templates) and Axes overlapped — to a user they were
+the same idea. Unified on one concept: **Axes**.
 
-- **`_AxisGridDialog`** — author one correlated axis as a grid: member
-  variables are columns (double-click header to rename), levels are
-  rows. No syntax.
-- **`_AxesDialog`** — axis list + New/Edit/Delete, plus an aggregated-
-  corner builder: tick axes to cross, live point count
-  (`5 × 3 × 3 = 45 corner points`), pick a mode, Create.
-- Data layer (`corner_model.py`): `add_correlated_axis` (pre-existing),
-  new `update_correlated_axis`, `remove_correlated_axis`, shared
-  `_check_axis_well_formed`.
-- Live-verified: 3 axes → aggregated column `VCO_PVT_45`, 45 points
-  (not 405). Solves 痛点 h.
+- **Removed the whole PVT-template feature.** Data layer: `PvtTemplate`,
+  `TemplateColumn`, `TemplateBinding`, `add_pvt_template`,
+  `apply_template`, `unbind_template`, `Column.template`,
+  `pvt_templates` / `template_bindings` fields, and the cornerlib
+  export/import (`CornerLibrary`, `load/export/import_library`,
+  `library_to_dict`). GUI: the Corner Sets toolbar button + dialog, the
+  free-text column parsers, the apply / unbind / library handlers.
+- **Axes builder is now multi-mode.** `_AxesDialog` replaced the single
+  mode combo with a checkable mode list — one Create stamps the crossed
+  aggregated corner onto every ticked mode at once (痛点 a). Verified
+  live-style by smoke test: ticking VCO + LO stamps `PVT3` onto both.
 
-## NEXT TASK — retire "Corner Sets", make Axes multi-mode
+Only one reusable-corner concept remains: **Axes** (toolbar "Axes…").
 
-User feedback (2026-05-22): the old "Corner Sets" feature and the new
-"Axes" feature overlap — from a user's view they are the same thing
-("可复用的 corner 设置"). Having both is the confusion. Decision
-(user-approved): **unify into one — Axes.**
+## NEXT — user acceptance
 
-**1. Remove the old "Corner Sets" / PVT-template feature entirely.**
-   - GUI (`corner_manager.py`): `btn_templates` button +
-     `_build_templates_dialog`, `_on_new_template`, `_on_apply_template`,
-     `_on_unbind_template`, `_refresh_templates_panel`,
-     `_selected_template_name`, `_on_export_library`,
-     `_on_import_library`, `_templates_dialog`, and the parsers
-     `_parse_template_columns` / `_split_label_line` / `_parse_kv_comma`.
-   - Data layer (`corner_model.py`): `PvtTemplate`, `TemplateColumn`,
-     `TemplateBinding`, `add_pvt_template`, `apply_template`,
-     `unbind_template`, the library export/import, the
-     `template_bindings` field, and `Column.template` provenance.
-   - Tests: `test_corner_model_stage2.py` (template tests),
-     template tests in `test_corner_manager.py`, possibly stage3.
-   - **RISK — scope carefully.** Templates are entangled: `apply_template`
-     generates columns, Stage 3 variants may be template-applied,
-     `Column.template` is provenance, the `+axis` template syntax was
-     one way axes got authored. Axes are now authored directly via the
-     Axes dialog, so removing templates does NOT orphan axes. Check what
-     breaks before deleting; this is a big deletion.
-
-**2. Make the Axes aggregated-corner builder multi-mode.**
-   `_AxesDialog._on_create_corner` currently picks ONE mode via
-   `_mode_combo`. Replace it with a checkable mode list — ticking 7
-   modes and clicking Create stamps the aggregated corner onto all 7 at
-   once. This makes Axes cover 痛点 a (reuse across modes), so the
-   template feature is fully redundant.
-
-After this, only one concept remains: **Axes**.
+The acceptance gate is unchanged: a real signoff cycle inside the GUI
+on the live Maestro session. The user dogfoods; restart `pvt gui` to
+pick up new code. `.pvtproject` for live probes:
+`workarea/simkit_1AXX/.pvtproject`; session `fnxSession0`. The literal
+6-stage GUI checklist (`docs/phase5_dogfood_checklist.md`) is still the
+per-stage hands-on acceptance.
 
 ## Deferred / known gaps
 
@@ -83,15 +55,5 @@ After this, only one concept remains: **Axes**.
   carries vars, not models). Temperature-as-a-var works. Extending
   `CorrelatedTuple` to carry model assignments is a follow-up.
 - Variable-row order cannot be pushed to Maestro — Maestro's corner
-  editor row order has no SKILL API (`axlPutVar` only appends; no
-  `axl*Order`). Push carries per-corner var order; the editor's global
-  order is owned by the per-test design-variable lists. Treat the
-  simkit row order as a local display preference.
-
-## Verification notes
-
-- The acceptance gate is unchanged: a real signoff cycle inside the GUI
-  on the live Maestro session. The user dogfoods; restart `pvt gui` to
-  pick up new code.
-- `.pvtproject` for live probes: `workarea/simkit_1AXX/.pvtproject`;
-  session `fnxSession0`.
+  editor row order has no SKILL API (`axlPutVar` only appends). Treat
+  the simkit row order as a local display preference.
