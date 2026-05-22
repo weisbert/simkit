@@ -62,6 +62,7 @@ from simkit.corner_model import (
     add_correlated_axis,
     add_mode,
     assign_mode_to_column,
+    columns_of_mode,
     add_run_set,
     apply_run_set,
     check_cornermodel,
@@ -72,6 +73,7 @@ from simkit.corner_model import (
     move_column,
     reclassify_mode,
     remove_correlated_axis,
+    remove_mode,
     remove_run_set,
     rename_column,
     rename_variable,
@@ -247,6 +249,7 @@ class CornerManagerView(QWidget):
         self.btn_dimensions.clicked.connect(self._on_dimensions)
         self.btn_new_mode.clicked.connect(self._on_new_mode)
         self.btn_edit_mode.clicked.connect(self._on_edit_mode)
+        self.btn_delete_mode.clicked.connect(self._on_delete_mode)
         self.btn_new_corner.clicked.connect(self._on_new_corner)
         self.btn_clear_filters.clicked.connect(self._on_clear_all_filters)
         self.table_model.filtersChanged.connect(self._apply_filters)
@@ -305,8 +308,14 @@ class CornerManagerView(QWidget):
             "Re-classify which variables are registers vs PVT, and "
             "add / remove registers, for the selected mode."
         )
+        self.btn_delete_mode = QPushButton("Delete Mode")
+        self.btn_delete_mode.setToolTip(
+            "Delete the selected mode — also deletes its corner columns "
+            "and any variants based on it."
+        )
         hdr.addWidget(self.btn_new_mode)
         hdr.addWidget(self.btn_edit_mode)
+        hdr.addWidget(self.btn_delete_mode)
         v.addLayout(hdr)
         self.modes_list = QListWidget()
         v.addWidget(self.modes_list)
@@ -997,6 +1006,25 @@ class CornerManagerView(QWidget):
             )
         except CornerModelError as exc:
             QMessageBox.warning(self, "Edit Mode failed", str(exc))
+            return
+        self._apply(new_cm)
+
+    def _on_delete_mode(self) -> None:
+        item = self.modes_list.currentItem()
+        if item is None:
+            QMessageBox.warning(self, "Delete Mode", "Select a mode first.")
+            return
+        name = item.text()
+        n = columns_of_mode(self._cm, name)
+        detail = f" and its {n} corner column(s)" if n else ""
+        if QMessageBox.question(
+            self, "Delete Mode", f"Delete mode {name!r}{detail}?"
+        ) != QMessageBox.Yes:
+            return
+        try:
+            new_cm = remove_mode(self._cm, name)
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Delete Mode failed", str(exc))
             return
         self._apply(new_cm)
 

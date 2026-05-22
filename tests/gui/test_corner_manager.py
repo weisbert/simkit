@@ -246,6 +246,16 @@ class CornerManagerNewModeFromModeTest(unittest.TestCase):
         self.view.hide()
         self.view.deleteLater()
 
+    def test_delete_mode_removes_it(self):
+        self.view.modes_list.setCurrentRow(0)
+        name = self.view.modes_list.currentItem().text()
+        with mock.patch.object(
+            cm_mod.QMessageBox, "question",
+            return_value=cm_mod.QMessageBox.Yes,
+        ):
+            self.view._on_delete_mode()
+        self.assertNotIn(name, self.view.cornermodel().modes)
+
     def test_new_mode_derived_from_existing_mode(self):
         # BT_2G_RX exists; derive BT_2G_RX_PN by copying + tweaking registers.
         with mock.patch.object(

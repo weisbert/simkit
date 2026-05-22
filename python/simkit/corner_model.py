@@ -1626,6 +1626,40 @@ def add_mode(
     return replace(model, modes=new_modes)
 
 
+def remove_mode(model: CornerModel, name: str) -> CornerModel:
+    """Return a new cornermodel with mode ``name`` removed — together with
+    every corner column on it, every variant based on it, and those columns'
+    run-set memberships (a corner cannot outlive its mode)."""
+    if name not in model.modes:
+        raise CornerModelValidationError(
+            f"remove_mode: mode {name!r} is not defined"
+        )
+    dropped = {
+        effective_name(c) for c in model.columns if c.mode == name
+    }
+    new_columns = tuple(c for c in model.columns if c.mode != name)
+    new_modes = {k: v for k, v in model.modes.items() if k != name}
+    new_variants = {
+        k: v for k, v in model.variants.items() if v.base_mode != name
+    }
+    new_sets = {
+        sn: replace(rs, columns=tuple(
+            c for c in rs.columns if c not in dropped
+        ))
+        for sn, rs in model.run_sets.items()
+    }
+    return replace(
+        model, modes=new_modes, columns=new_columns,
+        variants=new_variants, run_sets=new_sets,
+    )
+
+
+def columns_of_mode(model: CornerModel, name: str) -> int:
+    """How many corner columns belong to mode ``name`` — the GUI shows this
+    in the Delete-mode confirm."""
+    return sum(1 for c in model.columns if c.mode == name)
+
+
 def mode_from_column(
     model: CornerModel, column_index: int, mode_name: str,
     register_vars: dict[str, str], pvt_label: str,

@@ -162,6 +162,15 @@ def test_set_variant_var_global_edit(tmp_path):
     assert row.vars["d_div12_en"] == ("2",)
 
 
+def test_remove_mode_cascades(tmp_path):
+    from simkit.corner_model import remove_mode
+    cm = _write_load(tmp_path, _base())
+    cm2 = remove_mode(cm, "BT_2G_RX")
+    assert "BT_2G_RX" not in cm2.modes
+    assert cm2.columns == ()                    # the mode's column went
+    assert "BT_2G_RX_PN" not in cm2.variants    # variant based on it went
+
+
 def test_to_dict_round_trip_stage3(tmp_path):
     cm = _write_load(tmp_path, _base())
     out = tmp_path / "lo_corners.cornermodel.json"
