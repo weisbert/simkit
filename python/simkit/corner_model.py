@@ -63,23 +63,28 @@ class Mode:
 
 @dataclass(frozen=True)
 class CorrelatedTuple:
-    """One point on a correlated axis — assigns every member var at once."""
+    """One level of a dimension — assigns every member var, and for a
+    section-bearing dimension the model-file section, all at once."""
 
     label: str
     values: dict[str, str]
+    section: str | None = None
 
 
 @dataclass(frozen=True)
 class CorrelatedAxis:
-    """A bundle of vars that must vary together (spec §2.1, 痛点 h).
+    """A dimension — a reusable list of levels whose member vars vary together
+    (spec §2.1, 痛点 h). Crossing treats the whole dimension as ONE axis of
+    length ``len(tuples)``, not the Cartesian product of its members.
 
-    Cross-products treat the whole axis as ONE axis of length ``len(tuples)``,
-    not the Cartesian product of its members.
+    ``model_file`` set → a section-bearing dimension: every level also picks
+    a section of that model file (the process-corner case, TT/SS/FF…).
     """
 
     name: str
     members: tuple[str, ...]
     tuples: tuple[CorrelatedTuple, ...]
+    model_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,8 +179,13 @@ class Column:
     overrides: dict[str, str] = field(default_factory=dict)
     pvt_sweep_keys: frozenset[str] = field(default_factory=frozenset)
     model_sweep_indices: frozenset[int] = field(default_factory=frozenset)
-    # Stage 2: correlated axes referenced by this column.
+    # Stage 2: project-library dimensions this corner crosses, by name.
     correlated_axes: tuple[str, ...] = ()
+    # Per crossed dimension, the subset of level labels this corner uses —
+    # a dimension absent here (or mapped to ()) crosses all its levels.
+    selected_levels: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    # Dimensions defined inline on this corner (not in the project library).
+    inline_axes: tuple[CorrelatedAxis, ...] = ()
     # Stage 3: the variant this column hangs on (its mode = variant.base_mode).
     variant: str | None = None
     # Stage 6: semantic axis→level tokens resolved through the PVT profile.
@@ -521,6 +531,10 @@ def _validate_column(
     )
     models, model_sweep_indices = _parse_models(where, raw.get("models", []))
     col_axes = _parse_column_axes(where, raw, correlated_axes)
+    selected_levels = _parse_selected_levels(
+        where, raw, col_axes, correlated_axes
+    )
+    inline_axes = _parse_inline_axes(where, raw)
 
     variant = raw.get("variant")
     if variant is not None:
@@ -550,30 +564,32 @@ def _validate_column(
             models, model_sweep_indices,
         )
     col = replace(
-        col, correlated_axes=col_axes, variant=variant,
+        col, correlated_axes=col_axes, selected_levels=selected_levels,
+        inline_axes=inline_axes, variant=variant,
         axis_levels=_parse_axis_levels(where, raw),
         tests=_parse_tests(where, raw),
     )
 
-    # Spec §2.4 / §6.3 — correlated-axis members must not collide with the
-    # column's PVT vars or its mode's register vars.
+    # Spec §2.4 / §6.3 — dimension members must not collide with the column's
+    # PVT vars or its mode's register vars.
     mode_var_keys = set(modes[mode_name].vars) if mode_name in modes else set()
-    for axis_name in col_axes:
-        members = set(correlated_axes[axis_name].members)
+    crossed = [correlated_axes[a] for a in col_axes] + list(inline_axes)
+    for axis in crossed:
+        members = set(axis.members)
         if members & set(pvt_vars):
             raise CornerModelValidationError(
-                f"{where}: correlated axis {axis_name!r} members "
+                f"{where}: dimension {axis.name!r} members "
                 f"{sorted(members & set(pvt_vars))} collide with pvt_vars"
             )
         if members & mode_var_keys:
             raise CornerModelValidationError(
-                f"{where}: correlated axis {axis_name!r} members "
+                f"{where}: dimension {axis.name!r} members "
                 f"{sorted(members & mode_var_keys)} collide with mode registers"
             )
 
     # Spec §5 rule 7 — every column must materialise to a legal Phase 2 row.
     if (len(pvt_vars) == 0 and len(models) == 0 and not col.is_managed
-            and not col_axes):
+            and not col_axes and not inline_axes):
         raise CornerModelValidationError(
             f"{where}: unmanaged column has neither vars, models nor axes"
         )
@@ -631,6 +647,64 @@ def _parse_column_axes(
                 f"{where}: correlated axis {axis_name!r} is not defined"
             )
         out.append(axis_name)
+    return tuple(out)
+
+
+def _parse_selected_levels(
+    where: str, raw: dict, col_axes: tuple[str, ...],
+    correlated_axes: dict[str, CorrelatedAxis],
+) -> dict[str, tuple[str, ...]]:
+    """Per crossed dimension, the subset of level labels this corner uses."""
+    raw_sel = raw.get("selected_levels", {})
+    if not isinstance(raw_sel, dict):
+        raise CornerModelValidationError(
+            f"{where}: 'selected_levels' must be a JSON object"
+        )
+    out: dict[str, tuple[str, ...]] = {}
+    for axis_name, labels in raw_sel.items():
+        if axis_name not in col_axes:
+            raise CornerModelValidationError(
+                f"{where}: selected_levels references dimension "
+                f"{axis_name!r} which this corner does not cross"
+            )
+        if not isinstance(labels, list):
+            raise CornerModelValidationError(
+                f"{where}: selected_levels[{axis_name!r}] must be a JSON array"
+            )
+        valid = {ct.label for ct in correlated_axes[axis_name].tuples}
+        for lab in labels:
+            if lab not in valid:
+                raise CornerModelValidationError(
+                    f"{where}: selected_levels[{axis_name!r}] level {lab!r} "
+                    f"is not a level of that dimension"
+                )
+        out[axis_name] = tuple(labels)
+    return out
+
+
+def _parse_inline_axes(where: str, raw: dict) -> tuple[CorrelatedAxis, ...]:
+    """Dimensions defined inline on a corner (not in the project library)."""
+    raw_inline = raw.get("inline_axes", [])
+    if not isinstance(raw_inline, list):
+        raise CornerModelValidationError(
+            f"{where}: 'inline_axes' must be a JSON array"
+        )
+    out: list[CorrelatedAxis] = []
+    seen: set[str] = set()
+    for i, raw_axis in enumerate(raw_inline):
+        if not isinstance(raw_axis, dict):
+            raise CornerModelValidationError(
+                f"{where}: inline_axes[{i}] must be a JSON object"
+            )
+        axis = _validate_one_axis(
+            f"{where}: inline_axes[{i}]", raw_axis.get("name"), raw_axis
+        )
+        if axis.name in seen:
+            raise CornerModelValidationError(
+                f"{where}: inline_axes has a duplicate name {axis.name!r}"
+            )
+        seen.add(axis.name)
+        out.append(axis)
     return tuple(out)
 
 
@@ -762,6 +836,90 @@ def _parse_models(
 # ---------------------------------------------------------------------------
 
 
+def _validate_one_axis(
+    where: str, axis_name: object, raw_axis: object
+) -> CorrelatedAxis:
+    """Validate one dimension (a project-library or an inline one)."""
+    if not isinstance(axis_name, str) or not _VAR_NAME_RE.match(axis_name):
+        raise CornerModelValidationError(
+            f"{where}: dimension name {axis_name!r} must match "
+            f"^[A-Za-z][A-Za-z0-9_]*$"
+        )
+    if not isinstance(raw_axis, dict):
+        raise CornerModelValidationError(f"{where}: must be a JSON object")
+    model_file = raw_axis.get("model_file")
+    if model_file is not None and not isinstance(model_file, str):
+        raise CornerModelValidationError(
+            f"{where}: 'model_file' must be a string or absent"
+        )
+    raw_members = raw_axis.get("members", [])
+    if not isinstance(raw_members, list):
+        raise CornerModelValidationError(
+            f"{where}: 'members' must be a JSON array"
+        )
+    for m in raw_members:
+        if not isinstance(m, str) or not _VAR_NAME_RE.match(m):
+            raise CornerModelValidationError(
+                f"{where}: member {m!r} must match ^[A-Za-z][A-Za-z0-9_]*$"
+            )
+    members = tuple(raw_members)
+    member_set = set(members)
+    if not members and model_file is None:
+        raise CornerModelValidationError(
+            f"{where}: a dimension needs at least one member variable or a "
+            f"model file"
+        )
+    raw_tuples = raw_axis.get("tuples")
+    if not isinstance(raw_tuples, list) or len(raw_tuples) == 0:
+        raise CornerModelValidationError(
+            f"{where}: 'tuples' must be a non-empty JSON array"
+        )
+    tuples: list[CorrelatedTuple] = []
+    seen_labels: set[str] = set()
+    for t_i, raw_t in enumerate(raw_tuples):
+        tw = f"{where}: tuples[{t_i}]"
+        if not isinstance(raw_t, dict):
+            raise CornerModelValidationError(f"{tw}: must be a JSON object")
+        label = raw_t.get("label")
+        if not isinstance(label, str) or not _PVT_LABEL_RE.match(label):
+            raise CornerModelValidationError(
+                f"{tw}: 'label' must match ^[A-Za-z0-9_]+$"
+            )
+        if label in seen_labels:
+            raise CornerModelValidationError(
+                f"{tw}: duplicate level label {label!r}"
+            )
+        seen_labels.add(label)
+        values = raw_t.get("values", {})
+        if not isinstance(values, dict) or set(values) != member_set:
+            raise CornerModelValidationError(
+                f"{tw}: 'values' keys must be exactly the members "
+                f"{sorted(member_set)}"
+            )
+        for vk, vv in values.items():
+            if not isinstance(vv, str):
+                raise CornerModelValidationError(
+                    f"{tw}: value for {vk!r} must be a scalar string"
+                )
+        section = raw_t.get("section")
+        if section is not None and not isinstance(section, str):
+            raise CornerModelValidationError(
+                f"{tw}: 'section' must be a string or absent"
+            )
+        if (section is not None) != (model_file is not None):
+            raise CornerModelValidationError(
+                f"{tw}: 'section' and the dimension's 'model_file' must "
+                f"both be set or both absent"
+            )
+        tuples.append(CorrelatedTuple(
+            label=label, values=dict(values), section=section
+        ))
+    return CorrelatedAxis(
+        name=axis_name, members=members, tuples=tuple(tuples),
+        model_file=model_file,
+    )
+
+
 def _validate_correlated_axes(
     path: Path, data: dict
 ) -> dict[str, CorrelatedAxis]:
@@ -770,64 +928,12 @@ def _validate_correlated_axes(
         raise CornerModelValidationError(
             f"{path}: 'correlated_axes' must be a JSON object"
         )
-    out: dict[str, CorrelatedAxis] = {}
-    for axis_name, raw_axis in raw.items():
-        where = f"{path}: correlated_axes[{axis_name!r}]"
-        if not _VAR_NAME_RE.match(axis_name):
-            raise CornerModelValidationError(
-                f"{where}: axis name must match ^[A-Za-z][A-Za-z0-9_]*$"
-            )
-        if not isinstance(raw_axis, dict):
-            raise CornerModelValidationError(f"{where}: must be a JSON object")
-        raw_members = raw_axis.get("members")
-        if not isinstance(raw_members, list) or len(raw_members) == 0:
-            raise CornerModelValidationError(
-                f"{where}: 'members' must be a non-empty JSON array"
-            )
-        for m in raw_members:
-            if not isinstance(m, str) or not _VAR_NAME_RE.match(m):
-                raise CornerModelValidationError(
-                    f"{where}: member {m!r} must match ^[A-Za-z][A-Za-z0-9_]*$"
-                )
-        members = tuple(raw_members)
-        member_set = set(members)
-        raw_tuples = raw_axis.get("tuples")
-        if not isinstance(raw_tuples, list) or len(raw_tuples) == 0:
-            raise CornerModelValidationError(
-                f"{where}: 'tuples' must be a non-empty JSON array"
-            )
-        tuples: list[CorrelatedTuple] = []
-        seen_labels: set[str] = set()
-        for t_i, raw_t in enumerate(raw_tuples):
-            tw = f"{where}: tuples[{t_i}]"
-            if not isinstance(raw_t, dict):
-                raise CornerModelValidationError(f"{tw}: must be a JSON object")
-            label = raw_t.get("label")
-            if not isinstance(label, str) or not _PVT_LABEL_RE.match(label):
-                raise CornerModelValidationError(
-                    f"{tw}: 'label' must match ^[A-Za-z0-9_]+$"
-                )
-            if label in seen_labels:
-                raise CornerModelValidationError(
-                    f"{tw}: duplicate tuple label {label!r}"
-                )
-            seen_labels.add(label)
-            values = raw_t.get("values")
-            if not isinstance(values, dict) or set(values) != member_set:
-                raise CornerModelValidationError(
-                    f"{tw}: 'values' keys must be exactly the axis members "
-                    f"{sorted(member_set)}"
-                )
-            for vk, vv in values.items():
-                if not isinstance(vv, str):
-                    raise CornerModelValidationError(
-                        f"{tw}: value for {vk!r} must be a scalar string"
-                    )
-            tuples.append(CorrelatedTuple(label=label, values=dict(values)))
-        out[axis_name] = CorrelatedAxis(
-            name=axis_name, members=members, tuples=tuple(tuples)
+    return {
+        axis_name: _validate_one_axis(
+            f"{path}: correlated_axes[{axis_name!r}]", axis_name, raw_axis
         )
-    return out
+        for axis_name, raw_axis in raw.items()
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -876,47 +982,97 @@ def _resolve_level(
     return axis.levels.get(level_name)
 
 
+def _set_model_section(
+    models: list[ModelEntry], model_file: str, section: tuple[str, ...]
+) -> list[ModelEntry]:
+    """Set ``section`` on the model entry whose file matches ``model_file``,
+    appending a fresh entry if none does."""
+    out = list(models)
+    for i, m in enumerate(out):
+        if m.file == model_file:
+            out[i] = replace(m, section=section)
+            return out
+    out.append(ModelEntry(
+        file=model_file, block=_union._DEFAULT_MODEL_BLOCK,
+        test=_union._DEFAULT_MODEL_TEST, section=section,
+    ))
+    return out
+
+
+def _crossed_axes(
+    model: CornerModel, column: Column
+) -> list[CorrelatedAxis]:
+    """The dimensions a corner crosses — library dimensions narrowed to the
+    corner's selected level subset, then any inline dimensions."""
+    out: list[CorrelatedAxis] = []
+    for name in column.correlated_axes:
+        ax = model.correlated_axes[name]
+        sel = column.selected_levels.get(name)
+        if sel:
+            keep = set(sel)
+            ax = replace(ax, tuples=tuple(
+                t for t in ax.tuples if t.label in keep
+            ))
+        out.append(ax)
+    out.extend(column.inline_axes)
+    return out
+
+
 def _column_models(
-    column: Column, profile: "PvtProfile | None" = None
+    column: Column, profile: "PvtProfile | None" = None,
+    model: "CornerModel | None" = None,
 ) -> tuple[ModelEntry, ...]:
     """The column's model entries, with process-axis levels resolved (Stage 6).
 
     A profile process level's no-``file`` assignment sets the section on every
     existing model entry; a ``file``-bearing one targets / appends that model.
+    When ``model`` is given, a crossed section-bearing dimension also folds in
+    — its selected levels' sections become the model file's swept section.
     """
     models: list[ModelEntry] = list(column.models)
-    if profile is None:
-        return tuple(models)
-    for axis_name, level_name in column.axis_levels.items():
-        level = _resolve_level(profile, axis_name, level_name)
-        if level is None:
-            continue
-        for msa in level.models:
-            if msa.file is None:
-                models = [
-                    replace(m, section=(msa.section,)) for m in models
-                ]
-            else:
-                hit = False
-                for i, m in enumerate(models):
-                    if m.file == msa.file:
-                        models[i] = replace(m, section=(msa.section,))
-                        hit = True
-                if not hit:
-                    models.append(ModelEntry(
-                        file=msa.file, block=_union._DEFAULT_MODEL_BLOCK,
-                        test=_union._DEFAULT_MODEL_TEST, section=(msa.section,),
-                    ))
+    if profile is not None:
+        for axis_name, level_name in column.axis_levels.items():
+            level = _resolve_level(profile, axis_name, level_name)
+            if level is None:
+                continue
+            for msa in level.models:
+                if msa.file is None:
+                    models = [
+                        replace(m, section=(msa.section,)) for m in models
+                    ]
+                else:
+                    hit = False
+                    for i, m in enumerate(models):
+                        if m.file == msa.file:
+                            models[i] = replace(m, section=(msa.section,))
+                            hit = True
+                    if not hit:
+                        models.append(ModelEntry(
+                            file=msa.file, block=_union._DEFAULT_MODEL_BLOCK,
+                            test=_union._DEFAULT_MODEL_TEST,
+                            section=(msa.section,),
+                        ))
+    if model is not None:
+        for ax in _crossed_axes(model, column):
+            if ax.model_file is None:
+                continue
+            sections = tuple(
+                ct.section for ct in ax.tuples if ct.section is not None
+            )
+            if sections:
+                models = _set_model_section(models, ax.model_file, sections)
     return tuple(models)
 
 
 def column_models(
-    column: Column, profile: "PvtProfile | None" = None
+    column: Column, profile: "PvtProfile | None" = None,
+    model: "CornerModel | None" = None,
 ) -> tuple[ModelEntry, ...]:
     """Public view of a column's resolved process-model entries — what the
     corner table renders as its Model Files rows (one row per file, the cell
-    showing that model's section / process corner)."""
-    return _column_models(column, profile)
+    showing that model's section / process corner). Pass ``model`` so a
+    crossed section dimension's sections show in the cell."""
+    return _column_models(column, profile, model)
 
 
 def materialize_column_rows(
@@ -930,12 +1086,12 @@ def materialize_column_rows(
     """
     base_vars, sweep = _column_base_vars(model, column, profile)
     base_name = effective_name(column)
-    models = _column_models(column, profile)
-    axes = [model.correlated_axes[a] for a in column.correlated_axes]
+    base_models = _column_models(column, profile)
+    axes = _crossed_axes(model, column)
 
     if not axes:
         return [UnionRow(
-            row_name=base_name, vars=base_vars, models=models,
+            row_name=base_name, vars=base_vars, models=base_models,
             sweep_var_keys=frozenset(sweep),
             sweep_model_indices=column.model_sweep_indices,
             enabled=column.enabled,
@@ -945,14 +1101,19 @@ def materialize_column_rows(
     rows: list[UnionRow] = []
     for combo in itertools.product(*[ax.tuples for ax in axes]):
         row_vars = dict(base_vars)
+        row_models = list(base_models)
         labels: list[str] = []
-        for ct in combo:
+        for ax, ct in zip(axes, combo):
             labels.append(ct.label)
             for vk, vv in ct.values.items():
                 row_vars[vk] = (vv,)
+            if ax.model_file is not None and ct.section is not None:
+                row_models = _set_model_section(
+                    row_models, ax.model_file, (ct.section,)
+                )
         rows.append(UnionRow(
             row_name=f"{base_name}__{'_'.join(labels)}",
-            vars=row_vars, models=models,
+            vars=row_vars, models=tuple(row_models),
             sweep_var_keys=frozenset(sweep),
             sweep_model_indices=column.model_sweep_indices,
             enabled=column.enabled,
@@ -1591,6 +1752,43 @@ def add_column(model: CornerModel, column: Column) -> CornerModel:
     return replace(model, columns=model.columns + (column,))
 
 
+def assign_mode_to_column(
+    model: CornerModel, column_index: int, mode_name: str
+) -> CornerModel:
+    """Fold a raw / foreign (unmanaged) column into a mode. The column keeps
+    its vars and models; its name becomes ``<mode>_<old name>``."""
+    if not (0 <= column_index < len(model.columns)):
+        raise CornerModelValidationError(
+            f"assign_mode_to_column: index {column_index} out of range"
+        )
+    col = model.columns[column_index]
+    if col.is_managed:
+        raise CornerModelValidationError(
+            f"assign_mode_to_column: column {effective_name(col)!r} is "
+            f"already in a mode"
+        )
+    if mode_name not in model.modes:
+        raise CornerModelValidationError(
+            f"assign_mode_to_column: mode {mode_name!r} is not defined"
+        )
+    new_col = replace(col, mode=mode_name, name=None, pvt_label=col.name)
+    new_name = effective_name(new_col)
+    others = {
+        effective_name(c) for i, c in enumerate(model.columns)
+        if i != column_index
+    }
+    if new_name in others:
+        raise CornerModelValidationError(
+            f"assign_mode_to_column: effective name {new_name!r} collides "
+            f"with an existing column"
+        )
+    cols = tuple(
+        new_col if i == column_index else c
+        for i, c in enumerate(model.columns)
+    )
+    return replace(model, columns=cols)
+
+
 # ---------------------------------------------------------------------------
 # 2026 UX — column delete / reorder / rename, variable rename / remove
 # ---------------------------------------------------------------------------
@@ -1829,19 +2027,20 @@ def remove_variable(model: CornerModel, var: str) -> CornerModel:
 
 
 def _check_axis_well_formed(axis: CorrelatedAxis, fn: str) -> None:
-    """Shared validation for add / update of a correlated axis."""
+    """Shared validation for add / update of a dimension."""
     if not _VAR_NAME_RE.match(axis.name):
         raise CornerModelValidationError(
-            f"{fn}: axis name {axis.name!r} must match "
+            f"{fn}: dimension name {axis.name!r} must match "
             f"^[A-Za-z][A-Za-z0-9_]*$"
         )
-    if not axis.members:
+    if not axis.members and axis.model_file is None:
         raise CornerModelValidationError(
-            f"{fn}: axis {axis.name!r} needs at least one member variable"
+            f"{fn}: dimension {axis.name!r} needs at least one member "
+            f"variable or a model file"
         )
     if not axis.tuples:
         raise CornerModelValidationError(
-            f"{fn}: axis {axis.name!r} needs at least one level"
+            f"{fn}: dimension {axis.name!r} needs at least one level"
         )
     member_set = set(axis.members)
     for ct in axis.tuples:
@@ -1849,6 +2048,11 @@ def _check_axis_well_formed(axis: CorrelatedAxis, fn: str) -> None:
             raise CornerModelValidationError(
                 f"{fn}: level {ct.label!r} must give a value for exactly "
                 f"the members {sorted(member_set)}"
+            )
+        if (ct.section is not None) != (axis.model_file is not None):
+            raise CornerModelValidationError(
+                f"{fn}: level {ct.label!r} section and dimension "
+                f"{axis.name!r} model file must both be set or both absent"
             )
 
 
@@ -2289,6 +2493,15 @@ def to_dict(model: CornerModel) -> dict:
             ]
         if col.correlated_axes:
             entry["correlated_axes"] = list(col.correlated_axes)
+        if col.selected_levels:
+            entry["selected_levels"] = {
+                a: list(labels) for a, labels in col.selected_levels.items()
+            }
+        if col.inline_axes:
+            entry["inline_axes"] = [
+                {"name": ax.name, **_axis_to_dict(ax)}
+                for ax in col.inline_axes
+            ]
         if col.variant is not None:
             entry["variant"] = col.variant
         if col.axis_levels:
@@ -2310,13 +2523,7 @@ def to_dict(model: CornerModel) -> dict:
     }
     if model.correlated_axes:
         out["correlated_axes"] = {
-            ax.name: {
-                "members": list(ax.members),
-                "tuples": [
-                    {"label": t.label, "values": dict(t.values)}
-                    for t in ax.tuples
-                ],
-            }
+            ax.name: _axis_to_dict(ax)
             for ax in model.correlated_axes.values()
         }
     if model.variants:
@@ -2335,6 +2542,19 @@ def to_dict(model: CornerModel) -> dict:
         out["pvt_profile"] = model.pvt_profile
     if model.tests:
         out["tests"] = list(model.tests)
+    return out
+
+
+def _axis_to_dict(ax: CorrelatedAxis) -> dict:
+    tuples: list[dict] = []
+    for t in ax.tuples:
+        td: dict = {"label": t.label, "values": dict(t.values)}
+        if t.section is not None:
+            td["section"] = t.section
+        tuples.append(td)
+    out: dict = {"members": list(ax.members), "tuples": tuples}
+    if ax.model_file is not None:
+        out["model_file"] = ax.model_file
     return out
 
 

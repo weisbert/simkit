@@ -138,7 +138,7 @@ class CornerModelTableModel(QAbstractTableModel):
             for c in self._cols
         ]
         self._col_models = [
-            column_models(c, self._profile) for c in self._cols
+            column_models(c, self._profile, self._cm) for c in self._cols
         ]
         register_vars: set[str] = set()
         for mode in self._cm.modes.values():

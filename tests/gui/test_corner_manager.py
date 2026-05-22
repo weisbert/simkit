@@ -151,23 +151,6 @@ class CornerManagerViewTest(unittest.TestCase):
             view._on_new_mode()
         self.assertIn("M1", view.cornermodel().modes)
 
-    def test_new_column_adds_a_column(self):
-        with mock.patch.object(
-            cm_mod.QInputDialog, "getItem",
-            return_value=("BT_2G_RX", True),
-        ), mock.patch.object(
-            cm_mod.QInputDialog, "getText",
-            return_value=("FF_1", True),
-        ), mock.patch.object(
-            cm_mod.QInputDialog, "getMultiLineText",
-            side_effect=[("temperature=-40", True), ("rf018.scs: ff", True)],
-        ):
-            self.view._on_new_column()
-        self.assertEqual(self.view.table_model.columnCount(), 5)
-        new_col = self.view.cornermodel().columns[-1]
-        self.assertEqual(new_col.models[0].file, "rf018.scs")
-        self.assertEqual(new_col.models[0].section, ("ff",))
-
     def test_push_signal_carries_cornermodel(self):
         captured = []
         self.view.push_requested.connect(captured.append)
@@ -793,105 +776,122 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class CornerManagerAxesTest(unittest.TestCase):
-    """The Axes feature — author a correlated axis as a grid, cross axes
-    into an aggregated corner column (痛点 h)."""
+def _make_dim_cm():
+    """A VCO-mode cornermodel with a section-bearing Process dimension, a
+    Temp dimension and a Volt dimension."""
+    from simkit.corner_model import (
+        empty_cornermodel, add_mode, add_correlated_axis,
+        CorrelatedAxis, CorrelatedTuple,
+    )
+    cm = add_mode(
+        empty_cornermodel(name="vco", project="P"), "VCO", {"en": "1"}
+    )
+    cm = add_correlated_axis(cm, CorrelatedAxis(
+        "Process", ("CT",),
+        tuple(
+            CorrelatedTuple(lab, {"CT": ct}, section=lab.lower())
+            for lab, ct in (("TT", "100"), ("SS", "120"), ("FF", "80"),
+                            ("SF", "100"), ("FS", "100"))
+        ),
+        model_file="/pdk/models.scs",
+    ))
+    cm = add_correlated_axis(cm, CorrelatedAxis(
+        "Temp", ("temperature", "indfile"),
+        (CorrelatedTuple("hot", {"temperature": "125", "indfile": "h.s5p"}),
+         CorrelatedTuple("cold", {"temperature": "-40", "indfile": "c.s5p"})),
+    ))
+    cm = add_correlated_axis(cm, CorrelatedAxis(
+        "Volt", ("VDD",),
+        (CorrelatedTuple("nom", {"VDD": "1.0"}),
+         CorrelatedTuple("hi", {"VDD": "1.1"}),
+         CorrelatedTuple("lo", {"VDD": "0.9"})),
+    ))
+    return cm
 
-    def _cm(self):
-        from simkit.corner_model import empty_cornermodel, add_mode
-        return add_mode(
-            empty_cornermodel(name="vco", project="P"), "VCO", {"en": "1"}
-        )
 
-    def test_axis_grid_dialog_builds_axis(self):
+def _top_item(dialog, name):
+    """The New-Corner tree's top-level item whose dimension is ``name``."""
+    for i in range(dialog._tree.topLevelItemCount()):
+        top = dialog._tree.topLevelItem(i)
+        if top.data(0, Qt.UserRole) == ("lib", name):
+            return top
+    raise AssertionError(f"no dimension item {name!r}")
+
+
+class CornerManagerDimensionsTest(unittest.TestCase):
+    """The unified dimension/corner flow — author a dimension as a grid,
+    build a corner by crossing dimensions with a per-level subset (痛点 a + h)."""
+
+    def test_dimension_grid_builds_section_dimension(self):
         from PyQt5.QtWidgets import QTableWidgetItem, QMessageBox
-        dlg = cm_mod._AxisGridDialog()
-        dlg._name_edit.setText("process")
-        dlg._table.setHorizontalHeaderItem(1, QTableWidgetItem("process"))
-        dlg._add_member(initial="CT")
+        dlg = cm_mod._DimensionGridDialog()
+        dlg._name_edit.setText("Process")
+        # filling the model file makes a section dimension — a section
+        # column appears, members shift to column 2.
+        dlg._model_file_edit.setText("/pdk/models.scs")
+        self.assertTrue(dlg._has_section)
+        dlg._table.setHorizontalHeaderItem(2, QTableWidgetItem("CT"))
         dlg._add_level()
-        for r, (lab, p, ct) in enumerate(
-            [("TT", "tt", "100"), ("FF", "ff", "88")]
+        for r, (lab, sec, ct) in enumerate(
+            [("TT", "tt", "100"), ("SS", "ss", "120")]
         ):
             dlg._table.setItem(r, 0, QTableWidgetItem(lab))
-            dlg._table.setItem(r, 1, QTableWidgetItem(p))
+            dlg._table.setItem(r, 1, QTableWidgetItem(sec))
             dlg._table.setItem(r, 2, QTableWidgetItem(ct))
         with mock.patch.object(QMessageBox, "warning"):
             dlg._on_ok()
         ax = dlg.axis()
         self.assertIsNotNone(ax)
-        self.assertEqual(ax.name, "process")
-        self.assertEqual(ax.members, ("process", "CT"))
-        self.assertEqual(len(ax.tuples), 2)
-        self.assertEqual(
-            ax.tuples[0].values, {"process": "tt", "CT": "100"}
-        )
+        self.assertEqual(ax.model_file, "/pdk/models.scs")
+        self.assertEqual(ax.members, ("CT",))
+        self.assertEqual(ax.tuples[0].section, "tt")
+        self.assertEqual(ax.tuples[0].values, {"CT": "100"})
 
-    def test_axes_dialog_crosses_axes_into_aggregated_corner(self):
+    def test_new_corner_crosses_dimensions_with_level_subset(self):
         from PyQt5.QtWidgets import QMessageBox
-        from simkit.corner_model import (
-            CorrelatedAxis, CorrelatedTuple, add_correlated_axis,
-            column_point_count,
-        )
-        view = CornerManagerView(self._cm())
-        cm = view.cornermodel()
-        cm = add_correlated_axis(cm, CorrelatedAxis(
-            "proc", ("process",),
-            tuple(CorrelatedTuple(lv, {"process": lv})
-                  for lv in ("tt", "ff", "ss", "fs", "sf")),
-        ))
-        cm = add_correlated_axis(cm, CorrelatedAxis(
-            "volt", ("VDD",),
-            tuple(CorrelatedTuple(lv, {"VDD": val})
-                  for lv, val in (("n", "1.0"), ("h", "1.1"), ("l", "0.9"))),
-        ))
-        view._apply(cm)
+        from simkit.corner_model import column_point_count
+        view = CornerManagerView(_make_dim_cm())
 
-        d = cm_mod._AxesDialog(view)
-        for i in range(d._cross_list.count()):
-            d._cross_list.item(i).setCheckState(Qt.Checked)
-        self.assertIn("5 × 3 = 15", d._count_label.text())
-        d._corner_name.setText("PVT15")
+        d = cm_mod._NewCornerDialog(view)
+        d._corner_name.setText("PN_PVT")
         for i in range(d._mode_list.count()):
             d._mode_list.item(i).setCheckState(Qt.Checked)
+        # Process: all 5 levels; Volt: only hi + lo (a subset).
+        proc = _top_item(d, "Process")
+        for j in range(proc.childCount()):
+            proc.child(j).setCheckState(0, Qt.Checked)
+        volt = _top_item(d, "Volt")
+        volt.child(1).setCheckState(0, Qt.Checked)   # hi
+        volt.child(2).setCheckState(0, Qt.Checked)   # lo
+        self.assertIn("5 × 2 = 10", d._count_label.text())
         with mock.patch.object(QMessageBox, "information"):
-            d._on_create_corner()
+            d._on_create()
         col = view.cornermodel().columns[-1]
-        self.assertEqual(set(col.correlated_axes), {"proc", "volt"})
+        self.assertEqual(set(col.correlated_axes), {"Process", "Volt"})
+        self.assertEqual(col.selected_levels.get("Volt"), ("hi", "lo"))
+        self.assertNotIn("Process", col.selected_levels)   # all → not stored
         self.assertEqual(
-            column_point_count(view.cornermodel(), col, None), 15
+            column_point_count(view.cornermodel(), col, None), 10
         )
 
-    def test_axes_create_stamps_onto_every_ticked_mode(self):
-        # Multi-mode: ticking several modes stamps the aggregated corner
-        # onto each at once — Axes covers reuse across modes (痛点 a).
+    def test_new_corner_stamps_onto_every_ticked_mode(self):
         from PyQt5.QtWidgets import QMessageBox
-        from simkit.corner_model import (
-            CorrelatedAxis, CorrelatedTuple, add_correlated_axis, add_mode,
-            effective_name,
-        )
-        cm = self._cm()
+        from simkit.corner_model import add_mode, effective_name
+        cm = _make_dim_cm()
         cm = add_mode(cm, "LO", {"en": "1"})
-        cm = add_mode(cm, "PA", {"en": "1"})
-        cm = add_correlated_axis(cm, CorrelatedAxis(
-            "proc", ("process",),
-            tuple(CorrelatedTuple(lv, {"process": lv})
-                  for lv in ("tt", "ff", "ss")),
-        ))
         view = CornerManagerView(cm)
-        view._apply(cm)
 
-        d = cm_mod._AxesDialog(view)
-        d._cross_list.item(0).setCheckState(Qt.Checked)
-        d._corner_name.setText("PVT3")
+        d = cm_mod._NewCornerDialog(view)
+        d._corner_name.setText("PVT2")
         for i in range(d._mode_list.count()):
             d._mode_list.item(i).setCheckState(Qt.Checked)
+        temp = _top_item(d, "Temp")
+        for j in range(temp.childCount()):
+            temp.child(j).setCheckState(0, Qt.Checked)
         with mock.patch.object(QMessageBox, "information"):
-            d._on_create_corner()
+            d._on_create()
         stamped = {
             effective_name(c) for c in view.cornermodel().columns
-            if c.pvt_label == "PVT3"
+            if c.pvt_label == "PVT2"
         }
-        self.assertEqual(
-            stamped, {"VCO_PVT3", "LO_PVT3", "PA_PVT3"}
-        )
+        self.assertEqual(stamped, {"VCO_PVT2", "LO_PVT2"})
