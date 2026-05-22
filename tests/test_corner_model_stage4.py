@@ -114,6 +114,13 @@ def test_add_duplicate_run_set_rejected(tmp_path):
         add_run_set(cm, "RX_only", ())
 
 
+def test_rename_mode_follows_run_set_membership(tmp_path):
+    from simkit.corner_model import rename_mode
+    cm = _write_load(tmp_path, _base())
+    cm2 = rename_mode(cm, "BT_2G_RX", "RXa")
+    assert run_set_membership(cm2, "RX_only") == {"RXa_TT"}
+
+
 def test_run_set_membership(tmp_path):
     cm = _write_load(tmp_path, _base())
     assert run_set_membership(cm, "RX_only") == {"BT_2G_RX_TT"}

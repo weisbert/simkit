@@ -76,6 +76,7 @@ from simkit.corner_model import (
     remove_mode,
     remove_run_set,
     rename_column,
+    rename_mode,
     rename_variable,
     reorder_columns,
     remove_variable,
@@ -250,6 +251,7 @@ class CornerManagerView(QWidget):
         self.btn_new_mode.clicked.connect(self._on_new_mode)
         self.btn_edit_mode.clicked.connect(self._on_edit_mode)
         self.btn_delete_mode.clicked.connect(self._on_delete_mode)
+        self.modes_list.itemDoubleClicked.connect(self._on_rename_mode)
         self.btn_new_corner.clicked.connect(self._on_new_corner)
         self.btn_clear_filters.clicked.connect(self._on_clear_all_filters)
         self.table_model.filtersChanged.connect(self._apply_filters)
@@ -293,7 +295,8 @@ class CornerManagerView(QWidget):
         v.addWidget(QLabel(
             "A mode is a named register configuration (e.g. BT_2G_RX). "
             "Every corner column belongs to a mode; edit a register here "
-            "and all of that mode's columns update at once."
+            "and all of that mode's columns update at once. "
+            "Double-click a mode to rename it."
         ))
         hdr = QHBoxLayout()
         hdr.addWidget(QLabel("Modes"))
@@ -1025,6 +1028,20 @@ class CornerManagerView(QWidget):
             new_cm = remove_mode(self._cm, name)
         except CornerModelError as exc:
             QMessageBox.warning(self, "Delete Mode failed", str(exc))
+            return
+        self._apply(new_cm)
+
+    def _on_rename_mode(self, item: QListWidgetItem) -> None:
+        old = item.text()
+        new, ok = QInputDialog.getText(
+            self, "Rename mode", "New mode name:", text=old
+        )
+        if not ok or not new.strip() or new.strip() == old:
+            return
+        try:
+            new_cm = rename_mode(self._cm, old, new.strip())
+        except CornerModelError as exc:
+            QMessageBox.warning(self, "Rename mode failed", str(exc))
             return
         self._apply(new_cm)
 

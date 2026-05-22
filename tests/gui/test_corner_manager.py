@@ -246,6 +246,17 @@ class CornerManagerNewModeFromModeTest(unittest.TestCase):
         self.view.hide()
         self.view.deleteLater()
 
+    def test_rename_mode_via_double_click(self):
+        item = self.view.modes_list.item(0)
+        old = item.text()
+        with mock.patch.object(
+            cm_mod.QInputDialog, "getText", return_value=(old + "X", True),
+        ):
+            self.view._on_rename_mode(item)
+        modes = self.view.cornermodel().modes
+        self.assertIn(old + "X", modes)
+        self.assertNotIn(old, modes)
+
     def test_delete_mode_removes_it(self):
         self.view.modes_list.setCurrentRow(0)
         name = self.view.modes_list.currentItem().text()

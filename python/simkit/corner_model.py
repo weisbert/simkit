@@ -1660,6 +1660,61 @@ def columns_of_mode(model: CornerModel, name: str) -> int:
     return sum(1 for c in model.columns if c.mode == name)
 
 
+def rename_mode(
+    model: CornerModel, old_name: str, new_name: str
+) -> CornerModel:
+    """Return a new cornermodel with mode ``old_name`` renamed to
+    ``new_name``. Its corner columns, variants based on it, and run-set
+    memberships all follow the rename."""
+    if old_name not in model.modes:
+        raise CornerModelValidationError(
+            f"rename_mode: mode {old_name!r} is not defined"
+        )
+    new_name = new_name.strip()
+    if not _MODE_NAME_RE.match(new_name):
+        raise CornerModelValidationError(
+            f"rename_mode: name {new_name!r} must match "
+            f"^[A-Za-z][A-Za-z0-9_]*$"
+        )
+    if new_name == old_name:
+        return model
+    if new_name in model.modes:
+        raise CornerModelValidationError(
+            f"rename_mode: mode {new_name!r} already exists"
+        )
+    new_modes = {
+        (new_name if k == old_name else k):
+        (replace(v, name=new_name) if k == old_name else v)
+        for k, v in model.modes.items()
+    }
+    new_variants = {
+        k: (replace(v, base_mode=new_name)
+            if v.base_mode == old_name else v)
+        for k, v in model.variants.items()
+    }
+    new_columns = tuple(
+        replace(c, mode=new_name) if c.mode == old_name else c
+        for c in model.columns
+    )
+    # Run-set memberships follow any effective-name change (a plain
+    # managed column's name is mode-derived; aliased / variant ones aren't).
+    eff_map = {
+        effective_name(old): effective_name(new)
+        for old, new in zip(model.columns, new_columns)
+        if effective_name(old) != effective_name(new)
+    }
+    new_sets = {
+        name: replace(rs, columns=tuple(
+            eff_map.get(c, c) for c in rs.columns
+        ))
+        for name, rs in model.run_sets.items()
+    }
+    return replace(
+        model, modes=new_modes, variants=new_variants,
+        columns=new_columns, run_sets=new_sets,
+    )
+
+
 def mode_from_column(
     model: CornerModel, column_index: int, mode_name: str,
     register_vars: dict[str, str], pvt_label: str,

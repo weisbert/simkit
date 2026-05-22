@@ -162,6 +162,15 @@ def test_set_variant_var_global_edit(tmp_path):
     assert row.vars["d_div12_en"] == ("2",)
 
 
+def test_rename_mode_cascades(tmp_path):
+    from simkit.corner_model import rename_mode
+    cm = _write_load(tmp_path, _base())
+    cm2 = rename_mode(cm, "BT_2G_RX", "BT_2G_RX2")
+    assert "BT_2G_RX2" in cm2.modes and "BT_2G_RX" not in cm2.modes
+    assert cm2.variants["BT_2G_RX_PN"].base_mode == "BT_2G_RX2"
+    assert cm2.columns[0].mode == "BT_2G_RX2"
+
+
 def test_remove_mode_cascades(tmp_path):
     from simkit.corner_model import remove_mode
     cm = _write_load(tmp_path, _base())
