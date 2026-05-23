@@ -145,19 +145,13 @@ class CornerManagerView(QWidget):
             "their registers. A variant is just a mode derived from "
             "another — use New Mode ▸ from an existing mode."
         )
-        self.btn_dimensions = QPushButton("Dimensions…")
-        self.btn_dimensions.setToolTip(
-            "Manage reusable dimensions — lists of levels (Process: "
-            "TT/SS/FF…, Temperature, Voltage). A corner is a crossing of "
-            "dimensions; one edit here updates every corner that uses it."
+        self.btn_corner_generator = QPushButton("Corner Generator…")
+        self.btn_corner_generator.setToolTip(
+            "Open the PVT Corner Generator — define PVT levels, describe "
+            "corners as patterns, and generate them into the corner table."
         )
-        for b in (self.btn_modes, self.btn_dimensions):
+        for b in (self.btn_modes, self.btn_corner_generator):
             top.addWidget(b)
-        self.btn_new_corner = QPushButton("New Corner")
-        self.btn_new_corner.setToolTip(
-            "Build a corner by crossing dimensions — tick the levels of "
-            "each, then stamp the corner onto one or more modes."
-        )
         self.btn_pull = QPushButton("Pull")
         self.btn_pull.setToolTip(
             "Pull the current corners from the live Maestro session. If "
@@ -168,7 +162,7 @@ class CornerManagerView(QWidget):
             "Materialise this corner model and push the corners to the "
             "live Maestro session (replaces the Maestro corner table)."
         )
-        for b in (self.btn_new_corner, self.btn_pull, self.btn_push):
+        for b in (self.btn_pull, self.btn_push):
             top.addWidget(b)
         outer.addLayout(top)
 
@@ -247,12 +241,11 @@ class CornerManagerView(QWidget):
         self.modes_list.currentItemChanged.connect(self._on_mode_selected)
         self.mode_vars.itemChanged.connect(self._on_mode_var_changed)
         self.table_model.cornermodelChanged.connect(self._on_table_edited)
-        self.btn_dimensions.clicked.connect(self._on_dimensions)
+        self.btn_corner_generator.clicked.connect(self._on_corner_generator)
         self.btn_new_mode.clicked.connect(self._on_new_mode)
         self.btn_edit_mode.clicked.connect(self._on_edit_mode)
         self.btn_delete_mode.clicked.connect(self._on_delete_mode)
         self.modes_list.itemDoubleClicked.connect(self._on_rename_mode)
-        self.btn_new_corner.clicked.connect(self._on_new_corner)
         self.btn_clear_filters.clicked.connect(self._on_clear_all_filters)
         self.table_model.filtersChanged.connect(self._apply_filters)
         self.table.customContextMenuRequested.connect(
@@ -1098,6 +1091,12 @@ class CornerManagerView(QWidget):
     def _on_new_corner(self) -> None:
         """Open the New Corner builder — cross dimensions into a corner."""
         _NewCornerDialog(self).exec_()
+
+    def _on_corner_generator(self) -> None:
+        """Open the PVT Corner Generator — author corners by pattern and
+        generate them into the corner table (痛点 a / h)."""
+        from simkit.gui.views.corner_generator import CornerGeneratorDialog
+        CornerGeneratorDialog(self).exec_()
 
     # --- accessors -------------------------------------------------------
 

@@ -1211,6 +1211,143 @@ def column_point_count(
 
 
 # ---------------------------------------------------------------------------
+# Corner generator — expand a pattern row into columns (痛点 a / h)
+# ---------------------------------------------------------------------------
+
+
+def axis_is_composite(axis: CorrelatedAxis) -> bool:
+    """True if ``axis`` controls two or more variables — counting its member
+    variables plus, for a section-bearing axis, the model section.
+
+    A composite axis carries a binding (痛点 h: CT-tuning moves with the
+    process corner, the inductor ``.s5p`` file moves with temperature) that a
+    single Maestro corner column cannot express. So a generator pattern
+    expands into one column per composite-level combination. An axis
+    controlling exactly one variable is *simple*: it stays a multi-valued
+    cell inside every generated column instead of forcing a split.
+    """
+    return len(axis.members) + (1 if axis.model_file is not None else 0) >= 2
+
+
+def generate_pattern_columns(
+    model: CornerModel,
+    mode: str,
+    pattern_name: str,
+    axis_selections: list[tuple[str, tuple[str, ...]]],
+) -> list[Column]:
+    """Expand one corner-generator pattern row into corner columns.
+
+    ``axis_selections`` lists, in display order, the axes the pattern crosses
+    and the level labels picked on each. Composite axes
+    (:func:`axis_is_composite`) are *expanded* — the result has one column per
+    element of their level cross-product, each pinning that axis to one level.
+    Simple axes are *not* expanded: their levels stay as a swept variable (or
+    swept model section) inside every generated column, so a single column
+    materialises to a single Maestro corner. The column name is
+    ``pattern_name`` followed by each composite level label, joined with
+    ``_`` (no suffix when nothing expands). Returns the columns; the caller
+    adds them via :func:`add_column`.
+    """
+    if mode not in model.modes:
+        raise CornerModelValidationError(
+            f"generate_pattern_columns: mode {mode!r} is not defined"
+        )
+    if not _VAR_NAME_RE.match(pattern_name):
+        raise CornerModelValidationError(
+            f"generate_pattern_columns: pattern name {pattern_name!r} must "
+            f"match ^[A-Za-z][A-Za-z0-9_]*$"
+        )
+    if not axis_selections:
+        raise CornerModelValidationError(
+            "generate_pattern_columns: pattern crosses no axes"
+        )
+
+    # Resolve each axis to (axis, {label: tuple}, ordered labels, composite?).
+    resolved: list[tuple[CorrelatedAxis, dict, tuple[str, ...], bool]] = []
+    for axis_name, labels in axis_selections:
+        axis = model.correlated_axes.get(axis_name)
+        if axis is None:
+            raise CornerModelValidationError(
+                f"generate_pattern_columns: no such axis {axis_name!r}"
+            )
+        if not labels:
+            raise CornerModelValidationError(
+                f"generate_pattern_columns: axis {axis_name!r} has no level "
+                f"selected"
+            )
+        by_label = {ct.label: ct for ct in axis.tuples}
+        bad = [lab for lab in labels if lab not in by_label]
+        if bad:
+            raise CornerModelValidationError(
+                f"generate_pattern_columns: axis {axis_name!r} has no "
+                f"level(s) {sorted(bad)}"
+            )
+        resolved.append(
+            (axis, by_label, tuple(labels), axis_is_composite(axis))
+        )
+
+    composite = [r for r in resolved if r[3]]
+    simple = [r for r in resolved if not r[3]]
+    # One column per element of the composite cross-product. An empty
+    # product yields a single element () — a single, unsuffixed column.
+    combos = list(itertools.product(
+        *[labels for _ax, _bl, labels, _c in composite]
+    )) or [()]
+
+    columns: list[Column] = []
+    for combo in combos:
+        name = pattern_name + "".join(f"_{lab}" for lab in combo)
+        pvt_vars: dict[str, tuple[str, ...]] = {}
+        sweep_keys: set[str] = set()
+        models: list[ModelEntry] = []
+        model_sweeps: set[int] = set()
+
+        # Composite axes — pinned to one level: bake its values as scalars.
+        for (axis, by_label, _labels, _c), label in zip(composite, combo):
+            ct = by_label[label]
+            for var, val in ct.values.items():
+                pvt_vars[var] = (val,)
+            if axis.model_file is not None and ct.section is not None:
+                models.append(ModelEntry(
+                    file=axis.model_file, block="Global", test="All",
+                    section=(ct.section,),
+                ))
+
+        # Simple axes — not expanded: levels become a sweep inside the column.
+        for axis, by_label, labels, _c in simple:
+            cts = [by_label[lab] for lab in labels]
+            for member in axis.members:
+                vals = tuple(ct.values[member] for ct in cts)
+                pvt_vars[member] = vals
+                if len(vals) > 1:
+                    sweep_keys.add(member)
+            if axis.model_file is not None:
+                sections = tuple(
+                    ct.section for ct in cts if ct.section is not None
+                )
+                if sections:
+                    idx = len(models)
+                    models.append(ModelEntry(
+                        file=axis.model_file, block="Global", test="All",
+                        section=sections,
+                    ))
+                    if len(sections) > 1:
+                        model_sweeps.add(idx)
+
+        columns.append(Column(
+            mode=mode,
+            enabled=True,
+            pvt_vars=pvt_vars,
+            models=tuple(models),
+            pvt_label=name,
+            alias=name,
+            pvt_sweep_keys=frozenset(sweep_keys),
+            model_sweep_indices=frozenset(model_sweeps),
+        ))
+    return columns
+
+
+# ---------------------------------------------------------------------------
 # Override conflict — spec §6.4 (D1, Stage 1 subset)
 # ---------------------------------------------------------------------------
 

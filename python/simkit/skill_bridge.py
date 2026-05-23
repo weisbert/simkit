@@ -290,6 +290,45 @@ def pvt_corners_pull(
         return _unwrap(ws["pvtCornersPull"](**kwargs))
 
 
+def read_model_files(
+    *,
+    pvtproject_path: Optional[Path] = None,
+    session: Optional[str] = None,
+    workspace: Any = None,
+) -> dict:
+    """Read the model file(s) the live ADE-XL corner table references.
+
+    Pulls the live corner table and collects every distinct model file, its
+    resolved absolute path, and the sections seen across rows. Returns
+    ``{file: {"file_abs": str, "sections": [str, ...]}}``. Used by the PVT
+    Corner Generator's "Read from Cadence" — so the user picks a real model
+    file instead of typing a path.
+    """
+    import json
+    import tempfile
+
+    pp = pvtproject_path or resolve_pvtproject_path(None)
+    out = Path(tempfile.gettempdir()) / "simkit_modelfiles.union.json"
+    pvt_corners_pull(
+        out, pvtproject_path=pp, session=session, workspace=workspace
+    )
+    data = json.loads(out.read_text(encoding="utf-8"))
+    files: dict = {}
+    for row in data.get("rows", []):
+        for m in row.get("models", []):
+            name = m.get("file")
+            if not name:
+                continue
+            entry = files.setdefault(name, {"file_abs": "", "sections": []})
+            if m.get("_file_abs"):
+                entry["file_abs"] = m["_file_abs"]
+            sec = m.get("section")
+            for s in ([sec] if isinstance(sec, str) else (sec or [])):
+                if s and s not in entry["sections"]:
+                    entry["sections"].append(s)
+    return files
+
+
 def resolve_live_testbench_id(
     *,
     session: Optional[str] = None,
