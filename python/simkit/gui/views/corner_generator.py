@@ -450,10 +450,13 @@ class CornerGeneratorDialog(QDialog):
     """The PVT Corner Generator — see the module docstring."""
 
     def __init__(self, view) -> None:  # view: CornerManagerView
-        # Parent to the top-level window, not the tab-embedded view widget:
-        # on X11 some WMs couple drag operations with the parent if it isn't
-        # a top-level (= dragging the dialog drags the main window with it).
-        super().__init__(view.window())
+        # No Qt parent at all — passing any parent makes Qt set
+        # WM_TRANSIENT_FOR on X11, and several WMs use that to "group" the
+        # dialog with its parent (dragging the dialog moves the main window
+        # too). ApplicationModal keeps input blocked on the main window so
+        # the modal UX is preserved without geometric coupling.
+        super().__init__()
+        self.setWindowModality(Qt.ApplicationModal)
         self._view = view
         self.setWindowTitle("PVT Corner Generator")
         self.setMinimumSize(980, 660)

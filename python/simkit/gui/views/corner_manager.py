@@ -1933,8 +1933,10 @@ class _DimensionsDialog(QDialog):
     edit here updates every corner that crosses the dimension."""
 
     def __init__(self, view: "CornerManagerView") -> None:
-        # Parent to the top-level window (see CornerGeneratorDialog comment).
-        super().__init__(view.window())
+        # No Qt parent — avoids WM_TRANSIENT_FOR / WM "grouped drag"
+        # behaviour. See CornerGeneratorDialog for the full reasoning.
+        super().__init__()
+        self.setWindowModality(Qt.ApplicationModal)
         self._view = view
         self.setWindowTitle("Dimensions")
         self.setMinimumWidth(460)
@@ -2049,8 +2051,9 @@ class _NewCornerDialog(QDialog):
     One Create stamps the corner onto every ticked mode (痛点 a + h)."""
 
     def __init__(self, view: "CornerManagerView") -> None:
-        # Parent to the top-level window (see CornerGeneratorDialog comment).
-        super().__init__(view.window())
+        # No Qt parent — see CornerGeneratorDialog comment.
+        super().__init__()
+        self.setWindowModality(Qt.ApplicationModal)
         self._view = view
         self._inline: list[CorrelatedAxis] = []
         self.setWindowTitle("New Corner")
