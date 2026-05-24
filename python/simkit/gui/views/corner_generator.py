@@ -69,12 +69,17 @@ class _LevelGrid(QWidget):
 
     def __init__(
         self, axis_name: str, *, allow_model_file: bool,
+        view: Optional[QWidget] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._axis_name = axis_name
         self._allow_model_file = allow_model_file
         self._has_section = False
+        # ``view`` (a CornerManagerView) is only needed by the Process grid
+        # so "Read from Cadence" can reach the main window for the loaded
+        # project / session.
+        self._view = view
 
         v = QVBoxLayout(self)
         v.setContentsMargins(2, 2, 2, 2)
@@ -243,11 +248,27 @@ class _LevelGrid(QWidget):
                 f"Cannot load the Cadence bridge:\n{exc}",
             )
             return
+        # The dialog has no Qt parent (X11 grouped-drag fix) so self.window()
+        # returns the dialog itself; reach the main window via the view,
+        # which is still embedded in the QMainWindow's tab panel. The bridge
+        # walks cwd / $PVT_PROJECT as a fallback when no path is passed, but
+        # cwd is the launch dir (often the repo root) — pass the loaded
+        # project explicitly so "Read from Cadence" hits the right project.
+        kwargs: dict = {}
+        main = self._view.window() if self._view is not None else None
+        if main is not None and hasattr(main, "current_project_path"):
+            pp = main.current_project_path()
+            if pp is not None:
+                kwargs["pvtproject_path"] = pp
+        if main is not None and hasattr(main, "current_session_name"):
+            sess = main.current_session_name()
+            if sess:
+                kwargs["session"] = sess
         QApplication.setOverrideCursor(_Qt.WaitCursor)
         files = None
         err = None
         try:
-            files = read_model_files()
+            files = read_model_files(**kwargs)
         except Exception as exc:  # noqa: BLE001
             err = exc
         finally:
@@ -477,6 +498,7 @@ class CornerGeneratorDialog(QDialog):
         for axis_name in _AXES:
             grid = _LevelGrid(
                 axis_name, allow_model_file=(axis_name == "Process"),
+                view=self._view if axis_name == "Process" else None,
             )
             existing = cm.correlated_axes.get(axis_name)
             if existing is not None:
