@@ -22,7 +22,9 @@ and on-disk format are unchanged.
 
 from __future__ import annotations
 
-from typing import Optional
+import re
+from pathlib import Path
+from typing import Callable, Optional
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -39,6 +41,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -61,6 +64,57 @@ _AXES = ("Process", "Voltage", "Temperature")
 _VAR_NAME_RE = r"^[A-Za-z][A-Za-z0-9_]*$"
 _LEVEL_RE = r"^[A-Za-z0-9_]+$"
 
+# Spectre `.scs`: `section <name>` ... `endsection`. HSPICE `.lib`: `.lib <name>`
+# ... `.endl` (and only when name is a bare identifier — the include form
+# `.lib 'file' name` references a section, never defines one).
+_SECTION_RE = re.compile(
+    r"^\s*(?:section\s+([A-Za-z_][\w]*)"
+    r"|\.lib\s+([A-Za-z_][\w]*)\s*(?:\*.*)?$)",
+    re.MULTILINE,
+)
+
+
+def _parse_model_sections(model_path: str) -> list[str]:
+    """Return the section names defined in a Spectre / HSPICE model file
+    (best-effort; empty on parse failure or unsupported format). Used by
+    the Process grid's section-cell dropdown so the user picks a real
+    section instead of typing one — matching Cadence's corner-editor UX."""
+    p = Path(model_path).expanduser()
+    if not p.is_absolute() or not p.is_file():
+        return []
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    seen: list[str] = []
+    for m in _SECTION_RE.finditer(text):
+        name = m.group(1) or m.group(2)
+        if name and name not in seen:
+            seen.append(name)
+    return seen
+
+
+class _SectionDelegate(QStyledItemDelegate):
+    """Per-cell editor for the Process grid's section column — a freely
+    editable combobox populated with the sections parsed from the current
+    model file (Cadence-style "supported corner names")."""
+
+    def __init__(self, get_sections: Callable[[], list[str]]) -> None:
+        super().__init__()
+        self._get_sections = get_sections
+
+    def createEditor(self, parent, option, index):  # noqa: N802
+        cb = QComboBox(parent)
+        cb.setEditable(True)
+        cb.addItems(self._get_sections())
+        return cb
+
+    def setEditorData(self, editor: QComboBox, index) -> None:  # noqa: N802
+        editor.setCurrentText(index.data() or "")
+
+    def setModelData(self, editor: QComboBox, model, index) -> None:  # noqa: N802
+        model.setData(index, editor.currentText().strip())
+
 
 class _LevelGrid(QWidget):
     """One axis's level-definition grid: rows = levels, columns = the
@@ -80,6 +134,14 @@ class _LevelGrid(QWidget):
         # so "Read from Cadence" can reach the main window for the loaded
         # project / session.
         self._view = view
+        # Sections parsed from the current model file (Process grid only) —
+        # surfaced as the section-cell dropdown. May also be seeded from
+        # "Read from Cadence" when the file is not on disk yet.
+        self._available_sections: list[str] = []
+        # The absolute path most recently seen for the model file (set by
+        # Browse and Read-from-Cadence) so manually-typed relative names
+        # can still be parsed for sections.
+        self._model_file_abs: Optional[str] = None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(2, 2, 2, 2)
@@ -153,9 +215,37 @@ class _LevelGrid(QWidget):
                 1, QTableWidgetItem("section")
             )
             self._has_section = True
+            # Section cells get a combobox editor populated with whatever
+            # sections we know — parsed from the file or seeded by "Read
+            # from Cadence". The delegate looks up the live list lazily on
+            # each edit, so updates after Browse / typing show through.
+            self._table.setItemDelegateForColumn(
+                1, _SectionDelegate(lambda: list(self._available_sections)),
+            )
         elif not want and self._has_section:
             self._table.removeColumn(1)
             self._has_section = False
+        # Whenever the file path changes, re-parse so the dropdown reflects
+        # the new file (or empties when the file goes away / is unreadable).
+        self._refresh_available_sections()
+
+    def _refresh_available_sections(self) -> None:
+        if self._model_file_edit is None:
+            self._available_sections = []
+            return
+        typed = self._model_file_edit.text().strip()
+        if not typed:
+            self._available_sections = []
+            return
+        candidate = typed
+        # If the user typed a relative name, fall back to the abs path we
+        # captured from Browse / Read-from-Cadence.
+        if not Path(candidate).is_absolute() and self._model_file_abs:
+            if Path(self._model_file_abs).name == typed:
+                candidate = self._model_file_abs
+        parsed = _parse_model_sections(candidate)
+        if parsed:
+            self._available_sections = parsed
 
     # --- edits -----------------------------------------------------------
     def _add_variable(
@@ -228,12 +318,14 @@ class _LevelGrid(QWidget):
         self._table.setHorizontalHeaderItem(section, QTableWidgetItem(name))
 
     def _browse_model_file(self) -> None:
-        from pathlib import Path
         chosen, _ = QFileDialog.getOpenFileName(
             self, "Select model file", str(Path.cwd()),
             "Model files (*.scs *.spi *.cir *.mod);;All files (*)",
         )
         if chosen:
+            # Remember the abs path for the section dropdown — keeps working
+            # even if the user later trims the field to just the basename.
+            self._model_file_abs = chosen
             self._model_file_edit.setText(chosen)
 
     def _read_from_cadence(self) -> None:
@@ -295,14 +387,22 @@ class _LevelGrid(QWidget):
             )
             if not ok:
                 return
+        # Capture the abs path BEFORE setting the line edit so the
+        # textChanged-driven section parse can find the file on disk.
+        self._model_file_abs = files[chosen].get("file_abs") or chosen
         self._model_file_edit.setText(chosen)   # adds the section column
-        sections = files[chosen].get("sections") or []
-        if sections and QMessageBox.question(
+        # Live-pulled sections (= currently in use in Maestro) get folded
+        # into the dropdown as a fallback / hint — parsed-from-file
+        # sections take precedence when both are present.
+        live_sections = list(files[chosen].get("sections") or [])
+        if live_sections and not self._available_sections:
+            self._available_sections = live_sections
+        if live_sections and QMessageBox.question(
             self, "Read from Cadence",
-            f"Found sections: {', '.join(sections)}.\n"
+            f"Found sections: {', '.join(live_sections)}.\n"
             f"Add them as {self._axis_name} levels?",
         ) == QMessageBox.Yes:
-            self._seed_sections(sections)
+            self._seed_sections(live_sections)
 
     def _seed_sections(self, sections: list[str]) -> None:
         """Replace the grid's level rows with one row per model section."""

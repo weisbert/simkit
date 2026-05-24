@@ -195,5 +195,60 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             dlg.hide()
 
 
+    def test_parse_model_sections_spectre(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".scs", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(
+                "// rf018 PDK model\n"
+                "section tt\n"
+                "  include \"rf018_tt.scs\"\n"
+                "endsection\n"
+                "section ss\n"
+                "  include \"rf018_ss.scs\"\n"
+                "endsection\n"
+                "section ff\n"
+                "endsection\n"
+            )
+            path = f.name
+        self.assertEqual(cg._parse_model_sections(path), ["tt", "ss", "ff"])
+
+    def test_parse_model_sections_hspice_lib_blocks(self):
+        import tempfile
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".sp", delete=False, encoding="utf-8",
+        ) as f:
+            f.write(
+                "* HSPICE-style sections\n"
+                ".lib tt\n"
+                ".param vth=0.42\n"
+                ".endl\n"
+                ".lib ss\n"
+                ".endl\n"
+            )
+            path = f.name
+        self.assertEqual(cg._parse_model_sections(path), ["tt", "ss"])
+
+    def test_parse_model_sections_returns_empty_on_missing_file(self):
+        self.assertEqual(cg._parse_model_sections("/no/such/file.scs"), [])
+
+    def test_section_column_delegate_pulls_parsed_sections(self):
+        import tempfile
+        _view_, dlg = self._dialog()
+        grid = dlg._grids["Process"]
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".scs", delete=False, encoding="utf-8",
+        ) as f:
+            f.write("section tt\nendsection\nsection ss\nendsection\n")
+            path = f.name
+        grid._model_file_edit.setText(path)
+        self.assertEqual(grid._available_sections, ["tt", "ss"])
+        # The section column should have the combobox delegate installed.
+        self.assertIsInstance(
+            grid._table.itemDelegateForColumn(1), cg._SectionDelegate
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
