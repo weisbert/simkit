@@ -114,7 +114,10 @@ class CornerManagerViewTest(unittest.TestCase):
         )
 
     def test_new_mode_from_column(self):
-        # _make_cm has columns, so New Mode derives a mode from a column.
+        # _make_cm has columns, so New Mode harvests register names + values
+        # from a chosen corner. The corner table itself is NOT touched —
+        # creating a mode is a pure-concept op (2026 UX).
+        original_columns = list(self.view.cornermodel().columns)
         with mock.patch.object(
             cm_mod.QInputDialog, "getItem",
             return_value=("From a corner column", True),
@@ -122,18 +125,23 @@ class CornerManagerViewTest(unittest.TestCase):
             cm_mod._NewModeDialog, "exec_",
             return_value=cm_mod.QDialog.Accepted,
         ), mock.patch.object(
-            cm_mod._NewModeDialog, "selected_column_index", return_value=0,
-        ), mock.patch.object(
             cm_mod._NewModeDialog, "mode_name", return_value="BT_2G_TX",
         ), mock.patch.object(
             cm_mod._NewModeDialog, "register_vars",
-            return_value={"temperature": "55"},
-        ), mock.patch.object(
-            cm_mod._NewModeDialog, "pvt_label", return_value="TT",
+            return_value={"d_en_tx": "1", "d_div": ""},
         ):
             self.view._on_new_mode()
         self.assertEqual(self.view.modes_list.count(), 2)
         self.assertIn("BT_2G_TX", self.view.cornermodel().modes)
+        # Empty-valued register is persisted (= "intentionally unset").
+        self.assertEqual(
+            self.view.cornermodel().modes["BT_2G_TX"].vars,
+            {"d_en_tx": "1", "d_div": ""},
+        )
+        # The reference corner column is left untouched.
+        self.assertEqual(
+            self.view.cornermodel().columns, tuple(original_columns)
+        )
 
     def test_new_mode_manual_fallback_when_no_columns(self):
         from simkit.corner_model import empty_cornermodel

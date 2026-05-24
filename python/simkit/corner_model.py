@@ -449,9 +449,9 @@ def _validate_modes(path: Path, data: dict) -> dict[str, Mode]:
         if not isinstance(raw_mode, dict):
             raise CornerModelValidationError(f"{where}: must be a JSON object")
         raw_vars = raw_mode.get("vars")
-        if not isinstance(raw_vars, dict) or len(raw_vars) == 0:
+        if not isinstance(raw_vars, dict):
             raise CornerModelValidationError(
-                f"{where}: 'vars' must be a non-empty JSON object"
+                f"{where}: 'vars' must be a JSON object"
             )
         mode_vars: dict[str, str] = {}
         for vname, vval in raw_vars.items():
@@ -955,9 +955,16 @@ def _column_base_vars(
             model.variants[column.variant].vars if column.variant else {}
         )
         # Three-layer fallback (spec §3): 手改 > 变体 > 模式 base.
+        # An empty register value means "intentionally unset" — the design
+        # file's default applies at sim time, so we skip emitting it (no
+        # axlPutVar at push time). A column override or variant can still
+        # fill it in.
         for vname, vval in mode.vars.items():
             below = variant_vars.get(vname, vval)
-            row_vars[vname] = (column.overrides.get(vname, below),)
+            final = column.overrides.get(vname, below)
+            if final == "":
+                continue
+            row_vars[vname] = (final,)
     for vname, tup in column.pvt_vars.items():
         row_vars[vname] = tup
     sweep |= set(column.pvt_sweep_keys)
@@ -1506,28 +1513,46 @@ def apply_pull(
     model: CornerModel, pulled: Union, result: ReconcileResult,
     profile: "PvtProfile | None" = None,
 ) -> CornerModel:
-    """Merge a classified Maestro pull back into a non-empty cornermodel.
+    """Mirror Maestro: rebuild the corner table to reflect Maestro's pulled
+    state exactly — content AND order (2026 UX: "回到 Cadence 当前状态").
 
-    Pull means "make simkit reflect Maestro": every matched corner is
-    re-synced to its pulled state — new variables appear, changed values
-    update. An unmanaged column is rebuilt wholesale from its pulled row;
-    a managed column keeps its mode and routes pulled register values to
-    overrides. Foreign pulled rows (corners added in Maestro) become new
-    unmanaged columns. Columns missing from the pull are left in place —
-    a pull never deletes a corner. Modes / corner sets / run sets are
-    untouched. The variable-row order follows Maestro.
+    * **Matched** columns are re-synced to their pulled values. Unmanaged
+      columns are rebuilt wholesale; managed columns keep their mode and
+      route pulled register values to overrides, pulled PVT values to the
+      column's PVT vars.
+    * **Foreign** pulled rows (corners added in Maestro) become new
+      unmanaged columns.
+    * **Missing** columns (in simkit but not in Maestro) are DROPPED — the
+      caller is responsible for warning the user; this function is destructive
+      by design.
+    * The non-aggregated columns are then placed in Maestro's pulled-row
+      order, and run-set memberships referencing dropped columns are cleaned.
+    * The variable-row order follows Maestro.
 
-    An aggregated (correlated-axis) column expands to several pulled rows
-    and is left as-is — there is no 1:1 row to re-sync it from.
+    Aggregated (correlated-axis) columns expand to several pulled rows and
+    cannot be placed at a single pulled position; they are kept intact at
+    the front of the result. Modes, variants and run sets (minus dropped
+    memberships) are untouched.
     """
+    aggregated_indices: list[int] = []
+    aggregated_row_names: set[str] = set()
+    for ci, c in enumerate(model.columns):
+        if _crossed_axes(model, c):
+            aggregated_indices.append(ci)
+            for r in materialize_column_rows(model, c, profile):
+                aggregated_row_names.add(r.row_name)
+    aggregated_index_set = set(aggregated_indices)
+
     cm = model
-    by_name = {row.row_name: row for row in pulled.rows}
+    by_pulled = {row.row_name: row for row in pulled.rows}
     for ci in range(len(model.columns)):
+        if ci in aggregated_index_set:
+            continue
         column = model.columns[ci]
         name = effective_name(column)
         if name not in result.matched:
-            continue            # foreign / missing / aggregated — skip
-        pulled_row = by_name.get(name)
+            continue
+        pulled_row = by_pulled.get(name)
         if pulled_row is None:
             continue
         if not column.is_managed:
@@ -1538,15 +1563,33 @@ def apply_pull(
             mode_vars = model.modes[column.mode].vars
             for d in result.matched[name]:
                 if d.maestro_value == ():
-                    continue    # var dropped in Maestro — left in place
+                    continue
                 if d.var in mode_vars:
                     cm = set_column_override(
                         cm, ci, d.var, d.maestro_value[0]
                     )
                 else:
                     cm = set_pvt_var(cm, ci, d.var, d.maestro_value)
-    for row in result.foreign:
-        cm = add_column(cm, make_unmanaged_column(row))
+
+    by_eff = {effective_name(c): c for c in cm.columns}
+    new_columns: list[Column] = [cm.columns[i] for i in aggregated_indices]
+    for pulled_row in pulled.rows:
+        if pulled_row.row_name in aggregated_row_names:
+            continue
+        if pulled_row.row_name in by_eff:
+            new_columns.append(by_eff[pulled_row.row_name])
+        else:
+            new_columns.append(make_unmanaged_column(pulled_row))
+
+    survived = {effective_name(c) for c in new_columns}
+    new_run_sets = {
+        sn: replace(rs, columns=tuple(
+            c for c in rs.columns if c in survived
+        ))
+        for sn, rs in cm.run_sets.items()
+    }
+    cm = replace(cm, columns=tuple(new_columns), run_sets=new_run_sets)
+
     order = union_var_order(pulled)
     if order:
         cm = set_var_order(cm, order)
@@ -1745,10 +1788,6 @@ def add_mode(
         )
     if name in model.modes:
         raise CornerModelValidationError(f"add_mode: mode {name!r} already exists")
-    if not mode_vars:
-        raise CornerModelValidationError(
-            f"add_mode: mode {name!r} needs at least one register var"
-        )
     for vname, vval in mode_vars.items():
         if not _VAR_NAME_RE.match(vname):
             raise CornerModelValidationError(
@@ -1852,54 +1891,6 @@ def rename_mode(
     )
 
 
-def mode_from_column(
-    model: CornerModel, column_index: int, mode_name: str,
-    register_vars: dict[str, str], pvt_label: str,
-) -> CornerModel:
-    """Create a new mode by classifying an existing column's variables.
-
-    ``register_vars`` (var -> scalar value) becomes the new mode's register
-    set; the source column is converted to a managed column of that mode,
-    keeping only its non-register variables as per-column PVT vars. This is
-    the GUI's "New Mode from a column" action — the user has already defined
-    every variable in Cadence, so a mode is *derived* from a corner rather
-    than retyped (spec §7.2, 2026 UX feedback).
-    """
-    if not _PVT_LABEL_RE.match(pvt_label):
-        raise CornerModelValidationError(
-            f"mode_from_column: pvt_label {pvt_label!r} must match "
-            f"^[A-Za-z0-9_]+$"
-        )
-    column = model.columns[column_index]
-    # add_mode validates the mode name + register var names / values.
-    new_model = add_mode(model, mode_name, register_vars)
-    kept_pvt = {
-        v: tup for v, tup in column.pvt_vars.items()
-        if v not in register_vars
-    }
-    kept_sweep = frozenset(column.pvt_sweep_keys & set(kept_pvt))
-    managed = Column(
-        mode=mode_name, enabled=column.enabled, pvt_vars=kept_pvt,
-        models=column.models, pvt_label=pvt_label,
-        pvt_sweep_keys=kept_sweep,
-        model_sweep_indices=column.model_sweep_indices,
-        correlated_axes=column.correlated_axes,
-    )
-    new_name = effective_name(managed)
-    others = {
-        effective_name(c) for i, c in enumerate(new_model.columns)
-        if i != column_index
-    }
-    if new_name in others:
-        raise CornerModelValidationError(
-            f"mode_from_column: column name {new_name!r} collides with an "
-            f"existing column"
-        )
-    cols = list(new_model.columns)
-    cols[column_index] = managed
-    return replace(new_model, columns=tuple(cols))
-
-
 def reclassify_mode(
     model: CornerModel, mode_name: str, register_vars: dict[str, str]
 ) -> CornerModel:
@@ -1915,10 +1906,6 @@ def reclassify_mode(
     if mode_name not in model.modes:
         raise CornerModelValidationError(
             f"reclassify_mode: no such mode {mode_name!r}"
-        )
-    if not register_vars:
-        raise CornerModelValidationError(
-            f"reclassify_mode: mode {mode_name!r} needs at least one register"
         )
     for vname, vval in register_vars.items():
         if not _VAR_NAME_RE.match(vname):

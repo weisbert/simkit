@@ -304,6 +304,10 @@ class MainWindow(QMainWindow):
         # When True, the Push confirmation dialog is skipped for the rest
         # of this session (the pre-push snapshot is still always taken).
         self._skip_corner_push_confirm = False
+        # Same idea for Pull — only fires when local-only corners would be
+        # dropped by the mirror; the cornermodel JSON snapshot is always
+        # taken on disk regardless of this flag.
+        self._skip_corner_pull_confirm = False
 
         self.right_panel.addTab(self.results_tab, "Results")
         self.right_panel.addTab(self.summary_tab, "Summary")
@@ -993,6 +997,10 @@ class MainWindow(QMainWindow):
         self.append_log(f"[corner-model] pull queued → {out_path.name}")
 
     def _on_corner_model_pulled(self, sidecar_path: Path) -> None:
+        """Mirror Maestro into the corner manager: same content AND order
+        as Cadence (2026 UX item: "回到 Cadence 当前状态"). When the mirror
+        would DROP simkit-only corners, snapshot the cornermodel.json to
+        ``snapshots/`` and confirm before applying."""
         from simkit.corner_model import (
             apply_pull, classify_pull, cornermodel_from_union,
         )
@@ -1018,6 +1026,61 @@ class MainWindow(QMainWindow):
             )
             return
         result = classify_pull(cm, u, self.corner_manager.profile())
+
+        # Safety gate: a Pull is destructive when Maestro is missing a
+        # corner that simkit has. Snapshot the current cornermodel.json so
+        # the user can always roll back, and confirm before applying.
+        snapshot_note = ""
+        if result.missing:
+            snap = self._snapshot_cornermodel_before_pull(cm)
+            if snap is not None:
+                # Relative-to-project for a readable log line.
+                try:
+                    rel = snap.relative_to(self._loaded_module.project_root)
+                except (AttributeError, ValueError):
+                    rel = snap
+                snapshot_note = f"  {rel}"
+            if not self._skip_corner_pull_confirm:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                box.setWindowTitle("simkit — confirm corner Pull")
+                lines = [
+                    f"This Pull will mirror Maestro's {len(u.rows)} "
+                    f"corner(s) and DROP {len(result.missing)} simkit "
+                    f"corner(s) not in Maestro:",
+                    "  " + ", ".join(result.missing),
+                    "",
+                    "Local edits to those corners will be lost. Push them "
+                    "to Maestro first if you want to keep them.",
+                ]
+                if snapshot_note:
+                    lines += [
+                        "",
+                        "A snapshot of the current cornermodel was saved "
+                        "to:",
+                        snapshot_note,
+                        "  (open it via File ▸ Open to restore)",
+                    ]
+                lines += ["", "Proceed with the pull?"]
+                box.setText("\n".join(lines))
+                skip_cb = QCheckBox("Don't ask again this session")
+                box.setCheckBox(skip_cb)
+                box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+                box.setDefaultButton(QMessageBox.No)
+                if box.exec_() != QMessageBox.Yes:
+                    self.append_log(
+                        f"[corner-model] pull cancelled — "
+                        f"{len(result.missing)} simkit-only corner(s) "
+                        f"preserved"
+                        + (
+                            f"; snapshot kept at {snapshot_note.strip()}"
+                            if snapshot_note else ""
+                        )
+                    )
+                    return
+                if skip_cb.isChecked():
+                    self._skip_corner_pull_confirm = True
+
         merged = apply_pull(cm, u, result, self.corner_manager.profile())
         if merged != cm:
             self.corner_manager.load_model(
@@ -1027,11 +1090,48 @@ class MainWindow(QMainWindow):
             self._persist_cornermodel(merged)
         updated = sum(1 for diffs in result.matched.values() if diffs)
         self.append_log(
-            f"[corner-model] pull merged: {updated} corner(s) updated, "
+            f"[corner-model] pull mirrored Maestro: "
+            f"{updated} corner(s) re-synced, "
             f"{len(result.foreign)} new corner(s) added, "
-            f"{len(result.missing)} simkit corner(s) not in Maestro "
-            f"(left in place)"
+            f"{len(result.missing)} simkit-only corner(s) dropped"
+            + (
+                f" (rollback via {snapshot_note.strip()})"
+                if snapshot_note else ""
+            )
         )
+
+    def _snapshot_cornermodel_before_pull(self, cm: object) -> Optional[Path]:
+        """Write the in-memory cornermodel to ``snapshots/<name>_<stamp>
+        .cornermodel.json`` so a destructive Pull can be rolled back via
+        File ▸ Open. Returns the snapshot path or None on failure."""
+        from datetime import datetime
+        from simkit.corner_model import save_cornermodel
+        module = self._loaded_module
+        if module is None:
+            return None
+        # save_cornermodel enforces basename == cm.name, so each snapshot
+        # lives in its own timestamped subdir and can be reopened directly
+        # via File ▸ Open.
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        snap_dir = module.project_root / "snapshots" / f"cornermodel_{stamp}"
+        try:
+            snap_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.append_log(
+                f"[corner-model] pre-pull snapshot skipped — could not "
+                f"create {snap_dir} ({exc})"
+            )
+            return None
+        snap = snap_dir / f"{cm.name}.cornermodel.json"
+        try:
+            save_cornermodel(cm, snap)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(
+                f"[corner-model] pre-pull snapshot skipped — save failed "
+                f"({exc})"
+            )
+            return None
+        return snap
 
     def _on_sync_maestro_history(self) -> None:
         """File > Sync Maestro History — ingest history entries this

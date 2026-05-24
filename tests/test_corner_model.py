@@ -29,7 +29,6 @@ from simkit.corner_model import (
     make_unmanaged_column,
     materialize,
     materialize_column,
-    mode_from_column,
     save_cornermodel,
     set_column_model_section,
     set_mode_var,
@@ -254,7 +253,9 @@ def test_classify_pull_against_live_union(tmp_path):
     assert "BT_2G_RX_TT" in result.missing                  # ours, not pulled
 
 
-def test_apply_pull_merges_new_vars_and_foreign_corners(tmp_path):
+def test_apply_pull_mirrors_maestro_order(tmp_path):
+    """Mirror semantics: the result's columns appear in Maestro's pulled
+    order (the matched corner is re-positioned, not left in place)."""
     d = _base()
     d["modes"] = {}
     d["columns"] = [
@@ -268,29 +269,53 @@ def test_apply_pull_merges_new_vars_and_foreign_corners(tmp_path):
     result = classify_pull(cm, pulled)
     merged = apply_pull(cm, pulled, result)
 
+    # Column order tracks pulled-row order — not local order.
+    assert [c.name for c in merged.columns] == ["TT", "TT_pvt", "TT_2p5G"]
     by_name = {c.name: c for c in merged.columns}
-    # the matched corner gained the variables Maestro added — VDD here
-    # being a multi-value sweep.
+    # The matched corner re-synced — Maestro's VDD sweep is now on it.
     assert by_name["TT_pvt"].pvt_vars["VDD"] == ("3", "2.8")
     assert "VDD" in by_name["TT_pvt"].pvt_sweep_keys
-    # corners that exist only in Maestro are pulled in as new columns
-    assert "TT" in by_name and "TT_2p5G" in by_name
-    assert len(merged.columns) == 3
-    # the variable-row order follows Maestro
+    # Variable-row order also follows Maestro.
     assert merged.var_order == ("temperature", "VDD", "flo")
 
 
-def test_apply_pull_routes_managed_register_to_override(tmp_path):
-    cm = _write_load(tmp_path, _base())   # managed columns, mode BT_2G_RX
+def test_apply_pull_drops_local_only_corners(tmp_path):
+    """Mirror semantics: simkit corners that do NOT appear in the pull are
+    DROPPED. The caller (GUI) snapshots + confirms before invoking this
+    (2026 UX: "回到 Cadence 当前状态")."""
+    cm = _write_load(tmp_path, _base())   # 2 managed columns on BT_2G_RX
     pulled = union.load_union(_LIVE_UNION)
     result = classify_pull(cm, pulled)
-    # managed columns do not match the live "TT*" rows — apply is a no-op
-    # on them, foreign rows still arrive as unmanaged columns.
+    # The managed columns' effective names don't appear in the pulled union,
+    # so they are missing and will be dropped.
+    assert set(result.missing) == {"BT_2G_RX_TT", "BT_2G_RX_SS_1"}
     merged = apply_pull(cm, pulled, result)
-    foreign_names = {c.name for c in merged.columns if not c.is_managed}
-    assert foreign_names == {"TT", "TT_pvt", "TT_2p5G"}
-    # the original managed columns survive untouched
-    assert sum(1 for c in merged.columns if c.is_managed) == 2
+    assert {c.name for c in merged.columns} == {"TT", "TT_pvt", "TT_2p5G"}
+    assert all(not c.is_managed for c in merged.columns)
+    # The mode itself survives (only columns are dropped).
+    assert "BT_2G_RX" in merged.modes
+
+
+def test_apply_pull_resyncs_managed_register_via_override(tmp_path):
+    """When a managed column's effective name matches a pulled row, the
+    pulled register values land as column overrides (not new modes)."""
+    cm = _write_load(tmp_path, {
+        "cornermodel_schema_version": 1, "name": "lo_corners",
+        "project": "1AXX", "testbench_id": "sim_yusheng/Test/maestro",
+        "modes": {"BT_2G_RX": {"vars": {"d_en_dummy": "1"}}},
+        "columns": [
+            {"mode": "BT_2G_RX", "pvt_label": "TT", "enabled": True,
+             "pvt_vars": {"temperature": "27"},
+             "models": [{"file": "rf018.scs", "section": "tt"}]},
+        ],
+    })
+    pulled = union.load_union(_LIVE_UNION)   # has a TT row with temperature=55
+    result = classify_pull(cm, pulled)
+    merged = apply_pull(cm, pulled, result)
+    # BT_2G_RX_TT did not match — only the unmanaged TT/TT_pvt/TT_2p5G rows
+    # come through. The mode stays, the managed column is dropped.
+    assert [c.name for c in merged.columns] == ["TT", "TT_pvt", "TT_2p5G"]
+    assert "BT_2G_RX" in merged.modes
 
 
 def test_materialize_orders_row_vars_by_var_order(tmp_path):
@@ -387,13 +412,17 @@ def test_set_column_test_enabled_toggles_scope():
     assert m3.columns[0].tests == ()
 
 
-def test_reclassify_mode_rejects_empty_register_set():
+def test_reclassify_mode_allows_empty_register_set():
+    # A mode with zero registers is a legitimate "PVT-only" configuration —
+    # corners on it inherit every register value from the design file's
+    # defaults at sim time (2026 UX item: reference corner may leave some
+    # registers intentionally unset).
     from simkit.corner_model import (
         empty_cornermodel, add_mode, reclassify_mode,
     )
     m = add_mode(empty_cornermodel("c", "p", "tb"), "RX", {"d_en": "1"})
-    with pytest.raises(CornerModelValidationError):
-        reclassify_mode(m, "RX", {})
+    m2 = reclassify_mode(m, "RX", {})
+    assert m2.modes["RX"].vars == {}
 
 
 def test_adopt_column_three_way_split():
@@ -447,31 +476,51 @@ def _unmanaged_cm(tmp_path: Path) -> CornerModel:
     })
 
 
-def test_mode_from_column_classifies_and_adopts(tmp_path):
-    cm = _unmanaged_cm(tmp_path)
-    out = mode_from_column(
-        cm, 0, "BT_2G_RX", {"d_en": "1", "div_sel": "2"}, "TT",
+def test_add_mode_with_empty_register_value(tmp_path):
+    # A register with an empty-string value means "intentionally unset" —
+    # the mode declares the var as one of its registers, but the design
+    # file's default applies at sim time (no axlPutVar). The user can fill
+    # in the value later from the modes panel (2026 UX).
+    from simkit.corner_model import add_mode, empty_cornermodel
+    m = empty_cornermodel("c", "p", "tb")
+    m = add_mode(m, "RX", {"d_en": "1", "d_div": ""})
+    assert m.modes["RX"].vars == {"d_en": "1", "d_div": ""}
+
+
+def test_managed_column_skips_empty_register_at_materialization(tmp_path):
+    # An empty register value is NOT emitted into the materialised row, so
+    # downstream axlPutVar is not called for it (= design default applies).
+    from simkit.corner_model import (
+        add_column, add_mode, empty_cornermodel, materialize, Column,
     )
-    assert out.modes["BT_2G_RX"].vars == {"d_en": "1", "div_sel": "2"}
-    col = out.columns[0]
-    assert col.mode == "BT_2G_RX"
-    assert effective_name(col) == "BT_2G_RX_TT"
-    # registers left pvt_vars; temperature stayed PVT; models preserved
-    assert set(col.pvt_vars) == {"temperature"}
-    assert col.models[0].file == "rf018.scs"
+    m = empty_cornermodel("c", "p", "tb")
+    m = add_mode(m, "RX", {"d_en": "1", "d_div": ""})
+    m = add_column(m, Column(
+        mode="RX", enabled=True, pvt_vars={"temperature": ("27",)},
+        models=(), pvt_label="TT", pvt_sweep_keys=frozenset(),
+    ))
+    u = materialize(m)
+    row = u.rows[0]
+    assert dict(row.vars) == {"d_en": ("1",), "temperature": ("27",)}
+    assert "d_div" not in row.vars  # empty register is skipped
 
 
-def test_mode_from_column_keeps_edited_register_value(tmp_path):
-    cm = _unmanaged_cm(tmp_path)
-    # the user edited d_en's value away from the column's "1"
-    out = mode_from_column(cm, 0, "BT_2G_RX", {"d_en": "9"}, "TT")
-    assert out.modes["BT_2G_RX"].vars == {"d_en": "9"}
-
-
-def test_mode_from_column_no_registers_raises(tmp_path):
-    cm = _unmanaged_cm(tmp_path)
-    with pytest.raises(CornerModelValidationError):
-        mode_from_column(cm, 0, "BT_2G_RX", {}, "TT")
+def test_column_override_can_fill_an_empty_register(tmp_path):
+    # A column override on an empty register fills it at materialise time —
+    # the override wins over the mode's empty base.
+    from simkit.corner_model import (
+        add_column, add_mode, empty_cornermodel, materialize,
+        set_column_override, Column,
+    )
+    m = empty_cornermodel("c", "p", "tb")
+    m = add_mode(m, "RX", {"d_div": ""})
+    m = add_column(m, Column(
+        mode="RX", enabled=True, pvt_vars={"temperature": ("27",)},
+        models=(), pvt_label="TT", pvt_sweep_keys=frozenset(),
+    ))
+    m = set_column_override(m, 0, "d_div", "8")
+    u = materialize(m)
+    assert dict(u.rows[0].vars) == {"d_div": ("8",), "temperature": ("27",)}
 
 
 # --- serialisation round-trip --------------------------------------------

@@ -69,7 +69,6 @@ from simkit.corner_model import (
     column_models,
     delete_column,
     effective_name,
-    mode_from_column,
     move_column,
     reclassify_mode,
     remove_correlated_axis,
@@ -875,10 +874,9 @@ class CornerManagerView(QWidget):
         if mode_item is None:
             return
         var = self.mode_vars.item(item.row(), 0).text()
+        # Blank value is a legitimate "register intentionally unset" — the
+        # design file's default applies at sim time (2026 UX).
         new_value = item.text().strip()
-        if new_value == "":
-            self._refresh_modes_panel()  # revert empty edit
-            return
         try:
             new_cm = set_mode_var(
                 self._cm, mode_item.text(), var, new_value
@@ -1039,6 +1037,10 @@ class CornerManagerView(QWidget):
         self._apply(new_cm)
 
     def _new_mode_from_column(self) -> None:
+        # The dialog *harvests* register names + default values from an
+        # existing corner; it does NOT modify that corner. Mode is a pure
+        # concept — corners only appear in the corner table via the Corner
+        # Generator (2026 UX feedback).
         dialog = _NewModeDialog(self._cm, self)
         if dialog.exec_() != QDialog.Accepted:
             return
@@ -1054,10 +1056,7 @@ class CornerManagerView(QWidget):
             )
             return
         try:
-            new_cm = mode_from_column(
-                self._cm, dialog.selected_column_index(),
-                dialog.mode_name(), regs, dialog.pvt_label(),
-            )
+            new_cm = add_mode(self._cm, dialog.mode_name(), regs)
         except CornerModelError as exc:
             QMessageBox.warning(self, "New mode failed", str(exc))
             return
@@ -1352,11 +1351,13 @@ def _derive_mode_label(column_name: str) -> tuple[str, str]:
 class _NewModeDialog(QDialog):
     """New Mode authored *from* an existing corner column (痛点 — the user
     has already defined every variable in Cadence). Tick the PVT variables;
-    the rest, with editable values, become the new mode's registers."""
+    the rest become the new mode's registers. The reference corner itself
+    is NOT modified — mode is a pure concept, corners only appear in the
+    corner table via the Corner Generator (2026 UX)."""
 
     def __init__(self, model: CornerModel, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.setWindowTitle("New Mode — from a corner column")
+        self.setWindowTitle("New Mode — harvest from a corner column")
         self.setMinimumWidth(400)
         self._columns = list(model.columns)
         # Every design variable across the cornermodel — so a sparse corner
@@ -1369,8 +1370,11 @@ class _NewModeDialog(QDialog):
 
         layout = QVBoxLayout(self)
         intro = QLabel(
-            "Derive a mode from a corner you already authored: tick the "
-            "PVT variables — the rest become the mode's registers."
+            "Pick a reference corner to harvest register names + default "
+            "values from. The reference corner itself is left untouched — "
+            "the new mode is a concept only, not a corner. Tick PVT for "
+            "vars that change across corners; the rest become this mode's "
+            "registers (a blank value is fine — you can fill it in later)."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -1378,11 +1382,9 @@ class _NewModeDialog(QDialog):
         self._column_combo = QComboBox()
         for col in self._columns:
             self._column_combo.addItem(effective_name(col))
-        form.addRow("Source column:", self._column_combo)
+        form.addRow("Reference corner:", self._column_combo)
         self._mode_edit = QLineEdit()
         form.addRow("New mode name:", self._mode_edit)
-        self._label_edit = QLineEdit()
-        form.addRow("Column label:", self._label_edit)
         layout.addLayout(form)
 
         self._table = QTableWidget(0, 3)
@@ -1398,10 +1400,11 @@ class _NewModeDialog(QDialog):
         help_label = QLabel(
             "Each row is a variable from the corner. Tick \"PVT?\" if it "
             "changes from corner to corner (process / voltage / "
-            "temperature). Leave it unticked to lock it as one of this "
-            "mode's register values. An unticked row left blank is "
-            "skipped. Process rows always belong to the corner, never "
-            "the mode."
+            "temperature). Leave it unticked to add it to this mode's "
+            "register set — a blank value is allowed (the design file's "
+            "default applies at sim time, and you can fill it in later "
+            "from the modes panel). Process rows always belong to the "
+            "corner, never the mode."
         )
         help_label.setWordWrap(True)
         layout.addWidget(help_label)
@@ -1421,9 +1424,8 @@ class _NewModeDialog(QDialog):
         if not (0 <= index < len(self._columns)):
             return
         col = self._columns[index]
-        default_mode, default_label = _derive_mode_label(effective_name(col))
+        default_mode, _ = _derive_mode_label(effective_name(col))
         self._mode_edit.setText(default_mode)
-        self._label_edit.setText(default_label)
         self._table.setRowCount(0)
         # List every design variable, not only the ones this column
         # overrides — the selected column pre-fills the values it has, the
@@ -1478,12 +1480,10 @@ class _NewModeDialog(QDialog):
     def mode_name(self) -> str:
         return self._mode_edit.text().strip()
 
-    def pvt_label(self) -> str:
-        return self._label_edit.text().strip()
-
     def register_vars(self) -> dict[str, str]:
-        """Unticked rows with a value become the mode's registers. An
-        unticked row left blank is simply left out of the mode."""
+        """Every unticked row becomes a register of the new mode — even
+        with a blank value (= intentionally unset; design default applies
+        at sim time, user can edit later from the modes panel)."""
         out: dict[str, str] = {}
         for row in range(self._table.rowCount()):
             name_item = self._table.item(row, 0)
@@ -1491,9 +1491,7 @@ class _NewModeDialog(QDialog):
                 continue   # process belongs to the corner, never the mode
             if self._table.item(row, 2).checkState() == Qt.Checked:
                 continue   # ticked → PVT, not a register
-            value = self._table.item(row, 1).text().strip()
-            if value:
-                out[name_item.text()] = value
+            out[name_item.text()] = self._table.item(row, 1).text().strip()
         return out
 
 
@@ -1935,7 +1933,8 @@ class _DimensionsDialog(QDialog):
     edit here updates every corner that crosses the dimension."""
 
     def __init__(self, view: "CornerManagerView") -> None:
-        super().__init__(view)
+        # Parent to the top-level window (see CornerGeneratorDialog comment).
+        super().__init__(view.window())
         self._view = view
         self.setWindowTitle("Dimensions")
         self.setMinimumWidth(460)
@@ -2050,7 +2049,8 @@ class _NewCornerDialog(QDialog):
     One Create stamps the corner onto every ticked mode (痛点 a + h)."""
 
     def __init__(self, view: "CornerManagerView") -> None:
-        super().__init__(view)
+        # Parent to the top-level window (see CornerGeneratorDialog comment).
+        super().__init__(view.window())
         self._view = view
         self._inline: list[CorrelatedAxis] = []
         self.setWindowTitle("New Corner")

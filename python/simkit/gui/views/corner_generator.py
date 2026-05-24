@@ -450,7 +450,10 @@ class CornerGeneratorDialog(QDialog):
     """The PVT Corner Generator — see the module docstring."""
 
     def __init__(self, view) -> None:  # view: CornerManagerView
-        super().__init__(view)
+        # Parent to the top-level window, not the tab-embedded view widget:
+        # on X11 some WMs couple drag operations with the parent if it isn't
+        # a top-level (= dragging the dialog drags the main window with it).
+        super().__init__(view.window())
         self._view = view
         self.setWindowTitle("PVT Corner Generator")
         self.setMinimumSize(980, 660)
