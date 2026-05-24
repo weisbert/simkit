@@ -1,151 +1,145 @@
-# Handoff — 2026-05-23 (PVT Corner Generator + live Cadence verification)
+# Handoff — 2026-05-24 (mode empty-registers, pull mirror, dialog parenting)
 
-For the next conversation. Read this first, then
-`docs/corner_manager_user_story.md` (痛点 a + h — VCO bond is the reason a
-generator is needed at all) and `python/simkit/gui/views/corner_generator.py`.
+For the next conversation. Read this first, then the previous handoff at
+git `5c5bafb` for context on the PVT Corner Generator that this session
+follows up on.
 
 ## Branch & state
 
-`main`. **Six files uncommitted** — the PVT Corner Generator landed this
-session; the user has not yet given the commit go-ahead. Run the suite to
-see it green:
+`main`, clean. One functional commit landed this session:
 
 ```
-.venv/bin/python -m pytest -q   # → 1954 passed
+41116e0 gui: corner manager — empty registers, mirror pull, dialog parenting
 ```
 
-Uncommitted:
+Suite green:
 
-- `python/simkit/corner_model.py` — `axis_is_composite()`, `generate_pattern_columns()`.
-- `python/simkit/gui/views/corner_generator.py` *(new)* — the generator dialog.
-- `python/simkit/gui/views/corner_manager.py` — Corners-tab toolbar: dropped `Dimensions…` + `New Corner`, added `Corner Generator…`.
-- `python/simkit/skill_bridge.py` — `read_model_files()`.
-- `tests/test_corner_generation.py` *(new)*.
-- `tests/gui/test_corner_generator.py` *(new, M2 render test included)*.
+```
+.venv/bin/python -m pytest -q   # → 1900 passed, 93 subtests
+```
 
-Recent committed history (still in scope to remember):
+NOT deployed to red zone yet — needs live dogfood (see NEXT).
 
-- `2ef2e87` gui: remember the project opened mid-session.
-- `4d14162` gui: corner manager — fix New Dimension `+ Variable` crash.
-- `657fad9` examples: preset Beacon PVT corner template.
-- `0e9f05d` gui: corner manager — New Mode dialog: narrower, resizable, clearer (process row → non-clickable tag).
+## What landed (three independent user reports)
 
-## What the generator is
+### 1 · New Mode no longer overwrites the reference corner
 
-An independent dialog (`Corners` tab → `Corner Generator…`). Two halves:
+User report: "Mode 只是一个概念，只有在 Corner Generator 之后才出现在 corner
+表里面的。看起来好像把原本的 TT corner 覆写了，这不是我希望的。" Plus: "参考的 TT
+corner 生成的 mode 里面，一个 registered 的变量我都看不见，哪怕没有被定义，
+也应该有的，用户可以再改的。"
 
-1. **Level definitions** — three flexible grids (Process / Voltage /
-   Temperature). Rows = named levels, columns = the variables each level
-   sets. `+ Variable` / `- Variable` / `+ Level` / `- Level` per grid; double-click
-   a variable header to rename. Process additionally carries a model file +
-   `Browse…` + **`Read from Cadence`** (see Part A below).
-2. **Pattern table** — four columns `Corner name | Process | Voltage |
-   Temperature`. Each row is one corner. Double-click a P/V/T cell to open
-   a checkable list of that axis's levels (also editable as comma-separated
-   text). `Target mode` selector + `Generate → corner table`.
+Changes (`python/simkit/gui/views/corner_manager.py`,
+`python/simkit/corner_model.py`):
 
-The dialog replaces the old `Dimensions…` and `New Corner` dialogs (the
-user found them incomprehensible). The dialog *classes* `_DimensionsDialog` /
-`_DimensionGridDialog` / `_NewCornerDialog` are kept for now (unreachable
-from the toolbar) as a fallback until the generator survives a red-zone
-dogfood; delete them in a follow-up.
+- **`mode_from_column()` deleted.** The "From a corner column" flow now
+  calls `add_mode()` directly. The reference corner is NOT touched —
+  modes are pure-concept entities; columns enter the table only via the
+  Corner Generator.
+- `_NewModeDialog` reworded as "harvest from a corner column" — drops the
+  "Column label" field (no column being created), drops the
+  `pvt_label()` accessor.
+- `register_vars()` now includes EVERY unticked row, even blank-valued
+  ones (intentionally-unset register; design default applies at sim time;
+  user can fill in later from the modes panel).
+- `_var_contribution` skips empty-string mode register values when
+  materialising a row (= no `axlPutVar` at push time). A column override
+  or variant override can still fill it in.
+- Three validators relaxed to allow empty mode-vars: `_validate_modes`,
+  `add_mode`, `reclassify_mode`.
+- Modes panel allows editing a register back to empty (was reverted before).
 
-## The composite vs. simple rule (痛点 h)
+Tests: 3 old `mode_from_column` tests deleted, 3 new tests added covering
+empty-register persistence, materialisation skip, and override-fills-unset.
 
-An axis is **composite** when its levels bind 2+ variables together (e.g.
-Process bound to section + CT, Temperature bound to temperature + indfile).
-A composite level cannot fit in one Maestro corner column — the binding
-would be lost. So a pattern row **expands along composite axes**: one
-output column per element of the composite cross-product, with that level's
-values **baked** as scalars.
+### 2 · Pull mirrors Maestro
 
-A **simple** axis controls one variable (or only a section). Its levels
-**stay as a sweep inside one column** — no expansion. Voltage = NV/HV/LV
-becomes `vdd: ("0.8","0.85","0.75")` swept in every generated column, and
-never appears in column names.
+User report: "我希望和 cadence 里面完全一样的，包括列和行的顺序". They want
+Pull to mean "go back to Cadence's current state".
 
-Column naming: `<pattern>_<composite-level>…` in pattern-table order. No
-suffix when nothing expands.
+Changes (`python/simkit/corner_model.py:apply_pull`,
+`python/simkit/gui/main_window.py:_on_corner_model_pulled`):
 
-| Pattern | Process | Voltage | Temperature | Composite? | Result |
-|---|---|---|---|---|---|
-| `Beacon_PVT_45` | TT…SF | NV…LV | NT…HT | none | 1 column (45 sim points inside) |
-| `VCO_PVT_45` | TT…SF (composite) | NV…LV | NT…HT (composite) | Process + Temp | 15 columns × voltage sweep 3 |
+- `apply_pull` rebuilds `model.columns` in **pulled-row order** (matched
+  + foreign interleaved as Cadence has them).
+- **Local-only corners are DROPPED.** Modes / variants survive; run-set
+  memberships pointing at dropped corners are cleaned automatically.
+- Aggregated (correlated-axis) columns are kept intact at the FRONT of
+  the result — they expand to multiple pulled rows and have no single
+  position to mirror to. Common case (no aggregated cols) is pure mirror.
+- GUI safety gate: when the pull would drop simkit-only corners, snapshot
+  the cornermodel.json to
+  `<project>/snapshots/cornermodel_<stamp>/<name>.cornermodel.json` and
+  confirm with a list of the corners about to vanish.
+  - Snapshot lives in its own timestamped subdir so the filename can be
+    exactly `<name>.cornermodel.json` (the loader enforces basename ==
+    `cm.name`) — File ▸ Open opens it directly.
+  - "Don't ask again this session" checkbox mirrors the Push gate pattern.
+  - Snapshots are always taken when destructive, regardless of the skip
+    flag.
+- Log line rewritten: "pull mirrored Maestro: N re-synced, M added, K
+  dropped (rollback via …)".
 
-## Live Cadence verification — what was caught, what passed
+Tests: 2 old apply_pull tests rewritten, 1 new (drops local-only).
 
-The user **explicitly insisted** the round-trip be verified against live
-Cadence — and it caught a real bug the offline suite missed entirely.
+**Confirmed unchanged (user asked):**
 
-### The bug
+- **Push column order** already respects simkit's column order
+  (`materialize` iterates `model.columns` → sidecar row order → SKILL
+  `axlPutCorner` same order). No change needed.
+- **Row (variable) order** plumbing is correct: `apply_pull` sets
+  `var_order = union_var_order(pulled)`, table renders via
+  `ordered_var_rows` which puts `var_order` first. If the user still sees
+  a row-order mismatch after pull, that's a separate bug — need a live
+  example.
 
-The first implementation built each generated column with `correlated_axes`
-+ `selected_levels`. `materialize` expands every `correlated_axes` crossing
-into one union row per combination, so an all-simple `Beacon_PVT_45` became
-**45 union rows / 45 Maestro corners** instead of 1. Offline tests passed
-because `column_point_count` measures sim points, not union rows.
+### 3 · Dragging dialogs no longer drags the main window
 
-### The fix
+User report: "弹出了 corner generator 的对话框，当我拖动 corner generator 的
+对话框时，背后的 simkit 好像也在一起动".
 
-`generate_pattern_columns` now produces **fully baked** columns: composite
-axes pinned as scalar pvt_vars + scalar model section; simple axes baked
-as swept pvt_vars / swept model section; **no `correlated_axes` on
-generated columns**. `materialize` then yields exactly one union row per
-generated column. Locked in with `test_all_simple_pattern_materialises_to_one_row`
-and `test_composite_pattern_materialises_to_one_row_per_column`.
+Cause: X11 WM coupling. `super().__init__(view)` parented the dialog to
+the `CornerManagerView` (a child widget inside QTabWidget), not to a
+top-level window. Some WMs grouped them.
 
-### Part B — end-to-end push verification ✓
+Changes — three dialogs now `super().__init__(view.window())`:
 
-Against the live `fnxSession0` (`sim_yusheng/Test/maestro`, project `1AXX`):
+- `corner_generator.py:453` `CornerGeneratorDialog`
+- `corner_manager.py:1936` `_DimensionsDialog`
+- `corner_manager.py:2051` `_NewCornerDialog`
 
-1. Backed up the user's current corner table (`/tmp/simkit_corner_backup.union.json`,
-   rows `TT / TT_pvt / TT_2p5G`).
-2. Built a generator-derived cornermodel; materialised → **1 union row**;
-   `pvt_corners_push(dry_run=True)` → SKILL accepted.
-3. Real `pvt_corners_push(replace=False)` → Maestro corner table became
-   `[TT, TT_pvt, TT_2p5G, gencheck_pvt]`. Pulled back: `gencheck_pvt` is
-   one corner with `VDD=["3","2.8"]`, `temperature=["55","125"]`,
-   `EN="1"`, section `["tt","ss","ff"]` — exactly right.
-4. `pvt_corners_push(backup, replace=True)` → table restored to the
-   original 3 rows. **The user's session is exactly as we found it.**
+`self._view = view` is kept for data access. `_RunSetPanel` (also takes
+`view`) is a real embedded child widget, NOT a dialog — correctly left
+alone.
 
-### Part A — read model file from Cadence ✓
+## NEXT — user acceptance (live dogfood)
 
-`simkit.skill_bridge.read_model_files()` pulls the live corner table and
-extracts `{file: {"file_abs", "sections": [...]}}`. Verified live: returned
-`rf018.scs` with abs path + sections `tt/ss/ff`. Wired into the generator's
-Process grid as `Read from Cadence` next to `Browse…`; offers to seed the
-returned sections as level rows.
+1. **Redeploy** to red zone (`<DEPLOYS>/current` symlink) and re-`cd`
+   from a stale terminal.
+2. **New Mode from a corner column:** verify the reference corner is NOT
+   modified after OK; verify all unticked vars (incl. blank) show up in
+   the modes panel; verify the modes-panel cell accepts both filling AND
+   re-clearing a register.
+3. **Pull from Cadence** with a mix: existing matched corners, Cadence-
+   only corners, simkit-only corners. Verify (a) column order = Cadence;
+   (b) confirmation dialog fires; (c) snapshot is created and File ▸ Open
+   restores; (d) row order matches Cadence (user said they didn't check
+   last time).
+4. **Drag the three dialogs** (Corner Generator, Dimensions, New Corner)
+   on the red-zone X session — confirm the main window stays put.
+5. If row order after Pull is wrong, capture a screenshot/example so we
+   can dig.
 
-## Known gap — model file abs path on generated corners
+## Still-pending from prior handoff (`5c5bafb`)
 
-When the generator pushes `gencheck_pvt`, the corner's `_file_abs` ends up
-empty in Maestro — Spectre may emit `include ""` (SFE-73, see
-`union.py:ModelEntry` comment). The pulled real rows had `_file_abs`
-populated because Maestro knew it. A freshly authored-not-pulled corner
-needs the abs path threaded from the grid through to the `ModelEntry`. This
-likely affects the old `_NewCornerDialog` corners too — not generator-specific.
+These were NOT touched this session:
 
-Pending: when the user goes through `Read from Cadence`, `read_model_files`
-already returns `file_abs`; carry it onto the axis and into generated
-`ModelEntry.file_abs`. When they `Browse…`, the chosen path IS absolute —
-also usable. Only manual-typing leaves no abs path.
-
-## NEXT — user acceptance
-
-1. Decide on commit + push (six files above).
-2. Redeploy to red zone (`<DEPLOYS>/current` symlink) and dogfood the
-   generator end to end: open `Corner Generator…`, fill the three grids
-   (or `Read from Cadence` on Process), author a pattern, generate,
-   confirm columns in the corner table, Push to Maestro, observe.
-3. Decide on the `_file_abs` follow-up.
-4. Delete the unreachable `_DimensionsDialog` / `_DimensionGridDialog` /
-   `_NewCornerDialog` / `_on_dimensions` / `_on_new_corner` once the
-   generator has survived a real dogfood pass.
-
-## Red-zone usage note
-
-Deploys live under `<DEPLOYS>/current` (a symlink). A terminal already
-activated against an old deploy must **re-`cd <DEPLOYS>/current`** (not
-just `deactivate`/re-`source`) to pick up a new deploy — or open a fresh
-terminal.
+- `_file_abs` for generator-authored corners (Spectre may emit
+  `include ""`, SFE-73). Pending: thread abs path from grid →
+  `ModelEntry.file_abs` for manually-typed file rows; `Read from Cadence`
+  and `Browse…` paths already carry abs.
+- Delete the unreachable `_DimensionsDialog` / `_DimensionGridDialog` /
+  `_NewCornerDialog` / `_on_dimensions` / `_on_new_corner` once the
+  Corner Generator has survived a full red-zone dogfood. (Note: their
+  parent-fix from item 3 above means they're safe to keep around in the
+  meantime.)
