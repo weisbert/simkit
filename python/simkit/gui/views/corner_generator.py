@@ -356,6 +356,21 @@ class _LevelGrid(QWidget):
             sess = main.current_session_name()
             if sess:
                 kwargs["session"] = sess
+        # First-time / fresh-machine scenario: no .pvtproject loaded. The
+        # bridge would otherwise fail with the cryptic "no .pvtproject found
+        # walking up from <cwd>". Show the actionable hint here instead.
+        if "pvtproject_path" not in kwargs:
+            QMessageBox.information(
+                self, "Read from Cadence",
+                "No simkit project is loaded yet.\n\n"
+                "In the main window, go to File ▸ New Project… — pick "
+                "a directory (anywhere you want simkit to store its "
+                "files), give it a name, click OK. Then come back to "
+                "the Corner Generator and try Read from Cadence again.\n\n"
+                "You can also type the model file path or use Browse "
+                "to skip this step.",
+            )
+            return
         QApplication.setOverrideCursor(_Qt.WaitCursor)
         files = None
         err = None

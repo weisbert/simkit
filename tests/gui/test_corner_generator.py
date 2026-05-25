@@ -160,6 +160,10 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         import simkit.skill_bridge as sb
         _view_, dlg = self._dialog()
         grid = dlg._grids["Process"]
+        # Stand-in for a loaded project so the early-out guard does not
+        # fire (the bare CornerManagerView used in tests has no main
+        # window with current_project_path).
+        _view_.current_project_path = lambda: Path("/tmp/fake.pvtproject")
         with mock.patch.object(
             sb, "read_model_files",
             return_value={"rf018.scs": {
@@ -173,6 +177,26 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             grid._read_from_cadence()
         self.assertEqual(grid._model_file_edit.text(), "rf018.scs")
         self.assertEqual(grid.level_labels(), ["tt", "ss", "ff"])
+
+    def test_read_from_cadence_warns_when_no_project_loaded(self):
+        # Brand-new machine path: no .pvtproject loaded yet. Show an
+        # actionable hint instead of letting the bridge fail with
+        # "no .pvtproject found walking up from <cwd>".
+        import simkit.skill_bridge as sb
+        _view_, dlg = self._dialog()
+        grid = dlg._grids["Process"]
+        # _view_ has no current_project_path → guard fires.
+        called = []
+        with mock.patch.object(
+            sb, "read_model_files", side_effect=AssertionError("should not call"),
+        ), mock.patch.object(
+            cg.QMessageBox, "information",
+            side_effect=lambda *a, **kw: called.append(a),
+        ):
+            grid._read_from_cadence()
+        self.assertEqual(len(called), 1)
+        msg = called[0][2]
+        self.assertIn("File ▸ New Project", msg)
 
     def test_grids_and_pattern_table_render_with_nonzero_height(self):
         # M2 — a populated grid / pattern row must render at a visible
