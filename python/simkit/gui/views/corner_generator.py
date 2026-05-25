@@ -11,22 +11,22 @@ Two halves:
   variable is *simple*. Process additionally carries a model file, so its
   levels pick a section (section cells are a Cadence-style dropdown
   populated from the parsed model file).
-* **Patterns** — a six-column table:
+* **Patterns** — a five-column table:
 
-      [✓] | Mode | Corner name | Process | Voltage | Temperature
+      [✓] | Corner name | Process | Voltage | Temperature
 
-  Each row is one corner pattern. **Mode is per row** (many patterns × many
-  modes); the bottom dropdown is the default for newly-added rows. The
+  Each row is one corner pattern. Patterns are mode-agnostic on purpose —
+  the bottom dropdown picks the target mode at *Generate* time so the
+  same authored pattern can be re-applied to different modes. The
   Enabled checkbox + Shift / Ctrl multi-select + right-click ▸ Enable /
-  Disable lets the user keep draft rows around without re-generating them.
-  P / V / T cells double-click into an inline checkable combobox (or just
-  type "TT, SS" directly). Corner name supports ``{mode}`` ``{process}``
-  ``{voltage}`` ``{temp}`` tokens; an empty name defaults to ``{mode}``
-  and composite-axis expansion adds per-level discriminators downstream.
-  On *Generate* each row expands via
-  :func:`simkit.corner_model.generate_pattern_columns` — composite axes
-  split into one column each, simple axes stay multi-valued — and the
-  columns land in the corner table.
+  Disable lets the user keep draft rows around without re-generating
+  them. P / V / T cells double-click into an inline checkable combobox
+  (or just type ``"TT, SS"`` directly). Corner name supports ``{mode}``
+  ``{process}`` ``{voltage}`` ``{temp}`` tokens; an empty name defaults
+  to ``{mode}`` and composite-axis expansion adds per-level
+  discriminators downstream. Patterns persist with the cornermodel
+  (``cm.patterns``), so they survive across GUI restarts — the dialog
+  rehydrates from there on open and snapshots back on close / generate.
 
 The grids round-trip the cornermodel's ``correlated_axes``; the data layer
 and on-disk format are unchanged.
@@ -35,6 +35,7 @@ and on-disk format are unchanged.
 from __future__ import annotations
 
 import re
+from dataclasses import replace as _replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -65,6 +66,7 @@ from simkit.corner_model import (
     CornerModelError,
     CorrelatedAxis,
     CorrelatedTuple,
+    PvtPattern,
     add_column,
     add_correlated_axis,
     effective_name,
@@ -77,20 +79,22 @@ _AXES = ("Process", "Voltage", "Temperature")
 _VAR_NAME_RE = r"^[A-Za-z][A-Za-z0-9_]*$"
 _LEVEL_RE = r"^[A-Za-z0-9_]+$"
 
-# Pattern-table column indices. The header order here is the on-screen order.
+# Pattern-table column indices. The header order here is the on-screen
+# order. Mode is NOT a column — patterns are mode-agnostic and the user
+# picks the target mode at Generate time (so the same pattern can be
+# applied to different modes; 2026 UX feedback).
 _PAT_COL_ENABLED = 0
-_PAT_COL_MODE = 1
-_PAT_COL_NAME = 2
-_PAT_COL_PROCESS = 3
-_PAT_COL_VOLTAGE = 4
-_PAT_COL_TEMP = 5
+_PAT_COL_NAME = 1
+_PAT_COL_PROCESS = 2
+_PAT_COL_VOLTAGE = 3
+_PAT_COL_TEMP = 4
 _PAT_AXIS_COLS = {
     "Process": _PAT_COL_PROCESS,
     "Voltage": _PAT_COL_VOLTAGE,
     "Temperature": _PAT_COL_TEMP,
 }
 _PAT_HEADERS = (
-    "", "Mode", "Corner name", "Process", "Voltage", "Temperature",
+    "", "Corner name", "Process", "Voltage", "Temperature",
 )
 
 # Spectre `.scs`: `section <name>` ... `endsection`. HSPICE `.lib`: `.lib <name>`
@@ -232,32 +236,6 @@ class _MultiPickDelegate(QStyledItemDelegate):
         self, editor: "_CheckableComboBox", model, index,
     ) -> None:
         model.setData(index, editor.committed_value())
-
-
-class _ModeComboDelegate(QStyledItemDelegate):
-    """Pattern-table delegate for the per-row Mode column — a plain (single-
-    select, non-editable) QComboBox of the cornermodel's defined modes."""
-
-    def __init__(self, get_modes: Callable[[], list[str]]) -> None:
-        super().__init__()
-        self._get_modes = get_modes
-
-    def createEditor(self, parent, option, index):  # noqa: N802
-        cb = QComboBox(parent)
-        cb.addItems(self._get_modes())
-        current = index.data() or ""
-        i = cb.findText(current)
-        if i >= 0:
-            cb.setCurrentIndex(i)
-        return cb
-
-    def setEditorData(self, editor: QComboBox, index) -> None:  # noqa: N802
-        i = editor.findText(index.data() or "")
-        if i >= 0:
-            editor.setCurrentIndex(i)
-
-    def setModelData(self, editor: QComboBox, model, index) -> None:  # noqa: N802
-        model.setData(index, editor.currentText())
 
 
 class _LevelGrid(QWidget):
@@ -735,11 +713,13 @@ class CornerGeneratorDialog(QDialog):
 
         # --- patterns ----------------------------------------------------
         v.addWidget(QLabel(
-            "<b>2 · Patterns</b> — one row per corner. Mode is per row "
-            "(default below); P/V/T cells double-click for a checkable "
-            "dropdown or type \"TT, SS\" directly. Name supports "
-            "{mode} {process} {voltage} {temp} tokens — empty defaults "
-            "to {mode}. Right-click rows to Enable / Disable."
+            "<b>2 · Patterns</b> — one row per corner. P/V/T cells "
+            "double-click for a checkable dropdown or type \"TT, SS\" "
+            "directly. Name supports {mode} {process} {voltage} {temp} "
+            "tokens — empty defaults to {mode}. Right-click rows to "
+            "Enable / Disable. Patterns persist with the cornermodel — "
+            "the target mode is picked below at Generate time so the "
+            "same pattern can be re-applied to different modes."
         ))
         self._patterns = QTableWidget(0, len(_PAT_HEADERS))
         self._patterns.setHorizontalHeaderLabels(list(_PAT_HEADERS))
@@ -750,17 +730,11 @@ class CornerGeneratorDialog(QDialog):
         self._patterns.verticalHeader().setDefaultSectionSize(24)
         self._patterns.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._patterns.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        # Per-column editor delegates: per-row Mode dropdown + per-axis
-        # checkable multi-select. Free-typed text in P/V/T cells still
-        # works alongside the picker. QTableWidget does NOT take Python
-        # ownership of the delegate (only the C++ parent matters), so we
-        # keep references on self to keep them alive.
+        # Per-axis checkable multi-select editor. Free-typed text in P/V/T
+        # cells still works alongside the picker. QTableWidget does NOT
+        # take Python ownership of the delegate (only the C++ parent
+        # matters), so we keep references on self to keep them alive.
         self._pattern_delegates: list[QStyledItemDelegate] = []
-        mode_delegate = _ModeComboDelegate(
-            lambda: sorted(self._view.cornermodel().modes)
-        )
-        self._pattern_delegates.append(mode_delegate)
-        self._patterns.setItemDelegateForColumn(_PAT_COL_MODE, mode_delegate)
         for axis_name, col in _PAT_AXIS_COLS.items():
             d = _MultiPickDelegate(
                 lambda an=axis_name: self._grids[an].level_labels()
@@ -785,7 +759,7 @@ class CornerGeneratorDialog(QDialog):
 
         # --- generate ----------------------------------------------------
         bottom = QHBoxLayout()
-        bottom.addWidget(QLabel("Default mode (for new rows):"))
+        bottom.addWidget(QLabel("Target mode:"))
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(sorted(cm.modes))
         bottom.addWidget(self._mode_combo)
@@ -798,11 +772,17 @@ class CornerGeneratorDialog(QDialog):
         bottom.addWidget(b_close)
         v.addLayout(bottom)
 
-        # Seed one editable row so the user has somewhere to type.
-        self._add_pattern_row()
+        # Hydrate the table from the cornermodel's saved patterns. If the
+        # project has none yet, seed one blank row so the user has
+        # somewhere to type.
+        if cm.patterns:
+            for p in cm.patterns:
+                self._add_pattern_row(pattern=p)
+        else:
+            self._add_pattern_row()
 
     # --- pattern table ---------------------------------------------------
-    def _add_pattern_row(self) -> None:
+    def _add_pattern_row(self, pattern: "PvtPattern | None" = None) -> None:
         r = self._patterns.rowCount()
         self._patterns.insertRow(r)
         # Enabled checkbox (default on). Use ItemIsUserCheckable on the
@@ -812,19 +792,26 @@ class CornerGeneratorDialog(QDialog):
         chk.setFlags(
             Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
         )
-        chk.setCheckState(Qt.Checked)
+        chk.setCheckState(
+            Qt.Checked if pattern is None or pattern.enabled else Qt.Unchecked
+        )
         chk.setTextAlignment(Qt.AlignCenter)
         self._patterns.setItem(r, _PAT_COL_ENABLED, chk)
-        # Mode pre-fills from the bottom default-mode combo.
-        default_mode = self._mode_combo.currentText() if hasattr(
-            self, "_mode_combo"
-        ) else ""
-        self._patterns.setItem(
-            r, _PAT_COL_MODE, QTableWidgetItem(default_mode)
+        name = pattern.name if pattern is not None else ""
+        process = (
+            ", ".join(pattern.process_levels) if pattern is not None else ""
         )
-        for c in (_PAT_COL_NAME, _PAT_COL_PROCESS,
-                  _PAT_COL_VOLTAGE, _PAT_COL_TEMP):
-            self._patterns.setItem(r, c, QTableWidgetItem(""))
+        voltage = (
+            ", ".join(pattern.voltage_levels) if pattern is not None else ""
+        )
+        temp = (
+            ", ".join(pattern.temperature_levels)
+            if pattern is not None else ""
+        )
+        self._patterns.setItem(r, _PAT_COL_NAME, QTableWidgetItem(name))
+        self._patterns.setItem(r, _PAT_COL_PROCESS, QTableWidgetItem(process))
+        self._patterns.setItem(r, _PAT_COL_VOLTAGE, QTableWidgetItem(voltage))
+        self._patterns.setItem(r, _PAT_COL_TEMP, QTableWidgetItem(temp))
 
     def _remove_pattern_row(self) -> None:
         # Delete every selected row at once, not just the active one — feels
@@ -875,6 +862,14 @@ class CornerGeneratorDialog(QDialog):
 
     # --- generate --------------------------------------------------------
     def _on_generate(self) -> None:
+        mode = self._mode_combo.currentText()
+        if not mode:
+            QMessageBox.warning(
+                self, "Generate",
+                "No mode picked — create a mode in the corner manager, "
+                "then re-open this dialog.",
+            )
+            return
         rows = self._read_patterns()
         if not rows:
             QMessageBox.warning(
@@ -887,15 +882,6 @@ class CornerGeneratorDialog(QDialog):
             QMessageBox.warning(
                 self, "Generate",
                 "Every pattern row is disabled — nothing to generate.",
-            )
-            return
-
-        modeless = [r for r in live if not r["mode"]]
-        if modeless:
-            QMessageBox.warning(
-                self, "Generate",
-                f"{len(modeless)} row(s) have no Mode set — pick one "
-                f"per row, or set a default mode at the bottom.",
             )
             return
 
@@ -921,10 +907,12 @@ class CornerGeneratorDialog(QDialog):
             QMessageBox.warning(self, "Generate — level error", str(exc))
             return
 
+        # Persist the current pattern table — generate is a commit point.
+        cm = _replace(cm, patterns=self._patterns_to_data())
+
         created: list[str] = []
         failed: list[str] = []
         for row in live:
-            mode = row["mode"]
             sels = row["selections"]
             name = _resolve_pattern_name(row["name"], mode, sels)
             axis_selections = [
@@ -953,30 +941,62 @@ class CornerGeneratorDialog(QDialog):
     def _read_patterns(self) -> list[dict]:
         """One dict per non-blank pattern row::
 
-            {"enabled": bool, "mode": str, "name": str,
+            {"enabled": bool, "name": str,
              "selections": {"Process": [...], "Voltage": [...], "Temperature": [...]}}
         """
         out: list[dict] = []
         for r in range(self._patterns.rowCount()):
-            mode = self._cell(r, _PAT_COL_MODE)
             name = self._cell(r, _PAT_COL_NAME)
             sels = {
                 axis: _split_levels(self._cell(r, col))
                 for axis, col in _PAT_AXIS_COLS.items()
             }
-            if not name and not mode and not any(sels.values()):
+            if not name and not any(sels.values()):
                 continue  # a wholly blank row
             out.append({
                 "enabled": self._row_is_enabled(r),
-                "mode": mode,
                 "name": name,
                 "selections": sels,
             })
         return out
 
+    def _patterns_to_data(self) -> tuple:
+        """Snapshot every non-blank pattern row as PvtPattern records — the
+        on-disk format. Drives both auto-save on close and save-at-generate."""
+        out = []
+        for row in self._read_patterns():
+            sels = row["selections"]
+            out.append(PvtPattern(
+                enabled=row["enabled"],
+                name=row["name"],
+                process_levels=tuple(sels.get("Process", [])),
+                voltage_levels=tuple(sels.get("Voltage", [])),
+                temperature_levels=tuple(sels.get("Temperature", [])),
+            ))
+        return tuple(out)
+
     def _cell(self, row: int, col: int) -> str:
         item = self._patterns.item(row, col)
         return item.text().strip() if item is not None else ""
+
+    # --- persistence -----------------------------------------------------
+    def _persist_patterns_silently(self) -> None:
+        """Snapshot the current pattern table into the cornermodel and route
+        it through the view's apply hook — that fires _persist_cornermodel
+        on the main window, so authored patterns survive a GUI restart."""
+        cm = self._view.cornermodel()
+        snapshot = self._patterns_to_data()
+        if snapshot == cm.patterns:
+            return
+        self._view._apply(_replace(cm, patterns=snapshot))
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        self._persist_patterns_silently()
+        super().closeEvent(event)
+
+    def reject(self) -> None:
+        self._persist_patterns_silently()
+        super().reject()
 
     def _report(self, created: list[str], failed: list[str]) -> None:
         if created and not failed:

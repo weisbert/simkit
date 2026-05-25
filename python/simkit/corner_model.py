@@ -113,6 +113,25 @@ class RunSet:
 
 
 @dataclass(frozen=True)
+class PvtPattern:
+    """One row of the PVT Corner Generator's pattern table — persisted with
+    the cornermodel so authored patterns survive across GUI sessions
+    (2026 UX feedback). Patterns are mode-agnostic; the GUI picks the
+    target mode at Generate time so the same pattern can be applied to
+    different modes.
+
+    ``name`` may carry template tokens (``{mode}``, ``{process}``,
+    ``{voltage}``, ``{temp}``) that the GUI substitutes at Generate time.
+    """
+
+    enabled: bool
+    name: str
+    process_levels: tuple[str, ...]
+    voltage_levels: tuple[str, ...]
+    temperature_levels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ModelSectionAssignment:
     """One model→section assignment inside a process-axis level (Stage 6).
 
@@ -221,6 +240,10 @@ class CornerModel:
     # Maestro order. Captured on pull; the Tests grid renders one row per
     # entry. Empty until a pull has populated it.
     tests: tuple[str, ...] = ()
+    # 2026 UX — saved PVT Corner Generator patterns so authored work
+    # survives across GUI sessions. Mode-agnostic on purpose: the user
+    # picks which mode(s) to apply a pattern to at Generate time.
+    patterns: tuple[PvtPattern, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +302,7 @@ def load_cornermodel(
     columns = _validate_columns(p, data, modes, correlated_axes, variants)
     run_sets = _validate_run_sets(p, data)
     var_order = _validate_var_order(p, data)
+    patterns = _validate_patterns(p, data)
     pvt_profile = data.get("pvt_profile")
     if pvt_profile is not None and not isinstance(pvt_profile, str):
         raise CornerModelValidationError(
@@ -299,6 +323,7 @@ def load_cornermodel(
         var_order=var_order,
         pvt_profile=pvt_profile,
         tests=master_tests,
+        patterns=patterns,
     )
 
 
@@ -309,6 +334,48 @@ def _validate_var_order(path: Path, data: dict) -> tuple[str, ...]:
             f"{path}: 'var_order' must be a JSON array of strings"
         )
     return tuple(raw)
+
+
+def _validate_patterns(path: Path, data: dict) -> tuple[PvtPattern, ...]:
+    raw = data.get("patterns", [])
+    if not isinstance(raw, list):
+        raise CornerModelValidationError(
+            f"{path}: 'patterns' must be a JSON array (got "
+            f"{type(raw).__name__})"
+        )
+    out: list[PvtPattern] = []
+    for i, item in enumerate(raw):
+        where = f"{path}: patterns[{i}]"
+        if not isinstance(item, dict):
+            raise CornerModelValidationError(
+                f"{where}: must be a JSON object"
+            )
+        name = item.get("name", "")
+        if not isinstance(name, str):
+            raise CornerModelValidationError(
+                f"{where}: 'name' must be a string"
+            )
+        enabled = item.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise CornerModelValidationError(
+                f"{where}: 'enabled' must be a JSON bool"
+            )
+        levels: dict[str, tuple[str, ...]] = {}
+        for key in ("process_levels", "voltage_levels", "temperature_levels"):
+            tup = item.get(key, [])
+            if not isinstance(tup, list) \
+                    or not all(isinstance(v, str) for v in tup):
+                raise CornerModelValidationError(
+                    f"{where}: {key!r} must be a JSON array of strings"
+                )
+            levels[key] = tuple(tup)
+        out.append(PvtPattern(
+            enabled=enabled, name=name,
+            process_levels=levels["process_levels"],
+            voltage_levels=levels["voltage_levels"],
+            temperature_levels=levels["temperature_levels"],
+        ))
+    return tuple(out)
 
 
 def _validate_run_sets(path: Path, data: dict) -> dict[str, RunSet]:
@@ -2790,6 +2857,17 @@ def to_dict(model: CornerModel) -> dict:
         out["pvt_profile"] = model.pvt_profile
     if model.tests:
         out["tests"] = list(model.tests)
+    if model.patterns:
+        out["patterns"] = [
+            {
+                "enabled": p.enabled,
+                "name": p.name,
+                "process_levels": list(p.process_levels),
+                "voltage_levels": list(p.voltage_levels),
+                "temperature_levels": list(p.temperature_levels),
+            }
+            for p in model.patterns
+        ]
     return out
 
 

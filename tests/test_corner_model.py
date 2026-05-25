@@ -526,6 +526,35 @@ def test_column_override_can_fill_an_empty_register(tmp_path):
 # --- serialisation round-trip --------------------------------------------
 
 
+def test_patterns_round_trip_through_json(tmp_path):
+    # PVT Corner Generator's authored patterns survive save / load so the
+    # user's work does not vanish when they close the dialog (2026 UX).
+    from dataclasses import replace
+    from simkit.corner_model import PvtPattern
+    cm = _write_load(tmp_path, _base())
+    cm = replace(cm, patterns=(
+        PvtPattern(enabled=True, name="{mode}_PVT_45",
+                   process_levels=("TT", "SS"),
+                   voltage_levels=("NV",),
+                   temperature_levels=("NT", "HT")),
+        PvtPattern(enabled=False, name="draft",
+                   process_levels=("TT",),
+                   voltage_levels=(),
+                   temperature_levels=("HT",)),
+    ))
+    out = tmp_path / "lo_corners.cornermodel.json"
+    save_cornermodel(cm, out)
+    reloaded = load_cornermodel(out)
+    assert reloaded.patterns == cm.patterns
+
+
+def test_pattern_field_omitted_from_json_loads_as_empty(tmp_path):
+    # Legacy sidecars predating PvtPattern must still load (= patterns
+    # tuple is empty), so older projects open without migration.
+    cm = _write_load(tmp_path, _base())   # _base has no 'patterns' key
+    assert cm.patterns == ()
+
+
 def test_to_dict_save_round_trip(tmp_path):
     cm = _write_load(tmp_path, _base())
     out = tmp_path / "lo_corners.cornermodel.json"

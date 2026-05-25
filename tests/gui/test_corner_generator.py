@@ -44,13 +44,11 @@ def _set(table, r, c, text):
     table.setItem(r, c, QTableWidgetItem(text))
 
 
-def _fill_pattern_row(dlg, r, *, name, process, voltage, temp, mode=None):
+def _fill_pattern_row(dlg, r, *, name, process, voltage, temp):
     """Set a pattern row's editable cells without disturbing the Enabled
-    checkbox item. ``mode=None`` keeps whatever the row was pre-filled with
-    (= the bottom default-mode combo)."""
+    checkbox item. Mode is NOT a per-row property — it's picked at the
+    bottom of the dialog at Generate time."""
     pt = dlg._patterns
-    if mode is not None:
-        pt.item(r, cg._PAT_COL_MODE).setText(mode)
     pt.item(r, cg._PAT_COL_NAME).setText(name)
     pt.item(r, cg._PAT_COL_PROCESS).setText(process)
     pt.item(r, cg._PAT_COL_VOLTAGE).setText(voltage)
@@ -286,16 +284,16 @@ class CornerGeneratorDialogTest(unittest.TestCase):
 
     # --- new-UX tests ----------------------------------------------------
 
-    def test_pattern_row_seeds_with_enabled_checkbox_and_default_mode(self):
-        # _make_cm gives one mode ("Beacon"); the default-mode combo picks
-        # it, and freshly added rows inherit that mode + Enabled=true.
+    def test_blank_dialog_seeds_one_enabled_row(self):
+        # A project with no saved patterns gets one blank, ticked row so
+        # the user has somewhere to type.
         _view_, dlg = self._dialog()
         pt = dlg._patterns
         self.assertEqual(pt.rowCount(), 1)
         self.assertEqual(
             pt.item(0, cg._PAT_COL_ENABLED).checkState(), Qt.Checked
         )
-        self.assertEqual(pt.item(0, cg._PAT_COL_MODE).text(), "Beacon")
+        self.assertEqual(pt.item(0, cg._PAT_COL_NAME).text(), "")
 
     def test_disabled_row_is_skipped_at_generate(self):
         view, dlg = self._dialog()
@@ -328,38 +326,64 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         names = {effective_name(c) for c in view.cornermodel().columns}
         self.assertEqual(names, {"ENABLED"})
 
-    def test_per_row_mode_dispatches_to_different_modes(self):
-        from simkit.corner_model import add_mode
+    def test_patterns_persist_into_cornermodel_after_close(self):
+        # Close (reject) auto-snapshots the table into cm.patterns so the
+        # next open re-hydrates them — no more "vanish on close".
         view, dlg = self._dialog()
-        # Add a second mode so the per-row Mode column has a real choice.
-        view._apply(add_mode(view.cornermodel(), "TX_PA", {"d_tx_en": "1"}))
-        _fill_grid(
-            dlg._grids["Process"], model_file="/pdk/m.scs", var_headers=[],
-            rows=[("TT", "tt")],
-        )
-        _fill_grid(
-            dlg._grids["Voltage"], model_file=None, var_headers=["vdd"],
-            rows=[("NV", "0.8")],
-        )
-        _fill_grid(
-            dlg._grids["Temperature"], model_file=None,
-            var_headers=["temperature"], rows=[("NT", "27")],
-        )
         _fill_pattern_row(
-            dlg, 0, name="RX_PVT", mode="Beacon",
-            process="TT", voltage="NV", temp="NT",
+            dlg, 0, name="{mode}_PVT_45",
+            process="TT, SS", voltage="NV", temp="NT, HT",
         )
         dlg._add_pattern_row()
         _fill_pattern_row(
-            dlg, 1, name="TX_PVT", mode="TX_PA",
-            process="TT", voltage="NV", temp="NT",
+            dlg, 1, name="draft",
+            process="TT", voltage="", temp="",
         )
-        with mock.patch.object(cg.QMessageBox, "information"), \
-                mock.patch.object(cg.QMessageBox, "warning"):
-            dlg._on_generate()
+        dlg._set_rows_enabled([1], False)
+        dlg.reject()
+        saved = view.cornermodel().patterns
+        self.assertEqual(len(saved), 2)
+        self.assertTrue(saved[0].enabled)
+        self.assertEqual(saved[0].name, "{mode}_PVT_45")
+        self.assertEqual(saved[0].process_levels, ("TT", "SS"))
+        self.assertEqual(saved[0].voltage_levels, ("NV",))
+        self.assertEqual(saved[0].temperature_levels, ("NT", "HT"))
+        self.assertFalse(saved[1].enabled)
+        self.assertEqual(saved[1].name, "draft")
+        self.assertEqual(saved[1].process_levels, ("TT",))
+
+    def test_dialog_rehydrates_saved_patterns_on_open(self):
+        # Patterns saved into a cornermodel come back as table rows next
+        # time the dialog is opened on that cornermodel.
+        from dataclasses import replace
+        view = _view()
         cm = view.cornermodel()
-        by_mode = {c.mode for c in cm.columns}
-        self.assertEqual(by_mode, {"Beacon", "TX_PA"})
+        cm = replace(cm, patterns=(
+            cg.PvtPattern(
+                enabled=True, name="loaded_1",
+                process_levels=("TT",), voltage_levels=("NV", "HV"),
+                temperature_levels=("NT",),
+            ),
+            cg.PvtPattern(
+                enabled=False, name="loaded_2",
+                process_levels=("SS",), voltage_levels=(),
+                temperature_levels=(),
+            ),
+        ))
+        view._apply(cm)
+        dlg = CornerGeneratorDialog(view)
+        pt = dlg._patterns
+        self.assertEqual(pt.rowCount(), 2)
+        self.assertEqual(pt.item(0, cg._PAT_COL_NAME).text(), "loaded_1")
+        self.assertEqual(
+            pt.item(0, cg._PAT_COL_PROCESS).text(), "TT"
+        )
+        self.assertEqual(
+            pt.item(0, cg._PAT_COL_VOLTAGE).text(), "NV, HV"
+        )
+        self.assertEqual(pt.item(0, cg._PAT_COL_ENABLED).checkState(), Qt.Checked)
+        self.assertEqual(pt.item(1, cg._PAT_COL_NAME).text(), "loaded_2")
+        self.assertEqual(pt.item(1, cg._PAT_COL_ENABLED).checkState(), Qt.Unchecked)
 
     def test_name_template_tokens_are_substituted(self):
         self.assertEqual(
