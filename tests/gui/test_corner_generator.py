@@ -18,6 +18,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "python"))
 
+from PyQt5.QtCore import Qt  # noqa: E402
 from PyQt5.QtWidgets import QApplication, QTableWidgetItem  # noqa: E402
 
 from simkit.corner_model import (  # noqa: E402
@@ -41,6 +42,19 @@ def _view():
 
 def _set(table, r, c, text):
     table.setItem(r, c, QTableWidgetItem(text))
+
+
+def _fill_pattern_row(dlg, r, *, name, process, voltage, temp, mode=None):
+    """Set a pattern row's editable cells without disturbing the Enabled
+    checkbox item. ``mode=None`` keeps whatever the row was pre-filled with
+    (= the bottom default-mode combo)."""
+    pt = dlg._patterns
+    if mode is not None:
+        pt.item(r, cg._PAT_COL_MODE).setText(mode)
+    pt.item(r, cg._PAT_COL_NAME).setText(name)
+    pt.item(r, cg._PAT_COL_PROCESS).setText(process)
+    pt.item(r, cg._PAT_COL_VOLTAGE).setText(voltage)
+    pt.item(r, cg._PAT_COL_TEMP).setText(temp)
 
 
 def _fill_grid(grid, *, model_file, var_headers, rows):
@@ -96,9 +110,10 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             rows=[("NT", "55", "L55.s5p"), ("LT", "-40", "Ln40.s5p")],
         )
         # one pattern row crossing all three
-        pt = dlg._patterns
-        for c, text in enumerate(("VCO_PVT", "TT, SS", "NV, HV", "NT, LT")):
-            _set(pt, 0, c, text)
+        _fill_pattern_row(
+            dlg, 0, name="VCO_PVT",
+            process="TT, SS", voltage="NV, HV", temp="NT, LT",
+        )
 
         with mock.patch.object(cg.QMessageBox, "information"), \
                 mock.patch.object(cg.QMessageBox, "warning"):
@@ -137,9 +152,10 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             var_headers=["temperature"],
             rows=[("NT", "55"), ("LT", "-40")],
         )
-        pt = dlg._patterns
-        for c, text in enumerate(("Beacon_PVT", "TT, SS", "NV, HV", "NT, LT")):
-            _set(pt, 0, c, text)
+        _fill_pattern_row(
+            dlg, 0, name="Beacon_PVT",
+            process="TT, SS", voltage="NV, HV", temp="NT, LT",
+        )
 
         with mock.patch.object(cg.QMessageBox, "information"), \
                 mock.patch.object(cg.QMessageBox, "warning"):
@@ -150,11 +166,6 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             {effective_name(c) for c in cm.columns}, {"Beacon_PVT"}
         )
         self.assertEqual(column_point_count(cm, cm.columns[0]), 8)
-
-    def test_level_pick_dialog_round_trips_selection(self):
-        levels = ["NT", "LT", "HT"]
-        dlg = cg._LevelPickDialog("Temperature", levels, ["LT"])
-        self.assertEqual(dlg.selected(), ["LT"])
 
     def test_read_from_cadence_fills_model_file_and_seeds_sections(self):
         import simkit.skill_bridge as sb
@@ -272,6 +283,145 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         self.assertIsInstance(
             grid._table.itemDelegateForColumn(1), cg._SectionDelegate
         )
+
+    # --- new-UX tests ----------------------------------------------------
+
+    def test_pattern_row_seeds_with_enabled_checkbox_and_default_mode(self):
+        # _make_cm gives one mode ("Beacon"); the default-mode combo picks
+        # it, and freshly added rows inherit that mode + Enabled=true.
+        _view_, dlg = self._dialog()
+        pt = dlg._patterns
+        self.assertEqual(pt.rowCount(), 1)
+        self.assertEqual(
+            pt.item(0, cg._PAT_COL_ENABLED).checkState(), Qt.Checked
+        )
+        self.assertEqual(pt.item(0, cg._PAT_COL_MODE).text(), "Beacon")
+
+    def test_disabled_row_is_skipped_at_generate(self):
+        view, dlg = self._dialog()
+        _fill_grid(
+            dlg._grids["Process"], model_file="/pdk/m.scs", var_headers=[],
+            rows=[("TT", "tt")],
+        )
+        _fill_grid(
+            dlg._grids["Voltage"], model_file=None, var_headers=["vdd"],
+            rows=[("NV", "0.8")],
+        )
+        _fill_grid(
+            dlg._grids["Temperature"], model_file=None,
+            var_headers=["temperature"], rows=[("NT", "27")],
+        )
+        # Two rows, second one disabled by un-ticking the checkbox.
+        _fill_pattern_row(
+            dlg, 0, name="ENABLED",
+            process="TT", voltage="NV", temp="NT",
+        )
+        dlg._add_pattern_row()
+        _fill_pattern_row(
+            dlg, 1, name="SKIPPED",
+            process="TT", voltage="NV", temp="NT",
+        )
+        dlg._set_rows_enabled([1], False)
+        with mock.patch.object(cg.QMessageBox, "information"), \
+                mock.patch.object(cg.QMessageBox, "warning"):
+            dlg._on_generate()
+        names = {effective_name(c) for c in view.cornermodel().columns}
+        self.assertEqual(names, {"ENABLED"})
+
+    def test_per_row_mode_dispatches_to_different_modes(self):
+        from simkit.corner_model import add_mode
+        view, dlg = self._dialog()
+        # Add a second mode so the per-row Mode column has a real choice.
+        view._apply(add_mode(view.cornermodel(), "TX_PA", {"d_tx_en": "1"}))
+        _fill_grid(
+            dlg._grids["Process"], model_file="/pdk/m.scs", var_headers=[],
+            rows=[("TT", "tt")],
+        )
+        _fill_grid(
+            dlg._grids["Voltage"], model_file=None, var_headers=["vdd"],
+            rows=[("NV", "0.8")],
+        )
+        _fill_grid(
+            dlg._grids["Temperature"], model_file=None,
+            var_headers=["temperature"], rows=[("NT", "27")],
+        )
+        _fill_pattern_row(
+            dlg, 0, name="RX_PVT", mode="Beacon",
+            process="TT", voltage="NV", temp="NT",
+        )
+        dlg._add_pattern_row()
+        _fill_pattern_row(
+            dlg, 1, name="TX_PVT", mode="TX_PA",
+            process="TT", voltage="NV", temp="NT",
+        )
+        with mock.patch.object(cg.QMessageBox, "information"), \
+                mock.patch.object(cg.QMessageBox, "warning"):
+            dlg._on_generate()
+        cm = view.cornermodel()
+        by_mode = {c.mode for c in cm.columns}
+        self.assertEqual(by_mode, {"Beacon", "TX_PA"})
+
+    def test_name_template_tokens_are_substituted(self):
+        self.assertEqual(
+            cg._resolve_pattern_name(
+                "{mode}_{process}_{voltage}_{temp}",
+                mode="RX_BT_2G",
+                selections={
+                    "Process": ["TT", "SS"], "Voltage": ["NV"],
+                    "Temperature": ["NT", "HT"],
+                },
+            ),
+            "RX_BT_2G_TT_SS_NV_NT_HT",
+        )
+
+    def test_empty_name_falls_back_to_mode(self):
+        # Empty user-typed name → defaults to {mode} → resolved to mode name.
+        self.assertEqual(
+            cg._resolve_pattern_name(
+                "", mode="RX_BT_2G", selections={"Process": ["TT"]},
+            ),
+            "RX_BT_2G",
+        )
+
+    def test_context_menu_helper_toggles_enabled(self):
+        _view_, dlg = self._dialog()
+        dlg._add_pattern_row()
+        dlg._add_pattern_row()
+        self.assertEqual(dlg._patterns.rowCount(), 3)
+        dlg._set_rows_enabled([0, 2], False)
+        self.assertFalse(dlg._row_is_enabled(0))
+        self.assertTrue(dlg._row_is_enabled(1))
+        self.assertFalse(dlg._row_is_enabled(2))
+        dlg._set_rows_enabled([0], True)
+        self.assertTrue(dlg._row_is_enabled(0))
+
+    def test_remove_pattern_row_deletes_every_selected_row(self):
+        _view_, dlg = self._dialog()
+        dlg._add_pattern_row()
+        dlg._add_pattern_row()
+        self.assertEqual(dlg._patterns.rowCount(), 3)
+        dlg._patterns.selectRow(0)
+        sm = dlg._patterns.selectionModel()
+        # Add row 2 to the selection by toggling its row.
+        from PyQt5.QtCore import QItemSelection, QItemSelectionModel
+        idx_top = dlg._patterns.model().index(2, 0)
+        idx_end = dlg._patterns.model().index(2, dlg._patterns.columnCount() - 1)
+        sm.select(
+            QItemSelection(idx_top, idx_end),
+            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+        )
+        dlg._remove_pattern_row()
+        self.assertEqual(dlg._patterns.rowCount(), 1)
+
+    def test_checkable_combobox_commits_checked_items(self):
+        cb = cg._CheckableComboBox(["TT", "SS", "FF"], ["TT", "FF"])
+        self.assertEqual(cb.checked_labels(), ["TT", "FF"])
+        # Free-typed text wins when it diverges from the checked set, so the
+        # cell can carry whatever the user typed verbatim.
+        cb.lineEdit().setText("TT, FF, custom_lbl")
+        self.assertEqual(cb.committed_value(), "TT, FF, custom_lbl")
+        cb.lineEdit().setText("")
+        self.assertEqual(cb.committed_value(), "TT, FF")
 
 
 if __name__ == "__main__":

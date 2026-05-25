@@ -9,11 +9,23 @@ Two halves:
   *composite* level (痛点 h: CT-tuning bound to the process corner, the
   ``.s5p`` inductor file bound to temperature); a level controlling one
   variable is *simple*. Process additionally carries a model file, so its
-  levels pick a section.
-* **Patterns** — a four-column table (Corner name / Process / Voltage /
-  Temperature). Each row crosses the picked levels. On *Generate* each row
-  expands via :func:`simkit.corner_model.generate_pattern_columns` — composite
-  axes split into one column each, simple axes stay multi-valued — and the
+  levels pick a section (section cells are a Cadence-style dropdown
+  populated from the parsed model file).
+* **Patterns** — a six-column table:
+
+      [✓] | Mode | Corner name | Process | Voltage | Temperature
+
+  Each row is one corner pattern. **Mode is per row** (many patterns × many
+  modes); the bottom dropdown is the default for newly-added rows. The
+  Enabled checkbox + Shift / Ctrl multi-select + right-click ▸ Enable /
+  Disable lets the user keep draft rows around without re-generating them.
+  P / V / T cells double-click into an inline checkable combobox (or just
+  type "TT, SS" directly). Corner name supports ``{mode}`` ``{process}``
+  ``{voltage}`` ``{temp}`` tokens; an empty name defaults to ``{mode}``
+  and composite-axis expansion adds per-level discriminators downstream.
+  On *Generate* each row expands via
+  :func:`simkit.corner_model.generate_pattern_columns` — composite axes
+  split into one column each, simple axes stay multi-valued — and the
   columns land in the corner table.
 
 The grids round-trip the cornermodel's ``correlated_axes``; the data layer
@@ -27,18 +39,19 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QAction,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStyledItemDelegate,
@@ -63,6 +76,22 @@ from simkit.corner_model import (
 _AXES = ("Process", "Voltage", "Temperature")
 _VAR_NAME_RE = r"^[A-Za-z][A-Za-z0-9_]*$"
 _LEVEL_RE = r"^[A-Za-z0-9_]+$"
+
+# Pattern-table column indices. The header order here is the on-screen order.
+_PAT_COL_ENABLED = 0
+_PAT_COL_MODE = 1
+_PAT_COL_NAME = 2
+_PAT_COL_PROCESS = 3
+_PAT_COL_VOLTAGE = 4
+_PAT_COL_TEMP = 5
+_PAT_AXIS_COLS = {
+    "Process": _PAT_COL_PROCESS,
+    "Voltage": _PAT_COL_VOLTAGE,
+    "Temperature": _PAT_COL_TEMP,
+}
+_PAT_HEADERS = (
+    "", "Mode", "Corner name", "Process", "Voltage", "Temperature",
+)
 
 # Spectre `.scs`: `section <name>` ... `endsection`. HSPICE `.lib`: `.lib <name>`
 # ... `.endl` (and only when name is a bare identifier — the include form
@@ -114,6 +143,121 @@ class _SectionDelegate(QStyledItemDelegate):
 
     def setModelData(self, editor: QComboBox, model, index) -> None:  # noqa: N802
         model.setData(index, editor.currentText().strip())
+
+
+class _CheckableComboBox(QComboBox):
+    """A QComboBox whose drop-down rows have checkboxes so the user can
+    multi-select; selected items render in the line edit as comma-separated
+    text. Free-typed text in the line edit is preserved as-is — typing
+    \"TT, SS\" works the same as ticking TT and SS in the popup."""
+
+    def __init__(self, items: list[str], current: list[str], parent=None):
+        super().__init__(parent)
+        self.setEditable(True)
+        self._model: QStandardItemModel = QStandardItemModel(self)
+        current_set = set(current)
+        for label in items:
+            item = QStandardItem(label)
+            item.setFlags(
+                Qt.ItemIsSelectable | Qt.ItemIsEnabled
+                | Qt.ItemIsUserCheckable
+            )
+            item.setCheckState(
+                Qt.Checked if label in current_set else Qt.Unchecked
+            )
+            self._model.appendRow(item)
+        self.setModel(self._model)
+        # Suppress the default "active item" behavior — we want clicks to
+        # toggle checks, not commit + close.
+        self.view().pressed.connect(self._toggle_at)
+        self.setLineEdit(QLineEdit())
+        self.lineEdit().setText(", ".join(current))
+        self._model.dataChanged.connect(self._refresh_line_edit)
+
+    def _toggle_at(self, index) -> None:
+        item = self._model.itemFromIndex(index)
+        if item is None:
+            return
+        item.setCheckState(
+            Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked
+        )
+
+    def _refresh_line_edit(self, *_args) -> None:
+        # Only overwrite the line edit from the checked state if the user
+        # hasn't typed something that diverges — otherwise free-typed text
+        # like "TT, SS" would be clobbered every time the popup updates.
+        typed = self.lineEdit().text().strip()
+        checked = self.checked_labels()
+        if not typed or set(_split_levels(typed)) == set(_split_labels_in_model(self._model)):
+            self.lineEdit().setText(", ".join(checked))
+
+    def checked_labels(self) -> list[str]:
+        return [
+            self._model.item(i).text()
+            for i in range(self._model.rowCount())
+            if self._model.item(i).checkState() == Qt.Checked
+        ]
+
+    def committed_value(self) -> str:
+        """Return what should go into the cell. Free-typed text wins when it
+        diverges from the checked set; otherwise the comma-joined checks."""
+        typed = self.lineEdit().text().strip()
+        if not typed:
+            return ", ".join(self.checked_labels())
+        return typed
+
+
+def _split_labels_in_model(model: QStandardItemModel) -> list[str]:
+    return [model.item(i).text() for i in range(model.rowCount())]
+
+
+class _MultiPickDelegate(QStyledItemDelegate):
+    """Pattern-table delegate for the P/V/T cells: pops a _CheckableComboBox
+    populated with the axis's currently defined levels. Free-typed text is
+    preserved (the user can still type \"TT, SS\" without using the picker)."""
+
+    def __init__(self, get_levels: Callable[[], list[str]]) -> None:
+        super().__init__()
+        self._get_levels = get_levels
+
+    def createEditor(self, parent, option, index):  # noqa: N802
+        current = _split_levels(index.data() or "")
+        cb = _CheckableComboBox(self._get_levels(), current, parent)
+        return cb
+
+    def setEditorData(self, editor: "_CheckableComboBox", index) -> None:  # noqa: N802
+        editor.lineEdit().setText(index.data() or "")
+
+    def setModelData(  # noqa: N802
+        self, editor: "_CheckableComboBox", model, index,
+    ) -> None:
+        model.setData(index, editor.committed_value())
+
+
+class _ModeComboDelegate(QStyledItemDelegate):
+    """Pattern-table delegate for the per-row Mode column — a plain (single-
+    select, non-editable) QComboBox of the cornermodel's defined modes."""
+
+    def __init__(self, get_modes: Callable[[], list[str]]) -> None:
+        super().__init__()
+        self._get_modes = get_modes
+
+    def createEditor(self, parent, option, index):  # noqa: N802
+        cb = QComboBox(parent)
+        cb.addItems(self._get_modes())
+        current = index.data() or ""
+        i = cb.findText(current)
+        if i >= 0:
+            cb.setCurrentIndex(i)
+        return cb
+
+    def setEditorData(self, editor: QComboBox, index) -> None:  # noqa: N802
+        i = editor.findText(index.data() or "")
+        if i >= 0:
+            editor.setCurrentIndex(i)
+
+    def setModelData(self, editor: QComboBox, model, index) -> None:  # noqa: N802
+        model.setData(index, editor.currentText())
 
 
 class _LevelGrid(QWidget):
@@ -547,41 +691,6 @@ class _LevelGrid(QWidget):
         )
 
 
-class _LevelPickDialog(QDialog):
-    """A small checkable list — pick which levels of an axis a pattern uses."""
-
-    def __init__(
-        self, axis_name: str, levels: list[str], current: list[str],
-        parent: Optional[QWidget] = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(f"{axis_name} levels")
-        v = QVBoxLayout(self)
-        v.addWidget(QLabel(f"Tick the {axis_name} levels for this corner:"))
-        self._list = QListWidget()
-        for lvl in levels:
-            item = QListWidgetItem(lvl)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(
-                Qt.Checked if lvl in current else Qt.Unchecked
-            )
-            self._list.addItem(item)
-        v.addWidget(self._list)
-        bb = QDialogButtonBox(
-            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
-        )
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        v.addWidget(bb)
-
-    def selected(self) -> list[str]:
-        return [
-            self._list.item(i).text()
-            for i in range(self._list.count())
-            if self._list.item(i).checkState() == Qt.Checked
-        ]
-
-
 class CornerGeneratorDialog(QDialog):
     """The PVT Corner Generator — see the module docstring."""
 
@@ -626,20 +735,43 @@ class CornerGeneratorDialog(QDialog):
 
         # --- patterns ----------------------------------------------------
         v.addWidget(QLabel(
-            "<b>2 · Patterns</b> — one row per corner; "
-            "double-click a P/V/T cell to pick levels."
+            "<b>2 · Patterns</b> — one row per corner. Mode is per row "
+            "(default below); P/V/T cells double-click for a checkable "
+            "dropdown or type \"TT, SS\" directly. Name supports "
+            "{mode} {process} {voltage} {temp} tokens — empty defaults "
+            "to {mode}. Right-click rows to Enable / Disable."
         ))
-        self._patterns = QTableWidget(0, 4)
-        self._patterns.setHorizontalHeaderLabels(
-            ["Corner name", "Process", "Voltage", "Temperature"]
-        )
-        self._patterns.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
+        self._patterns = QTableWidget(0, len(_PAT_HEADERS))
+        self._patterns.setHorizontalHeaderLabels(list(_PAT_HEADERS))
+        hdr = self._patterns.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Stretch)
+        # Squeeze the Enabled checkbox column so it doesn't waste a stretch.
+        hdr.setSectionResizeMode(_PAT_COL_ENABLED, QHeaderView.ResizeToContents)
         self._patterns.verticalHeader().setDefaultSectionSize(24)
-        self._patterns.cellDoubleClicked.connect(self._on_pattern_double_click)
+        self._patterns.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._patterns.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        # Per-column editor delegates: per-row Mode dropdown + per-axis
+        # checkable multi-select. Free-typed text in P/V/T cells still
+        # works alongside the picker. QTableWidget does NOT take Python
+        # ownership of the delegate (only the C++ parent matters), so we
+        # keep references on self to keep them alive.
+        self._pattern_delegates: list[QStyledItemDelegate] = []
+        mode_delegate = _ModeComboDelegate(
+            lambda: sorted(self._view.cornermodel().modes)
+        )
+        self._pattern_delegates.append(mode_delegate)
+        self._patterns.setItemDelegateForColumn(_PAT_COL_MODE, mode_delegate)
+        for axis_name, col in _PAT_AXIS_COLS.items():
+            d = _MultiPickDelegate(
+                lambda an=axis_name: self._grids[an].level_labels()
+            )
+            self._pattern_delegates.append(d)
+            self._patterns.setItemDelegateForColumn(col, d)
+        self._patterns.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._patterns.customContextMenuRequested.connect(
+            self._on_pattern_context_menu
+        )
         v.addWidget(self._patterns, 1)
-        self._add_pattern_row()
 
         prow = QHBoxLayout()
         b_add = QPushButton("+ Pattern row")
@@ -653,7 +785,7 @@ class CornerGeneratorDialog(QDialog):
 
         # --- generate ----------------------------------------------------
         bottom = QHBoxLayout()
-        bottom.addWidget(QLabel("Target mode:"))
+        bottom.addWidget(QLabel("Default mode (for new rows):"))
         self._mode_combo = QComboBox()
         self._mode_combo.addItems(sorted(cm.modes))
         bottom.addWidget(self._mode_combo)
@@ -666,48 +798,83 @@ class CornerGeneratorDialog(QDialog):
         bottom.addWidget(b_close)
         v.addLayout(bottom)
 
+        # Seed one editable row so the user has somewhere to type.
+        self._add_pattern_row()
+
     # --- pattern table ---------------------------------------------------
     def _add_pattern_row(self) -> None:
         r = self._patterns.rowCount()
         self._patterns.insertRow(r)
-        for c in range(4):
+        # Enabled checkbox (default on). Use ItemIsUserCheckable on the
+        # item itself rather than a cell widget so right-click selection
+        # picks it up like the rest of the row.
+        chk = QTableWidgetItem()
+        chk.setFlags(
+            Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+        )
+        chk.setCheckState(Qt.Checked)
+        chk.setTextAlignment(Qt.AlignCenter)
+        self._patterns.setItem(r, _PAT_COL_ENABLED, chk)
+        # Mode pre-fills from the bottom default-mode combo.
+        default_mode = self._mode_combo.currentText() if hasattr(
+            self, "_mode_combo"
+        ) else ""
+        self._patterns.setItem(
+            r, _PAT_COL_MODE, QTableWidgetItem(default_mode)
+        )
+        for c in (_PAT_COL_NAME, _PAT_COL_PROCESS,
+                  _PAT_COL_VOLTAGE, _PAT_COL_TEMP):
             self._patterns.setItem(r, c, QTableWidgetItem(""))
 
     def _remove_pattern_row(self) -> None:
-        r = self._patterns.currentRow()
-        if r >= 0:
+        # Delete every selected row at once, not just the active one — feels
+        # more natural with ExtendedSelection. Falls back to the active row
+        # when no selection is set.
+        rows = self._selected_rows()
+        if not rows:
+            r = self._patterns.currentRow()
+            if r < 0:
+                return
+            rows = [r]
+        for r in sorted(rows, reverse=True):
             self._patterns.removeRow(r)
 
-    def _on_pattern_double_click(self, row: int, col: int) -> None:
-        if not 1 <= col <= 3:
-            return  # the name column is plain text
-        axis_name = _AXES[col - 1]
-        levels = self._grids[axis_name].level_labels()
-        if not levels:
-            QMessageBox.information(
-                self, axis_name,
-                f"Define {axis_name} levels above first.",
-            )
+    def _selected_rows(self) -> list[int]:
+        sm = self._patterns.selectionModel()
+        if sm is None:
+            return []
+        return sorted({idx.row() for idx in sm.selectedRows()})
+
+    def _on_pattern_context_menu(self, pos) -> None:
+        rows = self._selected_rows()
+        # Right-clicking on an unselected row should target that row alone.
+        idx = self._patterns.indexAt(pos)
+        if idx.isValid() and idx.row() not in rows:
+            self._patterns.selectRow(idx.row())
+            rows = [idx.row()]
+        if not rows:
             return
-        item = self._patterns.item(row, col)
-        current = _split_levels(item.text() if item is not None else "")
-        dlg = _LevelPickDialog(axis_name, levels, current, self)
-        if dlg.exec_() == QDialog.Accepted:
-            self._patterns.setItem(
-                row, col, QTableWidgetItem(", ".join(dlg.selected()))
-            )
+        menu = QMenu(self._patterns)
+        a_enable = QAction(f"Enable ({len(rows)})", menu)
+        a_disable = QAction(f"Disable ({len(rows)})", menu)
+        a_enable.triggered.connect(lambda: self._set_rows_enabled(rows, True))
+        a_disable.triggered.connect(lambda: self._set_rows_enabled(rows, False))
+        menu.addAction(a_enable)
+        menu.addAction(a_disable)
+        menu.exec_(self._patterns.viewport().mapToGlobal(pos))
+
+    def _set_rows_enabled(self, rows: list[int], enabled: bool) -> None:
+        for r in rows:
+            item = self._patterns.item(r, _PAT_COL_ENABLED)
+            if item is not None:
+                item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
+
+    def _row_is_enabled(self, r: int) -> bool:
+        item = self._patterns.item(r, _PAT_COL_ENABLED)
+        return item is not None and item.checkState() == Qt.Checked
 
     # --- generate --------------------------------------------------------
     def _on_generate(self) -> None:
-        mode = self._mode_combo.currentText()
-        if not mode:
-            QMessageBox.warning(
-                self, "Generate",
-                "No mode to attach corners to — create a mode in the corner "
-                "manager first.",
-            )
-            return
-
         rows = self._read_patterns()
         if not rows:
             QMessageBox.warning(
@@ -715,10 +882,29 @@ class CornerGeneratorDialog(QDialog):
                 "No patterns — fill in at least one row.",
             )
             return
-        referenced = {
-            axis for _name, sels in rows for axis, labs in sels.items() if labs
-        }
+        live = [r for r in rows if r["enabled"]]
+        if not live:
+            QMessageBox.warning(
+                self, "Generate",
+                "Every pattern row is disabled — nothing to generate.",
+            )
+            return
 
+        modeless = [r for r in live if not r["mode"]]
+        if modeless:
+            QMessageBox.warning(
+                self, "Generate",
+                f"{len(modeless)} row(s) have no Mode set — pick one "
+                f"per row, or set a default mode at the bottom.",
+            )
+            return
+
+        # Promote the axes referenced by enabled rows into the cornermodel
+        # (each axis is upserted exactly once even if many rows reference it).
+        referenced = {
+            axis for r in live
+            for axis, labs in r["selections"].items() if labs
+        }
         cm = self._view.cornermodel()
         try:
             for axis_name in _AXES:
@@ -737,7 +923,10 @@ class CornerGeneratorDialog(QDialog):
 
         created: list[str] = []
         failed: list[str] = []
-        for name, sels in rows:
+        for row in live:
+            mode = row["mode"]
+            sels = row["selections"]
+            name = _resolve_pattern_name(row["name"], mode, sels)
             axis_selections = [
                 (axis, tuple(labs))
                 for axis in _AXES
@@ -761,18 +950,28 @@ class CornerGeneratorDialog(QDialog):
         self._view._apply(cm)
         self._report(created, failed)
 
-    def _read_patterns(self) -> list[tuple[str, dict[str, list[str]]]]:
-        """(name, {axis: [levels]}) for every non-empty pattern row."""
-        out: list[tuple[str, dict[str, list[str]]]] = []
+    def _read_patterns(self) -> list[dict]:
+        """One dict per non-blank pattern row::
+
+            {"enabled": bool, "mode": str, "name": str,
+             "selections": {"Process": [...], "Voltage": [...], "Temperature": [...]}}
+        """
+        out: list[dict] = []
         for r in range(self._patterns.rowCount()):
-            name = self._cell(r, 0)
+            mode = self._cell(r, _PAT_COL_MODE)
+            name = self._cell(r, _PAT_COL_NAME)
             sels = {
-                _AXES[c - 1]: _split_levels(self._cell(r, c))
-                for c in (1, 2, 3)
+                axis: _split_levels(self._cell(r, col))
+                for axis, col in _PAT_AXIS_COLS.items()
             }
-            if not name and not any(sels.values()):
+            if not name and not mode and not any(sels.values()):
                 continue  # a wholly blank row
-            out.append((name, sels))
+            out.append({
+                "enabled": self._row_is_enabled(r),
+                "mode": mode,
+                "name": name,
+                "selections": sels,
+            })
         return out
 
     def _cell(self, row: int, col: int) -> str:
@@ -808,3 +1007,26 @@ def _split_levels(text: str) -> list[str]:
             seen.add(tok)
             out.append(tok)
     return out
+
+
+def _resolve_pattern_name(
+    template: str, mode: str, selections: dict[str, list[str]],
+) -> str:
+    """Substitute name-template tokens with the row's mode + level picks.
+
+    Tokens: ``{mode}``, ``{process}``, ``{voltage}``, ``{temp}``. Level
+    picks are underscore-joined so the result remains a valid identifier
+    (``TT, SS`` → ``TT_SS``). Empty template defaults to ``{mode}`` —
+    matches the user's "auto-name from corner content" ask; composite-axis
+    expansion in :func:`generate_pattern_columns` adds the per-level
+    discriminators downstream, so the base name need not encode every
+    level itself.
+    """
+    name = (template or "").strip() or "{mode}"
+    return (
+        name
+        .replace("{mode}", mode)
+        .replace("{process}", "_".join(selections.get("Process", [])))
+        .replace("{voltage}", "_".join(selections.get("Voltage", [])))
+        .replace("{temp}", "_".join(selections.get("Temperature", [])))
+    )
