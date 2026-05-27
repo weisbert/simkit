@@ -113,15 +113,14 @@ class RunSet:
 
 
 @dataclass(frozen=True)
-class PvtPattern:
-    """One row of the PVT Corner Generator's pattern table — persisted with
-    the cornermodel so authored patterns survive across GUI sessions
-    (2026 UX feedback). Patterns are mode-agnostic; the GUI picks the
-    target mode at Generate time so the same pattern can be applied to
-    different modes.
+class PvtCornerEntry:
+    """One corner inside a :class:`PvtPattern` — a P / V / T selection
+    (each axis may pick multiple levels; composite-axis expansion turns
+    those into one column per element downstream).
 
-    ``name`` may carry template tokens (``{mode}``, ``{process}``,
-    ``{voltage}``, ``{temp}``) that the GUI substitutes at Generate time.
+    ``name`` may carry template tokens (``{pattern}``, ``{mode}``,
+    ``{process}``, ``{voltage}``, ``{temp}``) that the GUI substitutes
+    at Generate time.
     """
 
     enabled: bool
@@ -129,6 +128,21 @@ class PvtPattern:
     process_levels: tuple[str, ...]
     voltage_levels: tuple[str, ...]
     temperature_levels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PvtPattern:
+    """A named collection of corner entries — the unit the user manages in
+    the PVT Corner Generator's pattern library. Persisted with the
+    cornermodel so authored patterns survive across GUI sessions (2026 UX).
+
+    Patterns are mode-agnostic; the GUI picks the target mode at Generate
+    time so the same pattern can be re-applied to different modes.
+    """
+
+    enabled: bool
+    name: str
+    corners: tuple[PvtCornerEntry, ...]
 
 
 @dataclass(frozen=True)
@@ -360,22 +374,59 @@ def _validate_patterns(path: Path, data: dict) -> tuple[PvtPattern, ...]:
             raise CornerModelValidationError(
                 f"{where}: 'enabled' must be a JSON bool"
             )
-        levels: dict[str, tuple[str, ...]] = {}
-        for key in ("process_levels", "voltage_levels", "temperature_levels"):
-            tup = item.get(key, [])
-            if not isinstance(tup, list) \
-                    or not all(isinstance(v, str) for v in tup):
+        # Two shapes are accepted:
+        #  (a) New: ``corners: [{name, process_levels, ...}, ...]``.
+        #  (b) Legacy flat (pre-Pattern-as-container): the level tuples
+        #      sit directly on the pattern; we promote it into a single-
+        #      corner pattern so older sidecars keep loading unchanged.
+        if "corners" in item:
+            raw_corners = item["corners"]
+            if not isinstance(raw_corners, list):
                 raise CornerModelValidationError(
-                    f"{where}: {key!r} must be a JSON array of strings"
+                    f"{where}: 'corners' must be a JSON array"
                 )
-            levels[key] = tuple(tup)
-        out.append(PvtPattern(
-            enabled=enabled, name=name,
-            process_levels=levels["process_levels"],
-            voltage_levels=levels["voltage_levels"],
-            temperature_levels=levels["temperature_levels"],
-        ))
+            corners = tuple(
+                _validate_corner_entry(f"{where}.corners[{j}]", c)
+                for j, c in enumerate(raw_corners)
+            )
+        else:
+            # Promote legacy flat pattern to a single corner entry whose
+            # name = the pattern's name. The pattern's name stays the
+            # container name; downstream `_resolve_pattern_name` will
+            # still substitute it the same way.
+            corners = (_validate_corner_entry(where, item, fallback_name=name),)
+        out.append(PvtPattern(enabled=enabled, name=name, corners=corners))
     return tuple(out)
+
+
+def _validate_corner_entry(
+    where: str, item: dict, *, fallback_name: str = "",
+) -> PvtCornerEntry:
+    if not isinstance(item, dict):
+        raise CornerModelValidationError(f"{where}: must be a JSON object")
+    name = item.get("name", fallback_name)
+    if not isinstance(name, str):
+        raise CornerModelValidationError(f"{where}: 'name' must be a string")
+    enabled = item.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise CornerModelValidationError(
+            f"{where}: 'enabled' must be a JSON bool"
+        )
+    levels: dict[str, tuple[str, ...]] = {}
+    for key in ("process_levels", "voltage_levels", "temperature_levels"):
+        tup = item.get(key, [])
+        if not isinstance(tup, list) \
+                or not all(isinstance(v, str) for v in tup):
+            raise CornerModelValidationError(
+                f"{where}: {key!r} must be a JSON array of strings"
+            )
+        levels[key] = tuple(tup)
+    return PvtCornerEntry(
+        enabled=enabled, name=name,
+        process_levels=levels["process_levels"],
+        voltage_levels=levels["voltage_levels"],
+        temperature_levels=levels["temperature_levels"],
+    )
 
 
 def _validate_run_sets(path: Path, data: dict) -> dict[str, RunSet]:
@@ -2862,9 +2913,16 @@ def to_dict(model: CornerModel) -> dict:
             {
                 "enabled": p.enabled,
                 "name": p.name,
-                "process_levels": list(p.process_levels),
-                "voltage_levels": list(p.voltage_levels),
-                "temperature_levels": list(p.temperature_levels),
+                "corners": [
+                    {
+                        "enabled": c.enabled,
+                        "name": c.name,
+                        "process_levels": list(c.process_levels),
+                        "voltage_levels": list(c.voltage_levels),
+                        "temperature_levels": list(c.temperature_levels),
+                    }
+                    for c in p.corners
+                ],
             }
             for p in model.patterns
         ]

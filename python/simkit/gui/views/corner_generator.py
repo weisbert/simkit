@@ -11,33 +11,35 @@ Two halves:
   variable is *simple*. Process additionally carries a model file, so its
   levels pick a section (section cells are a Cadence-style dropdown
   populated from the parsed model file).
-* **Patterns** — a left-list ▸ right-detail library:
+* **Patterns** — a narrow library navigator on the left + a corner
+  editor on the right. Each pattern is a *named collection of corners*::
 
-      ┌── Library ───────────┬── Editing: <name> ─────────┐
-      │  ☑ Pattern_3         │ Name:    Pattern_3         │
-      │  ☑ Worst_PVT         │ Process: TT, SSWC, FFest ▼ │
-      │  ☐ draft             │ Voltage: NV              ▼ │
-      │  …                   │ Temp:    NT, HT          ▼ │
-      │  [+ New] [Duplicate] │                            │
-      │  [Delete]            │                            │
-      │  [Load preset…]      │                            │
-      └──────────────────────┴────────────────────────────┘
+      ┌─ Library ──┬── Editing: Pattern_1 ─────────────────────┐
+      │ ☑ Pattern_1│ Name: [ Pattern_1                       ] │
+      │ ☑ Worst    │                                            │
+      │ ☐ draft    │ ┌─[✓]─Name─Process─Voltage─Temperature─┐  │
+      │            │ │  ✓   c1   TT      NV       NT        │  │
+      │ [+] [⎘][✕] │ │  ✓   c2   SS      LV       HT        │  │
+      │ [Preset…]  │ │  ✓   c3   FF      HV       LT, HT    │  │
+      │            │ └──────────────────────────────────────┘  │
+      │            │ [+ Corner] [- Corner]                     │
+      └────────────┴───────────────────────────────────────────┘
 
-  Each library entry is one named PVT pattern (= one row in the
-  ``cm.patterns`` tuple). The list checkbox enables / disables the
-  pattern for Generate; clicking an entry loads it on the right for
-  edit. ``Load preset…`` appends built-in PVT recipes (Standard,
-  Classic 5-corner) to the library. Patterns are mode-agnostic on
+  The library list checkbox enables / disables the whole pattern; the
+  per-corner checkbox in the right table enables / disables a single
+  corner. ``Load preset…`` appends built-in PVT recipes (Standard,
+  Classic 5-corner) as new patterns. Patterns are mode-agnostic on
   purpose — the bottom dropdown picks the target mode at *Generate*
   time so the same authored pattern can be re-applied to different
   modes. P / V / T cells use an inline checkable combobox (or just
-  type ``"TT, SS"`` directly). Corner name supports ``{mode}``
-  ``{process}`` ``{voltage}`` ``{temp}`` tokens; an empty name defaults
-  to ``{mode}`` and composite-axis expansion adds per-level
-  discriminators downstream. The library persists with the cornermodel
-  (``cm.patterns``), so authored work survives across GUI restarts —
-  the dialog rehydrates from there on open and snapshots back on close
-  / generate.
+  type ``"TT, SS"`` directly). Corner names support ``{pattern}``
+  ``{mode}`` ``{process}`` ``{voltage}`` ``{temp}`` tokens; an empty
+  name defaults to ``{mode}`` and composite-axis expansion adds
+  per-level discriminators downstream. The library persists with the
+  cornermodel (``cm.patterns``), so authored work survives across GUI
+  restarts — the dialog rehydrates from there on open and snapshots
+  back on close / generate. Legacy single-corner patterns load as a
+  one-corner container automatically.
 
 The grids round-trip the cornermodel's ``correlated_axes``; the data layer
 and on-disk format are unchanged.
@@ -81,6 +83,7 @@ from simkit.corner_model import (
     CornerModelError,
     CorrelatedAxis,
     CorrelatedTuple,
+    PvtCornerEntry,
     PvtPattern,
     add_column,
     add_correlated_axis,
@@ -102,37 +105,47 @@ _LEVEL_RE = r"^[A-Za-z0-9_]+$"
 _BUILTIN_PRESETS: "dict[str, tuple[PvtPattern, ...]]" = {
     "Standard PVT (3×3×3)": (
         PvtPattern(
-            enabled=True, name="{mode}_full_PVT",
-            process_levels=("TT", "SS", "FF"),
-            voltage_levels=("NV", "HV", "LV"),
-            temperature_levels=("NT", "HT", "LT"),
+            enabled=True, name="Standard PVT",
+            corners=(
+                PvtCornerEntry(
+                    enabled=True, name="{mode}_full_PVT",
+                    process_levels=("TT", "SS", "FF"),
+                    voltage_levels=("NV", "HV", "LV"),
+                    temperature_levels=("NT", "HT", "LT"),
+                ),
+            ),
         ),
     ),
     "Classic 5-corner": (
         PvtPattern(
-            enabled=True, name="{mode}_TT_NV_NT",
-            process_levels=("TT",), voltage_levels=("NV",),
-            temperature_levels=("NT",),
-        ),
-        PvtPattern(
-            enabled=True, name="{mode}_SS_LV_HT",
-            process_levels=("SS",), voltage_levels=("LV",),
-            temperature_levels=("HT",),
-        ),
-        PvtPattern(
-            enabled=True, name="{mode}_FF_HV_LT",
-            process_levels=("FF",), voltage_levels=("HV",),
-            temperature_levels=("LT",),
-        ),
-        PvtPattern(
-            enabled=True, name="{mode}_SS_HV_HT",
-            process_levels=("SS",), voltage_levels=("HV",),
-            temperature_levels=("HT",),
-        ),
-        PvtPattern(
-            enabled=True, name="{mode}_FF_LV_LT",
-            process_levels=("FF",), voltage_levels=("LV",),
-            temperature_levels=("LT",),
+            enabled=True, name="Classic 5-corner",
+            corners=(
+                PvtCornerEntry(
+                    enabled=True, name="{mode}_TT_NV_NT",
+                    process_levels=("TT",), voltage_levels=("NV",),
+                    temperature_levels=("NT",),
+                ),
+                PvtCornerEntry(
+                    enabled=True, name="{mode}_SS_LV_HT",
+                    process_levels=("SS",), voltage_levels=("LV",),
+                    temperature_levels=("HT",),
+                ),
+                PvtCornerEntry(
+                    enabled=True, name="{mode}_FF_HV_LT",
+                    process_levels=("FF",), voltage_levels=("HV",),
+                    temperature_levels=("LT",),
+                ),
+                PvtCornerEntry(
+                    enabled=True, name="{mode}_SS_HV_HT",
+                    process_levels=("SS",), voltage_levels=("HV",),
+                    temperature_levels=("HT",),
+                ),
+                PvtCornerEntry(
+                    enabled=True, name="{mode}_FF_LV_LT",
+                    process_levels=("FF",), voltage_levels=("LV",),
+                    temperature_levels=("LT",),
+                ),
+            ),
         ),
     ),
 }
@@ -292,6 +305,28 @@ class _CheckableComboBox(QComboBox):
         if not typed:
             return ", ".join(self.checked_labels())
         return typed
+
+
+class _MultiPickDelegate(QStyledItemDelegate):
+    """Per-cell editor that pops a _CheckableComboBox of the axis's
+    currently defined levels. Used by the per-pattern corner table on the
+    right side of the library — free-typed text in the cell is preserved."""
+
+    def __init__(self, get_levels: Callable[[], list[str]]) -> None:
+        super().__init__()
+        self._get_levels = get_levels
+
+    def createEditor(self, parent, option, index):  # noqa: N802
+        current = _split_levels(index.data() or "")
+        return _CheckableComboBox(self._get_levels(), current, parent)
+
+    def setEditorData(self, editor: "_CheckableComboBox", index) -> None:  # noqa: N802
+        editor.lineEdit().setText(index.data() or "")
+
+    def setModelData(  # noqa: N802
+        self, editor: "_CheckableComboBox", model, index,
+    ) -> None:
+        model.setData(index, editor.committed_value())
 
 
 class _LevelGrid(QWidget):
@@ -725,15 +760,29 @@ class _LevelGrid(QWidget):
         )
 
 
+# Corner-table (right-side detail) column layout — one row per corner
+# entry inside the currently-selected pattern.
+_COR_COL_ENABLED = 0
+_COR_COL_NAME = 1
+_COR_COL_PROCESS = 2
+_COR_COL_VOLTAGE = 3
+_COR_COL_TEMP = 4
+_COR_HEADERS = ("", "Name", "Process", "Voltage", "Temperature")
+_COR_AXIS_COLS = {
+    "Process": _COR_COL_PROCESS,
+    "Voltage": _COR_COL_VOLTAGE,
+    "Temperature": _COR_COL_TEMP,
+}
+
+
 class _PatternLibrary(QWidget):
-    """Left list of named patterns + right detail editor for the selected
-    one. The user authors / copies / deletes patterns via the list, and
-    edits the active pattern's P / V / T cells on the right. Patterns live
-    in this widget's in-memory list until the dialog persists them.
+    """Left narrow list of named patterns + right detail editor showing the
+    selected pattern's name and its corners. Each pattern is a *named
+    container of corners*; the user adds / removes / edits corners on the
+    right, and manages patterns themselves on the left.
 
     ``level_provider(axis_name)`` returns the current level labels of the
-    matching grid — used to refresh the right-side dropdowns when the
-    user opens them.
+    matching grid — used to populate the corner table's per-axis dropdowns.
     """
 
     def __init__(
@@ -744,19 +793,22 @@ class _PatternLibrary(QWidget):
         self._level_provider = level_provider
         self._patterns: list[PvtPattern] = []
         self._current_index: Optional[int] = None
-        self._loading = False   # gate re-entry during programmatic loads
+        self._loading = False
 
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        # --- left: the library list + action buttons --------------------
+        # --- left: narrow navigator list + library actions -------------
         left_wrap = QWidget()
+        left_wrap.setMaximumWidth(220)
+        left_wrap.setMinimumWidth(170)
         left = QVBoxLayout(left_wrap)
         left.setContentsMargins(0, 0, 0, 0)
+        left.addWidget(QLabel("<b>Library</b>"))
         self._list = QListWidget()
         self._list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._list.currentRowChanged.connect(self._on_current_row_changed)
-        self._list.itemChanged.connect(self._on_item_changed)
+        self._list.itemChanged.connect(self._on_list_item_changed)
         self._list.setContextMenuPolicy(Qt.CustomContextMenu)
         self._list.customContextMenuRequested.connect(
             self._on_list_context_menu
@@ -772,49 +824,76 @@ class _PatternLibrary(QWidget):
             b.clicked.connect(slot)
             btn_row1.addWidget(b)
         left.addLayout(btn_row1)
-        btn_row2 = QHBoxLayout()
         b_preset = QPushButton("Load preset…")
         b_preset.clicked.connect(self._load_preset)
-        btn_row2.addWidget(b_preset)
-        btn_row2.addStretch(1)
-        left.addLayout(btn_row2)
-        outer.addWidget(left_wrap, 2)
+        left.addWidget(b_preset)
+        outer.addWidget(left_wrap, 0)
 
-        # --- right: the detail editor for the selected pattern ----------
+        # --- right: pattern detail = name + corner table ---------------
         self._detail = QGroupBox("Editing")
-        form = QFormLayout(self._detail)
+        right = QVBoxLayout(self._detail)
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("Name:"))
         self._name_edit = QLineEdit()
-        self._name_edit.editingFinished.connect(self._commit_name)
-        form.addRow("Name:", self._name_edit)
-        self._combos: dict[str, _CheckableComboBox] = {}
-        for axis_name in _AXES:
-            cb = _CheckableComboBox(
-                self._level_provider(axis_name), [],
-                refresh_hook=lambda an=axis_name: self._level_provider(an),
+        self._name_edit.editingFinished.connect(self._commit_pattern_name)
+        name_row.addWidget(self._name_edit, 1)
+        right.addLayout(name_row)
+        right.addWidget(QLabel(
+            "<i>Each row = one corner. Double-click a P/V/T cell for a "
+            "checkable dropdown, or type \"TT, SS\" directly. Right-click "
+            "rows for Enable / Disable. Names support {pattern} {mode} "
+            "{process} {voltage} {temp} tokens.</i>"
+        ))
+        self._corner_table = QTableWidget(0, len(_COR_HEADERS))
+        self._corner_table.setHorizontalHeaderLabels(list(_COR_HEADERS))
+        hdr = self._corner_table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.Stretch)
+        hdr.setSectionResizeMode(
+            _COR_COL_ENABLED, QHeaderView.ResizeToContents
+        )
+        hdr.setSectionResizeMode(_COR_COL_NAME, QHeaderView.Interactive)
+        self._corner_table.setColumnWidth(_COR_COL_NAME, 140)
+        self._corner_table.verticalHeader().setDefaultSectionSize(24)
+        self._corner_table.setSelectionBehavior(
+            QAbstractItemView.SelectRows
+        )
+        self._corner_table.setSelectionMode(
+            QAbstractItemView.ExtendedSelection
+        )
+        # Per-axis multi-select dropdown editor; QTableWidget doesn't own
+        # the Python delegate object, so we keep references on self.
+        self._corner_delegates: list[QStyledItemDelegate] = []
+        for axis_name, col in _COR_AXIS_COLS.items():
+            d = _MultiPickDelegate(
+                lambda an=axis_name: self._level_provider(an)
             )
-            cb.lineEdit().editingFinished.connect(
-                lambda an=axis_name: self._commit_axis(an)
-            )
-            # Toggling a checkbox auto-updates the line edit text — also a
-            # commit point (otherwise the in-memory pattern stays stale
-            # until the user moves focus away).
-            cb._model.dataChanged.connect(
-                lambda *_a, an=axis_name: self._commit_axis(an)
-            )
-            self._combos[axis_name] = cb
-            form.addRow(f"{axis_name}:", cb)
+            self._corner_delegates.append(d)
+            self._corner_table.setItemDelegateForColumn(col, d)
+        self._corner_table.itemChanged.connect(self._on_corner_item_changed)
+        self._corner_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._corner_table.customContextMenuRequested.connect(
+            self._on_corner_context_menu
+        )
+        right.addWidget(self._corner_table, 1)
+        cbtns = QHBoxLayout()
+        b_add_c = QPushButton("+ Corner")
+        b_del_c = QPushButton("- Corner")
+        b_add_c.clicked.connect(self._add_corner)
+        b_del_c.clicked.connect(self._remove_selected_corners)
+        cbtns.addWidget(b_add_c)
+        cbtns.addWidget(b_del_c)
+        cbtns.addStretch(1)
+        right.addLayout(cbtns)
         self._detail.setEnabled(False)
-        outer.addWidget(self._detail, 3)
+        outer.addWidget(self._detail, 1)
 
     # --- public API ------------------------------------------------------
     def load_patterns(self, patterns) -> None:
-        """Hydrate the library from a tuple of PvtPattern (cm.patterns).
-        Selects the first row so the detail editor is immediately useful."""
         self._loading = True
         self._patterns = list(patterns)
         self._list.clear()
         for p in self._patterns:
-            self._list.addItem(self._make_item(p))
+            self._list.addItem(self._make_list_item(p))
         self._loading = False
         if self._patterns:
             self._list.setCurrentRow(0, QItemSelectionModel.ClearAndSelect)
@@ -822,25 +901,28 @@ class _PatternLibrary(QWidget):
             self._load_detail(None)
 
     def patterns(self) -> tuple:
-        """Snapshot the current library as a PvtPattern tuple for saving."""
         return tuple(self._patterns)
 
     # --- list rendering --------------------------------------------------
-    def _make_item(self, pattern: PvtPattern) -> QListWidgetItem:
-        item = QListWidgetItem(pattern.name or "(unnamed)")
+    def _list_label(self, p: PvtPattern) -> str:
+        n = len(p.corners)
+        return f"{p.name or '(unnamed)'}  ({n})"
+
+    def _make_list_item(self, p: PvtPattern) -> QListWidgetItem:
+        item = QListWidgetItem(self._list_label(p))
         item.setFlags(
             Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
         )
-        item.setCheckState(Qt.Checked if pattern.enabled else Qt.Unchecked)
+        item.setCheckState(Qt.Checked if p.enabled else Qt.Unchecked)
         return item
 
-    def _refresh_item(self, index: int) -> None:
+    def _refresh_list_item(self, index: int) -> None:
         if not 0 <= index < self._list.count():
             return
         p = self._patterns[index]
         self._loading = True
         item = self._list.item(index)
-        item.setText(p.name or "(unnamed)")
+        item.setText(self._list_label(p))
         item.setCheckState(Qt.Checked if p.enabled else Qt.Unchecked)
         self._loading = False
 
@@ -855,7 +937,7 @@ class _PatternLibrary(QWidget):
             self._current_index = None
             self._load_detail(None)
 
-    def _on_item_changed(self, item: QListWidgetItem) -> None:
+    def _on_list_item_changed(self, item: QListWidgetItem) -> None:
         if self._loading:
             return
         row = self._list.row(item)
@@ -882,7 +964,7 @@ class _PatternLibrary(QWidget):
                                 triggered=self._load_preset))
         menu.exec_(self._list.viewport().mapToGlobal(pos))
 
-    # --- detail load + commit -------------------------------------------
+    # --- detail load -----------------------------------------------------
     def _load_detail(self, pattern: Optional[PvtPattern]) -> None:
         self._loading = True
         try:
@@ -890,54 +972,189 @@ class _PatternLibrary(QWidget):
                 self._detail.setTitle("Editing: (no pattern selected)")
                 self._detail.setEnabled(False)
                 self._name_edit.setText("")
-                for cb in self._combos.values():
-                    cb.set_options(cb._refresh_hook() if cb._refresh_hook else [], [])
+                self._corner_table.setRowCount(0)
                 return
             self._detail.setTitle(f"Editing: {pattern.name or '(unnamed)'}")
             self._detail.setEnabled(True)
             self._name_edit.setText(pattern.name)
-            self._combos["Process"].set_options(
-                self._level_provider("Process"),
-                list(pattern.process_levels),
-            )
-            self._combos["Voltage"].set_options(
-                self._level_provider("Voltage"),
-                list(pattern.voltage_levels),
-            )
-            self._combos["Temperature"].set_options(
-                self._level_provider("Temperature"),
-                list(pattern.temperature_levels),
-            )
+            self._corner_table.setRowCount(0)
+            for c in pattern.corners:
+                self._append_corner_row(c)
         finally:
             self._loading = False
 
-    def _commit_name(self) -> None:
-        if self._loading or self._current_index is None:
-            return
-        new_name = self._name_edit.text().strip()
-        i = self._current_index
-        old = self._patterns[i]
-        if old.name == new_name:
-            return
-        self._patterns[i] = replace(old, name=new_name)
-        self._refresh_item(i)
-        self._detail.setTitle(f"Editing: {new_name or '(unnamed)'}")
+    def _append_corner_row(self, corner: PvtCornerEntry) -> None:
+        r = self._corner_table.rowCount()
+        self._corner_table.insertRow(r)
+        chk = QTableWidgetItem()
+        chk.setFlags(
+            Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+        )
+        chk.setCheckState(Qt.Checked if corner.enabled else Qt.Unchecked)
+        chk.setTextAlignment(Qt.AlignCenter)
+        self._corner_table.setItem(r, _COR_COL_ENABLED, chk)
+        self._corner_table.setItem(
+            r, _COR_COL_NAME, QTableWidgetItem(corner.name)
+        )
+        self._corner_table.setItem(
+            r, _COR_COL_PROCESS,
+            QTableWidgetItem(", ".join(corner.process_levels)),
+        )
+        self._corner_table.setItem(
+            r, _COR_COL_VOLTAGE,
+            QTableWidgetItem(", ".join(corner.voltage_levels)),
+        )
+        self._corner_table.setItem(
+            r, _COR_COL_TEMP,
+            QTableWidgetItem(", ".join(corner.temperature_levels)),
+        )
 
-    def _commit_axis(self, axis_name: str) -> None:
+    # --- detail commit ---------------------------------------------------
+    def _commit_pattern_name(self) -> None:
         if self._loading or self._current_index is None:
             return
-        cb = self._combos[axis_name]
-        levels = tuple(_split_levels(cb.committed_value()))
         i = self._current_index
+        new = self._name_edit.text().strip()
         old = self._patterns[i]
-        field = {
-            "Process": "process_levels",
-            "Voltage": "voltage_levels",
-            "Temperature": "temperature_levels",
-        }[axis_name]
-        if getattr(old, field) == levels:
+        if old.name == new:
             return
-        self._patterns[i] = replace(old, **{field: levels})
+        self._patterns[i] = replace(old, name=new)
+        self._refresh_list_item(i)
+        self._detail.setTitle(f"Editing: {new or '(unnamed)'}")
+
+    def _on_corner_item_changed(self, item: QTableWidgetItem) -> None:
+        if self._loading or self._current_index is None:
+            return
+        row = item.row()
+        i = self._current_index
+        pattern = self._patterns[i]
+        if not 0 <= row < len(pattern.corners):
+            return
+        corner = pattern.corners[row]
+        col = item.column()
+        if col == _COR_COL_ENABLED:
+            new_enabled = item.checkState() == Qt.Checked
+            if corner.enabled == new_enabled:
+                return
+            corner = replace(corner, enabled=new_enabled)
+        elif col == _COR_COL_NAME:
+            new_name = item.text().strip()
+            if corner.name == new_name:
+                return
+            corner = replace(corner, name=new_name)
+        elif col in (_COR_COL_PROCESS, _COR_COL_VOLTAGE, _COR_COL_TEMP):
+            new_levels = tuple(_split_levels(item.text()))
+            field = {
+                _COR_COL_PROCESS: "process_levels",
+                _COR_COL_VOLTAGE: "voltage_levels",
+                _COR_COL_TEMP: "temperature_levels",
+            }[col]
+            if getattr(corner, field) == new_levels:
+                return
+            corner = replace(corner, **{field: new_levels})
+        else:
+            return
+        new_corners = list(pattern.corners)
+        new_corners[row] = corner
+        self._patterns[i] = replace(pattern, corners=tuple(new_corners))
+
+    def _on_corner_context_menu(self, pos) -> None:
+        rows = sorted({
+            idx.row()
+            for idx in self._corner_table.selectionModel().selectedRows()
+        })
+        idx = self._corner_table.indexAt(pos)
+        if idx.isValid() and idx.row() not in rows:
+            self._corner_table.selectRow(idx.row())
+            rows = [idx.row()]
+        if not rows:
+            return
+        menu = QMenu(self._corner_table)
+        menu.addAction(QAction(
+            f"Enable ({len(rows)})", menu,
+            triggered=lambda: self._set_corners_enabled(rows, True),
+        ))
+        menu.addAction(QAction(
+            f"Disable ({len(rows)})", menu,
+            triggered=lambda: self._set_corners_enabled(rows, False),
+        ))
+        menu.addSeparator()
+        menu.addAction(QAction(
+            f"Delete ({len(rows)})", menu,
+            triggered=lambda: self._remove_corner_rows(rows),
+        ))
+        menu.exec_(self._corner_table.viewport().mapToGlobal(pos))
+
+    def _set_corners_enabled(self, rows: list[int], enabled: bool) -> None:
+        if self._current_index is None:
+            return
+        i = self._current_index
+        pattern = self._patterns[i]
+        new_corners = list(pattern.corners)
+        for r in rows:
+            if 0 <= r < len(new_corners):
+                new_corners[r] = replace(new_corners[r], enabled=enabled)
+        self._patterns[i] = replace(pattern, corners=tuple(new_corners))
+        # Refresh just the affected checkboxes in the table.
+        self._loading = True
+        for r in rows:
+            item = self._corner_table.item(r, _COR_COL_ENABLED)
+            if item is not None:
+                item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
+        self._loading = False
+
+    # --- corner table actions -------------------------------------------
+    def _add_corner(self) -> None:
+        if self._current_index is None:
+            self._new_pattern()
+            return
+        i = self._current_index
+        pattern = self._patterns[i]
+        n = len(pattern.corners) + 1
+        existing = {c.name for c in pattern.corners}
+        name = f"c{n}"
+        while name in existing:
+            n += 1
+            name = f"c{n}"
+        new = PvtCornerEntry(
+            enabled=True, name=name,
+            process_levels=(), voltage_levels=(),
+            temperature_levels=(),
+        )
+        self._patterns[i] = replace(
+            pattern, corners=pattern.corners + (new,)
+        )
+        self._loading = True
+        self._append_corner_row(new)
+        self._loading = False
+        self._refresh_list_item(i)
+
+    def _remove_selected_corners(self) -> None:
+        rows = sorted({
+            idx.row()
+            for idx in self._corner_table.selectionModel().selectedRows()
+        }, reverse=True)
+        if not rows:
+            r = self._corner_table.currentRow()
+            if r < 0:
+                return
+            rows = [r]
+        self._remove_corner_rows(rows)
+
+    def _remove_corner_rows(self, rows: list[int]) -> None:
+        if self._current_index is None:
+            return
+        i = self._current_index
+        pattern = self._patterns[i]
+        new_corners = [
+            c for j, c in enumerate(pattern.corners) if j not in rows
+        ]
+        self._patterns[i] = replace(pattern, corners=tuple(new_corners))
+        self._loading = True
+        for r in sorted(rows, reverse=True):
+            self._corner_table.removeRow(r)
+        self._loading = False
+        self._refresh_list_item(i)
 
     # --- library actions -------------------------------------------------
     def _next_default_name(self) -> str:
@@ -949,12 +1166,10 @@ class _PatternLibrary(QWidget):
 
     def _new_pattern(self) -> None:
         p = PvtPattern(
-            enabled=True, name=self._next_default_name(),
-            process_levels=(), voltage_levels=(),
-            temperature_levels=(),
+            enabled=True, name=self._next_default_name(), corners=(),
         )
         self._patterns.append(p)
-        self._list.addItem(self._make_item(p))
+        self._list.addItem(self._make_list_item(p))
         self._list.setCurrentRow(
             len(self._patterns) - 1,
             QItemSelectionModel.ClearAndSelect,
@@ -972,12 +1187,11 @@ class _PatternLibrary(QWidget):
             n += 1
         dup = replace(src, name=new_name)
         self._patterns.insert(self._current_index + 1, dup)
-        # Reload list to keep indices straight.
         cur = self._current_index + 1
         self._loading = True
         self._list.clear()
         for p in self._patterns:
-            self._list.addItem(self._make_item(p))
+            self._list.addItem(self._make_list_item(p))
         self._loading = False
         self._list.setCurrentRow(cur, QItemSelectionModel.ClearAndSelect)
 
@@ -992,15 +1206,14 @@ class _PatternLibrary(QWidget):
         if not ok:
             return
         self._patterns[i] = replace(old, name=name.strip())
-        self._refresh_item(i)
-        # Re-load detail to refresh title + name edit.
+        self._refresh_list_item(i)
         self._load_detail(self._patterns[i])
 
     def _delete_current(self) -> None:
-        rows = sorted(
-            {idx.row() for idx in self._list.selectionModel().selectedRows()},
-            reverse=True,
-        )
+        rows = sorted({
+            idx.row()
+            for idx in self._list.selectionModel().selectedRows()
+        }, reverse=True)
         if not rows and self._current_index is not None:
             rows = [self._current_index]
         if not rows:
@@ -1016,7 +1229,7 @@ class _PatternLibrary(QWidget):
         self._loading = True
         self._list.clear()
         for p in self._patterns:
-            self._list.addItem(self._make_item(p))
+            self._list.addItem(self._make_list_item(p))
         self._loading = False
         if self._patterns:
             self._list.setCurrentRow(
@@ -1033,7 +1246,7 @@ class _PatternLibrary(QWidget):
             return
         chosen, ok = QInputDialog.getItem(
             self, "Load preset",
-            "Append the patterns from this preset to your library:",
+            "Append this preset's patterns to your library:",
             names, 0, False,
         )
         if not ok:
@@ -1041,11 +1254,11 @@ class _PatternLibrary(QWidget):
         before = len(self._patterns)
         for src in _BUILTIN_PRESETS[chosen]:
             self._patterns.append(src)
-            self._list.addItem(self._make_item(src))
+            self._list.addItem(self._make_list_item(src))
         if len(self._patterns) > before:
-            self._list.setCurrentRow(before, QItemSelectionModel.ClearAndSelect)
-            # Friendly nudge if the preset references levels the user has
-            # not defined yet — generation would fail otherwise.
+            self._list.setCurrentRow(
+                before, QItemSelectionModel.ClearAndSelect,
+            )
             missing = self._missing_levels_after_load(
                 _BUILTIN_PRESETS[chosen]
             )
@@ -1060,18 +1273,21 @@ class _PatternLibrary(QWidget):
                     ),
                 )
 
-    def _missing_levels_after_load(self, preset) -> dict[str, list[str]]:
+    def _missing_levels_after_load(
+        self, preset: "tuple[PvtPattern, ...]"
+    ) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
         for axis_name in _AXES:
             available = set(self._level_provider(axis_name))
             referenced: set[str] = set()
             for p in preset:
-                referenced |= set(getattr(
-                    p,
-                    {"Process": "process_levels",
-                     "Voltage": "voltage_levels",
-                     "Temperature": "temperature_levels"}[axis_name],
-                ))
+                for c in p.corners:
+                    referenced |= set(getattr(
+                        c,
+                        {"Process": "process_levels",
+                         "Voltage": "voltage_levels",
+                         "Temperature": "temperature_levels"}[axis_name],
+                    ))
             missing = sorted(referenced - available)
             if missing:
                 out[axis_name] = missing
@@ -1122,14 +1338,11 @@ class CornerGeneratorDialog(QDialog):
 
         # --- patterns ----------------------------------------------------
         v.addWidget(QLabel(
-            "<b>2 · Patterns</b> — your library of named PVT patterns. "
-            "Pick one on the left to edit on the right. + New / Duplicate "
-            "/ Delete / Load preset… manage the library; each item's "
-            "checkbox enables it for Generate. Name supports {mode} "
-            "{process} {voltage} {temp} tokens — empty defaults to "
-            "{mode}. Patterns persist with the cornermodel — the target "
-            "mode is picked below at Generate time so the same pattern "
-            "can be re-applied to different modes."
+            "<b>2 · Patterns</b> — each pattern is a named collection of "
+            "corners. Pick a pattern on the left, edit its corners on "
+            "the right. Patterns persist with the cornermodel; the "
+            "target mode is picked below at Generate time so the same "
+            "pattern can be re-applied to different modes."
         ))
         self._library = _PatternLibrary(
             level_provider=lambda an: self._grids[an].level_labels()
@@ -1139,6 +1352,7 @@ class CornerGeneratorDialog(QDialog):
         # to type immediately (mirrors the old auto-seed behaviour).
         if not cm.patterns:
             self._library._new_pattern()
+            self._library._add_corner()
         v.addWidget(self._library, 1)
 
         # --- generate ----------------------------------------------------
@@ -1167,21 +1381,28 @@ class CornerGeneratorDialog(QDialog):
             )
             return
         patterns = self._library.patterns()
-        live = [p for p in patterns if p.enabled and not _pattern_is_blank(p)]
-        if not live:
+        live_pairs: list[tuple[PvtPattern, PvtCornerEntry]] = []
+        for p in patterns:
+            if not p.enabled:
+                continue
+            for c in p.corners:
+                if c.enabled and not _corner_is_blank(c):
+                    live_pairs.append((p, c))
+        if not live_pairs:
             QMessageBox.warning(
                 self, "Generate",
-                "No enabled pattern with any level picked — tick at "
-                "least one pattern and give it some levels.",
+                "No enabled corner with any level picked — tick at "
+                "least one pattern + corner, and give the corner some "
+                "levels.",
             )
             return
 
-        # Promote the axes referenced by enabled patterns into the cornermodel
-        # (each axis is upserted exactly once even if many patterns use it).
+        # Promote the axes referenced by enabled corners into the cornermodel
+        # (each axis is upserted exactly once even if many corners use it).
         referenced = {
             axis_name
-            for p in live
-            for axis_name, labs in _pattern_axis_iter(p)
+            for _p, c in live_pairs
+            for axis_name, labs in _corner_axis_iter(c)
             if labs
         }
         cm = self._view.cornermodel()
@@ -1205,13 +1426,13 @@ class CornerGeneratorDialog(QDialog):
 
         created: list[str] = []
         failed: list[str] = []
-        for p in live:
+        for p, c in live_pairs:
             sels = {
-                "Process": list(p.process_levels),
-                "Voltage": list(p.voltage_levels),
-                "Temperature": list(p.temperature_levels),
+                "Process": list(c.process_levels),
+                "Voltage": list(c.voltage_levels),
+                "Temperature": list(c.temperature_levels),
             }
-            name = _resolve_pattern_name(p.name, mode, sels)
+            name = _resolve_pattern_name(c.name, mode, p.name, sels)
             axis_selections = [
                 (axis, tuple(labs))
                 for axis in _AXES
@@ -1285,37 +1506,39 @@ def _split_levels(text: str) -> list[str]:
     return out
 
 
-def _pattern_is_blank(p: PvtPattern) -> bool:
+def _corner_is_blank(c: PvtCornerEntry) -> bool:
     return (
-        not p.name
-        and not p.process_levels
-        and not p.voltage_levels
-        and not p.temperature_levels
+        not c.name
+        and not c.process_levels
+        and not c.voltage_levels
+        and not c.temperature_levels
     )
 
 
-def _pattern_axis_iter(p: PvtPattern):
-    yield ("Process", p.process_levels)
-    yield ("Voltage", p.voltage_levels)
-    yield ("Temperature", p.temperature_levels)
+def _corner_axis_iter(c: PvtCornerEntry):
+    yield ("Process", c.process_levels)
+    yield ("Voltage", c.voltage_levels)
+    yield ("Temperature", c.temperature_levels)
 
 
 def _resolve_pattern_name(
-    template: str, mode: str, selections: dict[str, list[str]],
+    template: str, mode: str, pattern_name: str,
+    selections: dict[str, list[str]],
 ) -> str:
-    """Substitute name-template tokens with the row's mode + level picks.
+    """Substitute name-template tokens with the corner's mode + level picks
+    + the parent pattern's name.
 
-    Tokens: ``{mode}``, ``{process}``, ``{voltage}``, ``{temp}``. Level
-    picks are underscore-joined so the result remains a valid identifier
-    (``TT, SS`` → ``TT_SS``). Empty template defaults to ``{mode}`` —
-    matches the user's "auto-name from corner content" ask; composite-axis
-    expansion in :func:`generate_pattern_columns` adds the per-level
-    discriminators downstream, so the base name need not encode every
-    level itself.
+    Tokens: ``{pattern}``, ``{mode}``, ``{process}``, ``{voltage}``,
+    ``{temp}``. Level picks are underscore-joined so the result remains a
+    valid identifier (``TT, SS`` → ``TT_SS``). Empty template defaults to
+    ``{mode}`` — composite-axis expansion in
+    :func:`generate_pattern_columns` adds the per-level discriminators
+    downstream, so the base name need not encode every level itself.
     """
     name = (template or "").strip() or "{mode}"
     return (
         name
+        .replace("{pattern}", pattern_name or "")
         .replace("{mode}", mode)
         .replace("{process}", "_".join(selections.get("Process", [])))
         .replace("{voltage}", "_".join(selections.get("Voltage", [])))

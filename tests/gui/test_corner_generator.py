@@ -44,22 +44,35 @@ def _set(table, r, c, text):
     table.setItem(r, c, QTableWidgetItem(text))
 
 
-def _set_pattern(dlg, index, *, name, process, voltage, temp, enabled=True):
-    """Inject a PvtPattern at ``index`` into the dialog's library, creating
-    new pattern slots as needed. Mode is NOT a per-row property — it's
-    picked at the bottom of the dialog at Generate time."""
+def _split(s: str) -> tuple:
+    return tuple(t for t in (x.strip() for x in s.split(",")) if t)
+
+
+def _set_pattern_one_corner(
+    dlg, index, *, name, process, voltage, temp, enabled=True,
+    pattern_enabled=True, pattern_name=None,
+):
+    """Inject (or overwrite) the pattern at ``index`` with a single named
+    corner. Creates new pattern slots as needed. Mode is NOT a per-row
+    property — it's picked at the bottom of the dialog at Generate time."""
     from dataclasses import replace
     while index >= len(dlg._library._patterns):
         dlg._library._new_pattern()
-    p = cg.PvtPattern(
-        enabled=enabled, name=name,
-        process_levels=tuple(t for t in (s.strip() for s in process.split(",")) if t),
-        voltage_levels=tuple(t for t in (s.strip() for s in voltage.split(",")) if t),
-        temperature_levels=tuple(t for t in (s.strip() for s in temp.split(",")) if t),
+    pname = pattern_name if pattern_name is not None else (
+        dlg._library._patterns[index].name
     )
-    dlg._library._patterns[index] = p
-    dlg._library._refresh_item(index)
+    c = cg.PvtCornerEntry(
+        enabled=enabled, name=name,
+        process_levels=_split(process),
+        voltage_levels=_split(voltage),
+        temperature_levels=_split(temp),
+    )
+    dlg._library._patterns[index] = cg.PvtPattern(
+        enabled=pattern_enabled, name=pname, corners=(c,),
+    )
+    dlg._library._refresh_list_item(index)
     dlg._library._list.setCurrentRow(index)
+    dlg._library._load_detail(dlg._library._patterns[index])
 
 
 def _fill_grid(grid, *, model_file, var_headers, rows):
@@ -115,7 +128,7 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             rows=[("NT", "55", "L55.s5p"), ("LT", "-40", "Ln40.s5p")],
         )
         # one pattern row crossing all three
-        _set_pattern(
+        _set_pattern_one_corner(
             dlg, 0, name="VCO_PVT",
             process="TT, SS", voltage="NV, HV", temp="NT, LT",
         )
@@ -157,7 +170,7 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             var_headers=["temperature"],
             rows=[("NT", "55"), ("LT", "-40")],
         )
-        _set_pattern(
+        _set_pattern_one_corner(
             dlg, 0, name="Beacon_PVT",
             process="TT, SS", voltage="NV, HV", temp="NT, LT",
         )
@@ -311,11 +324,11 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             dlg._grids["Temperature"], model_file=None,
             var_headers=["temperature"], rows=[("NT", "27")],
         )
-        _set_pattern(
+        _set_pattern_one_corner(
             dlg, 0, name="ENABLED",
             process="TT", voltage="NV", temp="NT", enabled=True,
         )
-        _set_pattern(
+        _set_pattern_one_corner(
             dlg, 1, name="SKIPPED",
             process="TT", voltage="NV", temp="NT", enabled=False,
         )
@@ -329,25 +342,26 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         # Close (reject) auto-snapshots the library into cm.patterns so the
         # next open re-hydrates them — no more "vanish on close".
         view, dlg = self._dialog()
-        _set_pattern(
+        _set_pattern_one_corner(
             dlg, 0, name="{mode}_PVT_45",
             process="TT, SS", voltage="NV", temp="NT, HT",
         )
-        _set_pattern(
+        _set_pattern_one_corner(
             dlg, 1, name="draft",
-            process="TT", voltage="", temp="", enabled=False,
+            process="TT", voltage="", temp="",
+            pattern_enabled=False,
         )
         dlg.reject()
         saved = view.cornermodel().patterns
         self.assertEqual(len(saved), 2)
         self.assertTrue(saved[0].enabled)
-        self.assertEqual(saved[0].name, "{mode}_PVT_45")
-        self.assertEqual(saved[0].process_levels, ("TT", "SS"))
-        self.assertEqual(saved[0].voltage_levels, ("NV",))
-        self.assertEqual(saved[0].temperature_levels, ("NT", "HT"))
+        self.assertEqual(saved[0].corners[0].name, "{mode}_PVT_45")
+        self.assertEqual(saved[0].corners[0].process_levels, ("TT", "SS"))
+        self.assertEqual(saved[0].corners[0].voltage_levels, ("NV",))
+        self.assertEqual(saved[0].corners[0].temperature_levels, ("NT", "HT"))
         self.assertFalse(saved[1].enabled)
-        self.assertEqual(saved[1].name, "draft")
-        self.assertEqual(saved[1].process_levels, ("TT",))
+        self.assertEqual(saved[1].corners[0].name, "draft")
+        self.assertEqual(saved[1].corners[0].process_levels, ("TT",))
 
     def test_dialog_rehydrates_saved_patterns_on_open(self):
         # Patterns saved into a cornermodel come back as library entries
@@ -358,13 +372,24 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         cm = replace(cm, patterns=(
             cg.PvtPattern(
                 enabled=True, name="loaded_1",
-                process_levels=("TT",), voltage_levels=("NV", "HV"),
-                temperature_levels=("NT",),
+                corners=(
+                    cg.PvtCornerEntry(
+                        enabled=True, name="c1",
+                        process_levels=("TT",),
+                        voltage_levels=("NV", "HV"),
+                        temperature_levels=("NT",),
+                    ),
+                    cg.PvtCornerEntry(
+                        enabled=True, name="c2",
+                        process_levels=("SS",),
+                        voltage_levels=("LV",),
+                        temperature_levels=("HT",),
+                    ),
+                ),
             ),
             cg.PvtPattern(
                 enabled=False, name="loaded_2",
-                process_levels=("SS",), voltage_levels=(),
-                temperature_levels=(),
+                corners=(),
             ),
         ))
         view._apply(cm)
@@ -372,33 +397,37 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         ps = dlg._library.patterns()
         self.assertEqual(len(ps), 2)
         self.assertEqual(ps[0].name, "loaded_1")
-        self.assertEqual(ps[0].process_levels, ("TT",))
+        self.assertEqual(len(ps[0].corners), 2)
+        self.assertEqual(ps[0].corners[0].process_levels, ("TT",))
         self.assertTrue(ps[0].enabled)
         self.assertEqual(ps[1].name, "loaded_2")
         self.assertFalse(ps[1].enabled)
-        # The list widget reflects the patterns.
+        # The list widget reflects the patterns + corner counts.
         self.assertEqual(dlg._library._list.count(), 2)
-        self.assertEqual(dlg._library._list.item(0).text(), "loaded_1")
-        self.assertEqual(dlg._library._list.item(1).text(), "loaded_2")
+        self.assertEqual(dlg._library._list.item(0).text(), "loaded_1  (2)")
+        self.assertEqual(dlg._library._list.item(1).text(), "loaded_2  (0)")
 
     def test_name_template_tokens_are_substituted(self):
+        # {pattern} = container name, {mode} = generate-time mode, the
+        # rest = the corner's own level picks.
         self.assertEqual(
             cg._resolve_pattern_name(
-                "{mode}_{process}_{voltage}_{temp}",
-                mode="RX_BT_2G",
+                "{pattern}_{mode}_{process}_{voltage}_{temp}",
+                mode="RX_BT_2G", pattern_name="Worst",
                 selections={
                     "Process": ["TT", "SS"], "Voltage": ["NV"],
                     "Temperature": ["NT", "HT"],
                 },
             ),
-            "RX_BT_2G_TT_SS_NV_NT_HT",
+            "Worst_RX_BT_2G_TT_SS_NV_NT_HT",
         )
 
     def test_empty_name_falls_back_to_mode(self):
-        # Empty user-typed name → defaults to {mode} → resolved to mode name.
+        # Empty user-typed corner name → defaults to {mode} → resolved.
         self.assertEqual(
             cg._resolve_pattern_name(
-                "", mode="RX_BT_2G", selections={"Process": ["TT"]},
+                "", mode="RX_BT_2G", pattern_name="P",
+                selections={"Process": ["TT"]},
             ),
             "RX_BT_2G",
         )
@@ -417,18 +446,19 @@ class CornerGeneratorDialogTest(unittest.TestCase):
 
     def test_library_duplicate_clones_active_with_copy_suffix(self):
         _view_, dlg = self._dialog()
-        _set_pattern(
-            dlg, 0, name="my_corner",
+        _set_pattern_one_corner(
+            dlg, 0, name="c1", pattern_name="my_pattern",
             process="TT, SS", voltage="NV", temp="NT",
         )
         dlg._library._duplicate_current()
         ps = dlg._library.patterns()
         self.assertEqual(len(ps), 2)
-        self.assertEqual(ps[1].name, "my_corner_copy")
-        self.assertEqual(ps[1].process_levels, ("TT", "SS"))
-        self.assertEqual(ps[1].voltage_levels, ("NV",))
-        # Originals unchanged.
-        self.assertEqual(ps[0].name, "my_corner")
+        self.assertEqual(ps[1].name, "my_pattern_copy")
+        # The cloned pattern carries the same corner content.
+        self.assertEqual(ps[1].corners[0].process_levels, ("TT", "SS"))
+        self.assertEqual(ps[1].corners[0].voltage_levels, ("NV",))
+        # Original pattern is unchanged.
+        self.assertEqual(ps[0].name, "my_pattern")
 
     def test_library_delete_removes_selected_with_confirm(self):
         _view_, dlg = self._dialog()
@@ -467,6 +497,64 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         self.assertFalse(dlg._library.patterns()[0].enabled)
         item.setCheckState(Qt.Checked)
         self.assertTrue(dlg._library.patterns()[0].enabled)
+
+    def test_pattern_with_multiple_corners_generates_all_of_them(self):
+        # New container model: one pattern can carry several corners and
+        # Generate emits a column (or composite-expanded set) per corner.
+        from dataclasses import replace
+        view, dlg = self._dialog()
+        _fill_grid(
+            dlg._grids["Process"], model_file="/pdk/m.scs", var_headers=[],
+            rows=[("TT", "tt"), ("SS", "ss"), ("FF", "ff")],
+        )
+        _fill_grid(
+            dlg._grids["Voltage"], model_file=None, var_headers=["vdd"],
+            rows=[("NV", "0.8"), ("HV", "0.85"), ("LV", "0.75")],
+        )
+        _fill_grid(
+            dlg._grids["Temperature"], model_file=None,
+            var_headers=["temperature"],
+            rows=[("NT", "27"), ("HT", "85"), ("LT", "-40")],
+        )
+        # Build a pattern with three corner entries (one disabled).
+        dlg._library._patterns[0] = cg.PvtPattern(
+            enabled=True, name="Pattern_1",
+            corners=(
+                cg.PvtCornerEntry(
+                    enabled=True, name="c1",
+                    process_levels=("TT",), voltage_levels=("NV",),
+                    temperature_levels=("NT",),
+                ),
+                cg.PvtCornerEntry(
+                    enabled=False, name="c_skip",
+                    process_levels=("FF",), voltage_levels=("HV",),
+                    temperature_levels=("LT",),
+                ),
+                cg.PvtCornerEntry(
+                    enabled=True, name="c3",
+                    process_levels=("SS",), voltage_levels=("LV",),
+                    temperature_levels=("HT",),
+                ),
+            ),
+        )
+        dlg._library._refresh_list_item(0)
+        dlg._library._load_detail(dlg._library._patterns[0])
+        with mock.patch.object(cg.QMessageBox, "information"), \
+                mock.patch.object(cg.QMessageBox, "warning"):
+            dlg._on_generate()
+        names = {effective_name(c) for c in view.cornermodel().columns}
+        self.assertEqual(names, {"c1", "c3"})
+
+    def test_add_corner_appends_into_active_pattern(self):
+        _view_, dlg = self._dialog()
+        before = len(dlg._library.patterns()[0].corners)
+        dlg._library._add_corner()
+        after = len(dlg._library.patterns()[0].corners)
+        self.assertEqual(after, before + 1)
+        # Auto-name follows c<N> scheme.
+        new_corner = dlg._library.patterns()[0].corners[-1]
+        self.assertTrue(new_corner.name.startswith("c"))
+        self.assertTrue(new_corner.enabled)
 
     def test_checkable_combobox_commits_checked_items(self):
         cb = cg._CheckableComboBox(["TT", "SS", "FF"], ["TT", "FF"])

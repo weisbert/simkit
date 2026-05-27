@@ -530,17 +530,37 @@ def test_patterns_round_trip_through_json(tmp_path):
     # PVT Corner Generator's authored patterns survive save / load so the
     # user's work does not vanish when they close the dialog (2026 UX).
     from dataclasses import replace
-    from simkit.corner_model import PvtPattern
+    from simkit.corner_model import PvtPattern, PvtCornerEntry
     cm = _write_load(tmp_path, _base())
     cm = replace(cm, patterns=(
-        PvtPattern(enabled=True, name="{mode}_PVT_45",
-                   process_levels=("TT", "SS"),
-                   voltage_levels=("NV",),
-                   temperature_levels=("NT", "HT")),
-        PvtPattern(enabled=False, name="draft",
-                   process_levels=("TT",),
-                   voltage_levels=(),
-                   temperature_levels=("HT",)),
+        PvtPattern(
+            enabled=True, name="Pattern_1",
+            corners=(
+                PvtCornerEntry(
+                    enabled=True, name="{mode}_PVT_45",
+                    process_levels=("TT", "SS"),
+                    voltage_levels=("NV",),
+                    temperature_levels=("NT", "HT"),
+                ),
+                PvtCornerEntry(
+                    enabled=True, name="extra",
+                    process_levels=("FF",),
+                    voltage_levels=("HV",),
+                    temperature_levels=("LT", "HT"),
+                ),
+            ),
+        ),
+        PvtPattern(
+            enabled=False, name="draft",
+            corners=(
+                PvtCornerEntry(
+                    enabled=True, name="draft_c1",
+                    process_levels=("TT",),
+                    voltage_levels=(),
+                    temperature_levels=("HT",),
+                ),
+            ),
+        ),
     ))
     out = tmp_path / "lo_corners.cornermodel.json"
     save_cornermodel(cm, out)
@@ -553,6 +573,29 @@ def test_pattern_field_omitted_from_json_loads_as_empty(tmp_path):
     # tuple is empty), so older projects open without migration.
     cm = _write_load(tmp_path, _base())   # _base has no 'patterns' key
     assert cm.patterns == ()
+
+
+def test_legacy_flat_pattern_promoted_to_single_corner(tmp_path):
+    # Old shape (process_levels et al. on the pattern itself, pre-container)
+    # is auto-promoted into a one-corner pattern so existing project files
+    # still load.
+    from simkit.corner_model import load_cornermodel
+    import json
+    d = _base()
+    d["patterns"] = [
+        {"enabled": True, "name": "old_pattern",
+         "process_levels": ["TT", "SS"],
+         "voltage_levels": ["NV"],
+         "temperature_levels": ["NT"]},
+    ]
+    p = tmp_path / "lo_corners.cornermodel.json"
+    p.write_text(json.dumps(d), encoding="utf-8")
+    cm = load_cornermodel(p)
+    assert len(cm.patterns) == 1
+    assert cm.patterns[0].name == "old_pattern"
+    assert len(cm.patterns[0].corners) == 1
+    assert cm.patterns[0].corners[0].process_levels == ("TT", "SS")
+    assert cm.patterns[0].corners[0].voltage_levels == ("NV",)
 
 
 def test_to_dict_save_round_trip(tmp_path):
