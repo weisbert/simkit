@@ -11,22 +11,33 @@ Two halves:
   variable is *simple*. Process additionally carries a model file, so its
   levels pick a section (section cells are a Cadence-style dropdown
   populated from the parsed model file).
-* **Patterns** — a five-column table:
+* **Patterns** — a left-list ▸ right-detail library:
 
-      [✓] | Corner name | Process | Voltage | Temperature
+      ┌── Library ───────────┬── Editing: <name> ─────────┐
+      │  ☑ Pattern_3         │ Name:    Pattern_3         │
+      │  ☑ Worst_PVT         │ Process: TT, SSWC, FFest ▼ │
+      │  ☐ draft             │ Voltage: NV              ▼ │
+      │  …                   │ Temp:    NT, HT          ▼ │
+      │  [+ New] [Duplicate] │                            │
+      │  [Delete]            │                            │
+      │  [Load preset…]      │                            │
+      └──────────────────────┴────────────────────────────┘
 
-  Each row is one corner pattern. Patterns are mode-agnostic on purpose —
-  the bottom dropdown picks the target mode at *Generate* time so the
-  same authored pattern can be re-applied to different modes. The
-  Enabled checkbox + Shift / Ctrl multi-select + right-click ▸ Enable /
-  Disable lets the user keep draft rows around without re-generating
-  them. P / V / T cells double-click into an inline checkable combobox
-  (or just type ``"TT, SS"`` directly). Corner name supports ``{mode}``
+  Each library entry is one named PVT pattern (= one row in the
+  ``cm.patterns`` tuple). The list checkbox enables / disables the
+  pattern for Generate; clicking an entry loads it on the right for
+  edit. ``Load preset…`` appends built-in PVT recipes (Standard,
+  Classic 5-corner) to the library. Patterns are mode-agnostic on
+  purpose — the bottom dropdown picks the target mode at *Generate*
+  time so the same authored pattern can be re-applied to different
+  modes. P / V / T cells use an inline checkable combobox (or just
+  type ``"TT, SS"`` directly). Corner name supports ``{mode}``
   ``{process}`` ``{voltage}`` ``{temp}`` tokens; an empty name defaults
   to ``{mode}`` and composite-axis expansion adds per-level
-  discriminators downstream. Patterns persist with the cornermodel
-  (``cm.patterns``), so they survive across GUI restarts — the dialog
-  rehydrates from there on open and snapshots back on close / generate.
+  discriminators downstream. The library persists with the cornermodel
+  (``cm.patterns``), so authored work survives across GUI restarts —
+  the dialog rehydrates from there on open and snapshots back on close
+  / generate.
 
 The grids round-trip the cornermodel's ``correlated_axes``; the data layer
 and on-disk format are unchanged.
@@ -35,11 +46,11 @@ and on-disk format are unchanged.
 from __future__ import annotations
 
 import re
-from dataclasses import replace as _replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QItemSelectionModel
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -47,11 +58,15 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -79,23 +94,48 @@ _AXES = ("Process", "Voltage", "Temperature")
 _VAR_NAME_RE = r"^[A-Za-z][A-Za-z0-9_]*$"
 _LEVEL_RE = r"^[A-Za-z0-9_]+$"
 
-# Pattern-table column indices. The header order here is the on-screen
-# order. Mode is NOT a column — patterns are mode-agnostic and the user
-# picks the target mode at Generate time (so the same pattern can be
-# applied to different modes; 2026 UX feedback).
-_PAT_COL_ENABLED = 0
-_PAT_COL_NAME = 1
-_PAT_COL_PROCESS = 2
-_PAT_COL_VOLTAGE = 3
-_PAT_COL_TEMP = 4
-_PAT_AXIS_COLS = {
-    "Process": _PAT_COL_PROCESS,
-    "Voltage": _PAT_COL_VOLTAGE,
-    "Temperature": _PAT_COL_TEMP,
+# A few built-in pattern presets, surfaced by the Library's "Load preset…"
+# button. Loading a preset APPENDS its patterns to the project's library;
+# the level names referenced here (TT/SS/FF/NV/HV/LV/NT/HT/LT) follow the
+# common PVT shorthand — the user is expected to have defined matching
+# levels in the level grids above (the Library warns if any are missing).
+_BUILTIN_PRESETS: "dict[str, tuple[PvtPattern, ...]]" = {
+    "Standard PVT (3×3×3)": (
+        PvtPattern(
+            enabled=True, name="{mode}_full_PVT",
+            process_levels=("TT", "SS", "FF"),
+            voltage_levels=("NV", "HV", "LV"),
+            temperature_levels=("NT", "HT", "LT"),
+        ),
+    ),
+    "Classic 5-corner": (
+        PvtPattern(
+            enabled=True, name="{mode}_TT_NV_NT",
+            process_levels=("TT",), voltage_levels=("NV",),
+            temperature_levels=("NT",),
+        ),
+        PvtPattern(
+            enabled=True, name="{mode}_SS_LV_HT",
+            process_levels=("SS",), voltage_levels=("LV",),
+            temperature_levels=("HT",),
+        ),
+        PvtPattern(
+            enabled=True, name="{mode}_FF_HV_LT",
+            process_levels=("FF",), voltage_levels=("HV",),
+            temperature_levels=("LT",),
+        ),
+        PvtPattern(
+            enabled=True, name="{mode}_SS_HV_HT",
+            process_levels=("SS",), voltage_levels=("HV",),
+            temperature_levels=("HT",),
+        ),
+        PvtPattern(
+            enabled=True, name="{mode}_FF_LV_LT",
+            process_levels=("FF",), voltage_levels=("LV",),
+            temperature_levels=("LT",),
+        ),
+    ),
 }
-_PAT_HEADERS = (
-    "", "Corner name", "Process", "Voltage", "Temperature",
-)
 
 # Spectre `.scs`: `section <name>` ... `endsection`. HSPICE `.lib`: `.lib <name>`
 # ... `.endl` (and only when name is a bare identifier — the include form
@@ -153,13 +193,36 @@ class _CheckableComboBox(QComboBox):
     """A QComboBox whose drop-down rows have checkboxes so the user can
     multi-select; selected items render in the line edit as comma-separated
     text. Free-typed text in the line edit is preserved as-is — typing
-    \"TT, SS\" works the same as ticking TT and SS in the popup."""
+    \"TT, SS\" works the same as ticking TT and SS in the popup.
 
-    def __init__(self, items: list[str], current: list[str], parent=None):
+    ``refresh_hook`` (optional) is called each time the dropdown is about
+    to open and returns the current item list — this lets a long-lived
+    combo (e.g. embedded in a form) re-pull the freshest level list from
+    the corresponding grid without being recreated."""
+
+    def __init__(
+        self, items: list[str], current: list[str],
+        parent: Optional[QWidget] = None,
+        refresh_hook: "Optional[Callable[[], list[str]]]" = None,
+    ):
         super().__init__(parent)
         self.setEditable(True)
         self._model: QStandardItemModel = QStandardItemModel(self)
+        self.setModel(self._model)
+        self._refresh_hook = refresh_hook
+        self.view().pressed.connect(self._toggle_at)
+        self.setLineEdit(QLineEdit())
+        self.set_options(items, current)
+        self._model.dataChanged.connect(self._refresh_line_edit)
+
+    def set_options(self, items: list[str], current: list[str]) -> None:
+        """Reseed the dropdown items, preserving ``current`` checks. The
+        line edit's free-typed text is overwritten with the comma-joined
+        ``current`` list — call this when loading a fresh pattern, not
+        for in-place refresh."""
         current_set = set(current)
+        self._model.blockSignals(True)
+        self._model.clear()
         for label in items:
             item = QStandardItem(label)
             item.setFlags(
@@ -170,13 +233,38 @@ class _CheckableComboBox(QComboBox):
                 Qt.Checked if label in current_set else Qt.Unchecked
             )
             self._model.appendRow(item)
-        self.setModel(self._model)
-        # Suppress the default "active item" behavior — we want clicks to
-        # toggle checks, not commit + close.
-        self.view().pressed.connect(self._toggle_at)
-        self.setLineEdit(QLineEdit())
+        self._model.blockSignals(False)
         self.lineEdit().setText(", ".join(current))
-        self._model.dataChanged.connect(self._refresh_line_edit)
+
+    def showPopup(self) -> None:  # noqa: N802 (Qt API)
+        # Refresh from the upstream provider (= the level grid) so the
+        # dropdown always reflects the current level definitions, even
+        # if the user added/removed/renamed levels since opening the
+        # dialog. The currently checked items are preserved by name.
+        if self._refresh_hook is not None:
+            current = _split_levels(self.lineEdit().text())
+            items = self._refresh_hook()
+            # Keep extras the user typed but the grid no longer has —
+            # we still surface them in the dropdown so the user can
+            # uncheck explicitly.
+            for c in current:
+                if c not in items:
+                    items = list(items) + [c]
+            self._model.blockSignals(True)
+            self._model.clear()
+            current_set = set(current)
+            for label in items:
+                item = QStandardItem(label)
+                item.setFlags(
+                    Qt.ItemIsSelectable | Qt.ItemIsEnabled
+                    | Qt.ItemIsUserCheckable
+                )
+                item.setCheckState(
+                    Qt.Checked if label in current_set else Qt.Unchecked
+                )
+                self._model.appendRow(item)
+            self._model.blockSignals(False)
+        super().showPopup()
 
     def _toggle_at(self, index) -> None:
         item = self._model.itemFromIndex(index)
@@ -187,13 +275,8 @@ class _CheckableComboBox(QComboBox):
         )
 
     def _refresh_line_edit(self, *_args) -> None:
-        # Only overwrite the line edit from the checked state if the user
-        # hasn't typed something that diverges — otherwise free-typed text
-        # like "TT, SS" would be clobbered every time the popup updates.
-        typed = self.lineEdit().text().strip()
-        checked = self.checked_labels()
-        if not typed or set(_split_levels(typed)) == set(_split_labels_in_model(self._model)):
-            self.lineEdit().setText(", ".join(checked))
+        # The user toggled a checkbox — recompute the comma-joined text.
+        self.lineEdit().setText(", ".join(self.checked_labels()))
 
     def checked_labels(self) -> list[str]:
         return [
@@ -209,33 +292,6 @@ class _CheckableComboBox(QComboBox):
         if not typed:
             return ", ".join(self.checked_labels())
         return typed
-
-
-def _split_labels_in_model(model: QStandardItemModel) -> list[str]:
-    return [model.item(i).text() for i in range(model.rowCount())]
-
-
-class _MultiPickDelegate(QStyledItemDelegate):
-    """Pattern-table delegate for the P/V/T cells: pops a _CheckableComboBox
-    populated with the axis's currently defined levels. Free-typed text is
-    preserved (the user can still type \"TT, SS\" without using the picker)."""
-
-    def __init__(self, get_levels: Callable[[], list[str]]) -> None:
-        super().__init__()
-        self._get_levels = get_levels
-
-    def createEditor(self, parent, option, index):  # noqa: N802
-        current = _split_levels(index.data() or "")
-        cb = _CheckableComboBox(self._get_levels(), current, parent)
-        return cb
-
-    def setEditorData(self, editor: "_CheckableComboBox", index) -> None:  # noqa: N802
-        editor.lineEdit().setText(index.data() or "")
-
-    def setModelData(  # noqa: N802
-        self, editor: "_CheckableComboBox", model, index,
-    ) -> None:
-        model.setData(index, editor.committed_value())
 
 
 class _LevelGrid(QWidget):
@@ -669,6 +725,359 @@ class _LevelGrid(QWidget):
         )
 
 
+class _PatternLibrary(QWidget):
+    """Left list of named patterns + right detail editor for the selected
+    one. The user authors / copies / deletes patterns via the list, and
+    edits the active pattern's P / V / T cells on the right. Patterns live
+    in this widget's in-memory list until the dialog persists them.
+
+    ``level_provider(axis_name)`` returns the current level labels of the
+    matching grid — used to refresh the right-side dropdowns when the
+    user opens them.
+    """
+
+    def __init__(
+        self, level_provider: Callable[[str], list[str]],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._level_provider = level_provider
+        self._patterns: list[PvtPattern] = []
+        self._current_index: Optional[int] = None
+        self._loading = False   # gate re-entry during programmatic loads
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        # --- left: the library list + action buttons --------------------
+        left_wrap = QWidget()
+        left = QVBoxLayout(left_wrap)
+        left.setContentsMargins(0, 0, 0, 0)
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._list.currentRowChanged.connect(self._on_current_row_changed)
+        self._list.itemChanged.connect(self._on_item_changed)
+        self._list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(
+            self._on_list_context_menu
+        )
+        left.addWidget(self._list, 1)
+        btn_row1 = QHBoxLayout()
+        for label, slot in (
+            ("+ New", self._new_pattern),
+            ("Duplicate", self._duplicate_current),
+            ("Delete", self._delete_current),
+        ):
+            b = QPushButton(label)
+            b.clicked.connect(slot)
+            btn_row1.addWidget(b)
+        left.addLayout(btn_row1)
+        btn_row2 = QHBoxLayout()
+        b_preset = QPushButton("Load preset…")
+        b_preset.clicked.connect(self._load_preset)
+        btn_row2.addWidget(b_preset)
+        btn_row2.addStretch(1)
+        left.addLayout(btn_row2)
+        outer.addWidget(left_wrap, 2)
+
+        # --- right: the detail editor for the selected pattern ----------
+        self._detail = QGroupBox("Editing")
+        form = QFormLayout(self._detail)
+        self._name_edit = QLineEdit()
+        self._name_edit.editingFinished.connect(self._commit_name)
+        form.addRow("Name:", self._name_edit)
+        self._combos: dict[str, _CheckableComboBox] = {}
+        for axis_name in _AXES:
+            cb = _CheckableComboBox(
+                self._level_provider(axis_name), [],
+                refresh_hook=lambda an=axis_name: self._level_provider(an),
+            )
+            cb.lineEdit().editingFinished.connect(
+                lambda an=axis_name: self._commit_axis(an)
+            )
+            # Toggling a checkbox auto-updates the line edit text — also a
+            # commit point (otherwise the in-memory pattern stays stale
+            # until the user moves focus away).
+            cb._model.dataChanged.connect(
+                lambda *_a, an=axis_name: self._commit_axis(an)
+            )
+            self._combos[axis_name] = cb
+            form.addRow(f"{axis_name}:", cb)
+        self._detail.setEnabled(False)
+        outer.addWidget(self._detail, 3)
+
+    # --- public API ------------------------------------------------------
+    def load_patterns(self, patterns) -> None:
+        """Hydrate the library from a tuple of PvtPattern (cm.patterns).
+        Selects the first row so the detail editor is immediately useful."""
+        self._loading = True
+        self._patterns = list(patterns)
+        self._list.clear()
+        for p in self._patterns:
+            self._list.addItem(self._make_item(p))
+        self._loading = False
+        if self._patterns:
+            self._list.setCurrentRow(0, QItemSelectionModel.ClearAndSelect)
+        else:
+            self._load_detail(None)
+
+    def patterns(self) -> tuple:
+        """Snapshot the current library as a PvtPattern tuple for saving."""
+        return tuple(self._patterns)
+
+    # --- list rendering --------------------------------------------------
+    def _make_item(self, pattern: PvtPattern) -> QListWidgetItem:
+        item = QListWidgetItem(pattern.name or "(unnamed)")
+        item.setFlags(
+            Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
+        )
+        item.setCheckState(Qt.Checked if pattern.enabled else Qt.Unchecked)
+        return item
+
+    def _refresh_item(self, index: int) -> None:
+        if not 0 <= index < self._list.count():
+            return
+        p = self._patterns[index]
+        self._loading = True
+        item = self._list.item(index)
+        item.setText(p.name or "(unnamed)")
+        item.setCheckState(Qt.Checked if p.enabled else Qt.Unchecked)
+        self._loading = False
+
+    # --- list events -----------------------------------------------------
+    def _on_current_row_changed(self, row: int) -> None:
+        if self._loading:
+            return
+        if 0 <= row < len(self._patterns):
+            self._current_index = row
+            self._load_detail(self._patterns[row])
+        else:
+            self._current_index = None
+            self._load_detail(None)
+
+    def _on_item_changed(self, item: QListWidgetItem) -> None:
+        if self._loading:
+            return
+        row = self._list.row(item)
+        if not 0 <= row < len(self._patterns):
+            return
+        new_enabled = item.checkState() == Qt.Checked
+        old = self._patterns[row]
+        if old.enabled != new_enabled:
+            self._patterns[row] = replace(old, enabled=new_enabled)
+
+    def _on_list_context_menu(self, pos) -> None:
+        idx = self._list.indexAt(pos)
+        menu = QMenu(self._list)
+        if idx.isValid():
+            menu.addAction(QAction("Duplicate", menu,
+                                    triggered=self._duplicate_current))
+            menu.addAction(QAction("Rename…", menu,
+                                    triggered=self._rename_current))
+            menu.addAction(QAction("Delete", menu,
+                                    triggered=self._delete_current))
+            menu.addSeparator()
+        menu.addAction(QAction("+ New", menu, triggered=self._new_pattern))
+        menu.addAction(QAction("Load preset…", menu,
+                                triggered=self._load_preset))
+        menu.exec_(self._list.viewport().mapToGlobal(pos))
+
+    # --- detail load + commit -------------------------------------------
+    def _load_detail(self, pattern: Optional[PvtPattern]) -> None:
+        self._loading = True
+        try:
+            if pattern is None:
+                self._detail.setTitle("Editing: (no pattern selected)")
+                self._detail.setEnabled(False)
+                self._name_edit.setText("")
+                for cb in self._combos.values():
+                    cb.set_options(cb._refresh_hook() if cb._refresh_hook else [], [])
+                return
+            self._detail.setTitle(f"Editing: {pattern.name or '(unnamed)'}")
+            self._detail.setEnabled(True)
+            self._name_edit.setText(pattern.name)
+            self._combos["Process"].set_options(
+                self._level_provider("Process"),
+                list(pattern.process_levels),
+            )
+            self._combos["Voltage"].set_options(
+                self._level_provider("Voltage"),
+                list(pattern.voltage_levels),
+            )
+            self._combos["Temperature"].set_options(
+                self._level_provider("Temperature"),
+                list(pattern.temperature_levels),
+            )
+        finally:
+            self._loading = False
+
+    def _commit_name(self) -> None:
+        if self._loading or self._current_index is None:
+            return
+        new_name = self._name_edit.text().strip()
+        i = self._current_index
+        old = self._patterns[i]
+        if old.name == new_name:
+            return
+        self._patterns[i] = replace(old, name=new_name)
+        self._refresh_item(i)
+        self._detail.setTitle(f"Editing: {new_name or '(unnamed)'}")
+
+    def _commit_axis(self, axis_name: str) -> None:
+        if self._loading or self._current_index is None:
+            return
+        cb = self._combos[axis_name]
+        levels = tuple(_split_levels(cb.committed_value()))
+        i = self._current_index
+        old = self._patterns[i]
+        field = {
+            "Process": "process_levels",
+            "Voltage": "voltage_levels",
+            "Temperature": "temperature_levels",
+        }[axis_name]
+        if getattr(old, field) == levels:
+            return
+        self._patterns[i] = replace(old, **{field: levels})
+
+    # --- library actions -------------------------------------------------
+    def _next_default_name(self) -> str:
+        existing = {p.name for p in self._patterns}
+        n = len(self._patterns) + 1
+        while f"Pattern_{n}" in existing:
+            n += 1
+        return f"Pattern_{n}"
+
+    def _new_pattern(self) -> None:
+        p = PvtPattern(
+            enabled=True, name=self._next_default_name(),
+            process_levels=(), voltage_levels=(),
+            temperature_levels=(),
+        )
+        self._patterns.append(p)
+        self._list.addItem(self._make_item(p))
+        self._list.setCurrentRow(
+            len(self._patterns) - 1,
+            QItemSelectionModel.ClearAndSelect,
+        )
+
+    def _duplicate_current(self) -> None:
+        if self._current_index is None:
+            return
+        src = self._patterns[self._current_index]
+        existing = {p.name for p in self._patterns}
+        new_name = src.name + "_copy" if src.name else self._next_default_name()
+        n = 2
+        while new_name in existing:
+            new_name = f"{src.name}_copy{n}"
+            n += 1
+        dup = replace(src, name=new_name)
+        self._patterns.insert(self._current_index + 1, dup)
+        # Reload list to keep indices straight.
+        cur = self._current_index + 1
+        self._loading = True
+        self._list.clear()
+        for p in self._patterns:
+            self._list.addItem(self._make_item(p))
+        self._loading = False
+        self._list.setCurrentRow(cur, QItemSelectionModel.ClearAndSelect)
+
+    def _rename_current(self) -> None:
+        if self._current_index is None:
+            return
+        i = self._current_index
+        old = self._patterns[i]
+        name, ok = QInputDialog.getText(
+            self, "Rename pattern", "New name:", text=old.name,
+        )
+        if not ok:
+            return
+        self._patterns[i] = replace(old, name=name.strip())
+        self._refresh_item(i)
+        # Re-load detail to refresh title + name edit.
+        self._load_detail(self._patterns[i])
+
+    def _delete_current(self) -> None:
+        rows = sorted(
+            {idx.row() for idx in self._list.selectionModel().selectedRows()},
+            reverse=True,
+        )
+        if not rows and self._current_index is not None:
+            rows = [self._current_index]
+        if not rows:
+            return
+        if QMessageBox.question(
+            self, "Delete pattern(s)",
+            f"Delete {len(rows)} pattern(s)? This cannot be undone "
+            f"(re-open the dialog to load the last saved state).",
+        ) != QMessageBox.Yes:
+            return
+        for r in rows:
+            del self._patterns[r]
+        self._loading = True
+        self._list.clear()
+        for p in self._patterns:
+            self._list.addItem(self._make_item(p))
+        self._loading = False
+        if self._patterns:
+            self._list.setCurrentRow(
+                min(rows[-1], len(self._patterns) - 1),
+                QItemSelectionModel.ClearAndSelect,
+            )
+        else:
+            self._current_index = None
+            self._load_detail(None)
+
+    def _load_preset(self) -> None:
+        names = sorted(_BUILTIN_PRESETS)
+        if not names:
+            return
+        chosen, ok = QInputDialog.getItem(
+            self, "Load preset",
+            "Append the patterns from this preset to your library:",
+            names, 0, False,
+        )
+        if not ok:
+            return
+        before = len(self._patterns)
+        for src in _BUILTIN_PRESETS[chosen]:
+            self._patterns.append(src)
+            self._list.addItem(self._make_item(src))
+        if len(self._patterns) > before:
+            self._list.setCurrentRow(before, QItemSelectionModel.ClearAndSelect)
+            # Friendly nudge if the preset references levels the user has
+            # not defined yet — generation would fail otherwise.
+            missing = self._missing_levels_after_load(
+                _BUILTIN_PRESETS[chosen]
+            )
+            if missing:
+                QMessageBox.information(
+                    self, "Load preset",
+                    "Preset loaded. The level grid(s) are missing some "
+                    "labels this preset references — add them before "
+                    "generating:\n\n" + "\n".join(
+                        f"  • {axis}: {', '.join(sorted(labels))}"
+                        for axis, labels in missing.items()
+                    ),
+                )
+
+    def _missing_levels_after_load(self, preset) -> dict[str, list[str]]:
+        out: dict[str, list[str]] = {}
+        for axis_name in _AXES:
+            available = set(self._level_provider(axis_name))
+            referenced: set[str] = set()
+            for p in preset:
+                referenced |= set(getattr(
+                    p,
+                    {"Process": "process_levels",
+                     "Voltage": "voltage_levels",
+                     "Temperature": "temperature_levels"}[axis_name],
+                ))
+            missing = sorted(referenced - available)
+            if missing:
+                out[axis_name] = missing
+        return out
+
+
 class CornerGeneratorDialog(QDialog):
     """The PVT Corner Generator — see the module docstring."""
 
@@ -713,49 +1122,24 @@ class CornerGeneratorDialog(QDialog):
 
         # --- patterns ----------------------------------------------------
         v.addWidget(QLabel(
-            "<b>2 · Patterns</b> — one row per corner. P/V/T cells "
-            "double-click for a checkable dropdown or type \"TT, SS\" "
-            "directly. Name supports {mode} {process} {voltage} {temp} "
-            "tokens — empty defaults to {mode}. Right-click rows to "
-            "Enable / Disable. Patterns persist with the cornermodel — "
-            "the target mode is picked below at Generate time so the "
-            "same pattern can be re-applied to different modes."
+            "<b>2 · Patterns</b> — your library of named PVT patterns. "
+            "Pick one on the left to edit on the right. + New / Duplicate "
+            "/ Delete / Load preset… manage the library; each item's "
+            "checkbox enables it for Generate. Name supports {mode} "
+            "{process} {voltage} {temp} tokens — empty defaults to "
+            "{mode}. Patterns persist with the cornermodel — the target "
+            "mode is picked below at Generate time so the same pattern "
+            "can be re-applied to different modes."
         ))
-        self._patterns = QTableWidget(0, len(_PAT_HEADERS))
-        self._patterns.setHorizontalHeaderLabels(list(_PAT_HEADERS))
-        hdr = self._patterns.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.Stretch)
-        # Squeeze the Enabled checkbox column so it doesn't waste a stretch.
-        hdr.setSectionResizeMode(_PAT_COL_ENABLED, QHeaderView.ResizeToContents)
-        self._patterns.verticalHeader().setDefaultSectionSize(24)
-        self._patterns.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self._patterns.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        # Per-axis checkable multi-select editor. Free-typed text in P/V/T
-        # cells still works alongside the picker. QTableWidget does NOT
-        # take Python ownership of the delegate (only the C++ parent
-        # matters), so we keep references on self to keep them alive.
-        self._pattern_delegates: list[QStyledItemDelegate] = []
-        for axis_name, col in _PAT_AXIS_COLS.items():
-            d = _MultiPickDelegate(
-                lambda an=axis_name: self._grids[an].level_labels()
-            )
-            self._pattern_delegates.append(d)
-            self._patterns.setItemDelegateForColumn(col, d)
-        self._patterns.setContextMenuPolicy(Qt.CustomContextMenu)
-        self._patterns.customContextMenuRequested.connect(
-            self._on_pattern_context_menu
+        self._library = _PatternLibrary(
+            level_provider=lambda an: self._grids[an].level_labels()
         )
-        v.addWidget(self._patterns, 1)
-
-        prow = QHBoxLayout()
-        b_add = QPushButton("+ Pattern row")
-        b_del = QPushButton("- Pattern row")
-        b_add.clicked.connect(lambda: self._add_pattern_row())
-        b_del.clicked.connect(self._remove_pattern_row)
-        prow.addWidget(b_add)
-        prow.addWidget(b_del)
-        prow.addStretch(1)
-        v.addLayout(prow)
+        self._library.load_patterns(cm.patterns)
+        # Empty library → start with a blank row so the user has somewhere
+        # to type immediately (mirrors the old auto-seed behaviour).
+        if not cm.patterns:
+            self._library._new_pattern()
+        v.addWidget(self._library, 1)
 
         # --- generate ----------------------------------------------------
         bottom = QHBoxLayout()
@@ -772,94 +1156,6 @@ class CornerGeneratorDialog(QDialog):
         bottom.addWidget(b_close)
         v.addLayout(bottom)
 
-        # Hydrate the table from the cornermodel's saved patterns. If the
-        # project has none yet, seed one blank row so the user has
-        # somewhere to type.
-        if cm.patterns:
-            for p in cm.patterns:
-                self._add_pattern_row(pattern=p)
-        else:
-            self._add_pattern_row()
-
-    # --- pattern table ---------------------------------------------------
-    def _add_pattern_row(self, pattern: "PvtPattern | None" = None) -> None:
-        r = self._patterns.rowCount()
-        self._patterns.insertRow(r)
-        # Enabled checkbox (default on). Use ItemIsUserCheckable on the
-        # item itself rather than a cell widget so right-click selection
-        # picks it up like the rest of the row.
-        chk = QTableWidgetItem()
-        chk.setFlags(
-            Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsUserCheckable
-        )
-        chk.setCheckState(
-            Qt.Checked if pattern is None or pattern.enabled else Qt.Unchecked
-        )
-        chk.setTextAlignment(Qt.AlignCenter)
-        self._patterns.setItem(r, _PAT_COL_ENABLED, chk)
-        name = pattern.name if pattern is not None else ""
-        process = (
-            ", ".join(pattern.process_levels) if pattern is not None else ""
-        )
-        voltage = (
-            ", ".join(pattern.voltage_levels) if pattern is not None else ""
-        )
-        temp = (
-            ", ".join(pattern.temperature_levels)
-            if pattern is not None else ""
-        )
-        self._patterns.setItem(r, _PAT_COL_NAME, QTableWidgetItem(name))
-        self._patterns.setItem(r, _PAT_COL_PROCESS, QTableWidgetItem(process))
-        self._patterns.setItem(r, _PAT_COL_VOLTAGE, QTableWidgetItem(voltage))
-        self._patterns.setItem(r, _PAT_COL_TEMP, QTableWidgetItem(temp))
-
-    def _remove_pattern_row(self) -> None:
-        # Delete every selected row at once, not just the active one — feels
-        # more natural with ExtendedSelection. Falls back to the active row
-        # when no selection is set.
-        rows = self._selected_rows()
-        if not rows:
-            r = self._patterns.currentRow()
-            if r < 0:
-                return
-            rows = [r]
-        for r in sorted(rows, reverse=True):
-            self._patterns.removeRow(r)
-
-    def _selected_rows(self) -> list[int]:
-        sm = self._patterns.selectionModel()
-        if sm is None:
-            return []
-        return sorted({idx.row() for idx in sm.selectedRows()})
-
-    def _on_pattern_context_menu(self, pos) -> None:
-        rows = self._selected_rows()
-        # Right-clicking on an unselected row should target that row alone.
-        idx = self._patterns.indexAt(pos)
-        if idx.isValid() and idx.row() not in rows:
-            self._patterns.selectRow(idx.row())
-            rows = [idx.row()]
-        if not rows:
-            return
-        menu = QMenu(self._patterns)
-        a_enable = QAction(f"Enable ({len(rows)})", menu)
-        a_disable = QAction(f"Disable ({len(rows)})", menu)
-        a_enable.triggered.connect(lambda: self._set_rows_enabled(rows, True))
-        a_disable.triggered.connect(lambda: self._set_rows_enabled(rows, False))
-        menu.addAction(a_enable)
-        menu.addAction(a_disable)
-        menu.exec_(self._patterns.viewport().mapToGlobal(pos))
-
-    def _set_rows_enabled(self, rows: list[int], enabled: bool) -> None:
-        for r in rows:
-            item = self._patterns.item(r, _PAT_COL_ENABLED)
-            if item is not None:
-                item.setCheckState(Qt.Checked if enabled else Qt.Unchecked)
-
-    def _row_is_enabled(self, r: int) -> bool:
-        item = self._patterns.item(r, _PAT_COL_ENABLED)
-        return item is not None and item.checkState() == Qt.Checked
-
     # --- generate --------------------------------------------------------
     def _on_generate(self) -> None:
         mode = self._mode_combo.currentText()
@@ -870,26 +1166,23 @@ class CornerGeneratorDialog(QDialog):
                 "then re-open this dialog.",
             )
             return
-        rows = self._read_patterns()
-        if not rows:
-            QMessageBox.warning(
-                self, "Generate",
-                "No patterns — fill in at least one row.",
-            )
-            return
-        live = [r for r in rows if r["enabled"]]
+        patterns = self._library.patterns()
+        live = [p for p in patterns if p.enabled and not _pattern_is_blank(p)]
         if not live:
             QMessageBox.warning(
                 self, "Generate",
-                "Every pattern row is disabled — nothing to generate.",
+                "No enabled pattern with any level picked — tick at "
+                "least one pattern and give it some levels.",
             )
             return
 
-        # Promote the axes referenced by enabled rows into the cornermodel
-        # (each axis is upserted exactly once even if many rows reference it).
+        # Promote the axes referenced by enabled patterns into the cornermodel
+        # (each axis is upserted exactly once even if many patterns use it).
         referenced = {
-            axis for r in live
-            for axis, labs in r["selections"].items() if labs
+            axis_name
+            for p in live
+            for axis_name, labs in _pattern_axis_iter(p)
+            if labs
         }
         cm = self._view.cornermodel()
         try:
@@ -907,14 +1200,18 @@ class CornerGeneratorDialog(QDialog):
             QMessageBox.warning(self, "Generate — level error", str(exc))
             return
 
-        # Persist the current pattern table — generate is a commit point.
-        cm = _replace(cm, patterns=self._patterns_to_data())
+        # Persist the library — Generate is a commit point.
+        cm = replace(cm, patterns=patterns)
 
         created: list[str] = []
         failed: list[str] = []
-        for row in live:
-            sels = row["selections"]
-            name = _resolve_pattern_name(row["name"], mode, sels)
+        for p in live:
+            sels = {
+                "Process": list(p.process_levels),
+                "Voltage": list(p.voltage_levels),
+                "Temperature": list(p.temperature_levels),
+            }
+            name = _resolve_pattern_name(p.name, mode, sels)
             axis_selections = [
                 (axis, tuple(labs))
                 for axis in _AXES
@@ -938,57 +1235,16 @@ class CornerGeneratorDialog(QDialog):
         self._view._apply(cm)
         self._report(created, failed)
 
-    def _read_patterns(self) -> list[dict]:
-        """One dict per non-blank pattern row::
-
-            {"enabled": bool, "name": str,
-             "selections": {"Process": [...], "Voltage": [...], "Temperature": [...]}}
-        """
-        out: list[dict] = []
-        for r in range(self._patterns.rowCount()):
-            name = self._cell(r, _PAT_COL_NAME)
-            sels = {
-                axis: _split_levels(self._cell(r, col))
-                for axis, col in _PAT_AXIS_COLS.items()
-            }
-            if not name and not any(sels.values()):
-                continue  # a wholly blank row
-            out.append({
-                "enabled": self._row_is_enabled(r),
-                "name": name,
-                "selections": sels,
-            })
-        return out
-
-    def _patterns_to_data(self) -> tuple:
-        """Snapshot every non-blank pattern row as PvtPattern records — the
-        on-disk format. Drives both auto-save on close and save-at-generate."""
-        out = []
-        for row in self._read_patterns():
-            sels = row["selections"]
-            out.append(PvtPattern(
-                enabled=row["enabled"],
-                name=row["name"],
-                process_levels=tuple(sels.get("Process", [])),
-                voltage_levels=tuple(sels.get("Voltage", [])),
-                temperature_levels=tuple(sels.get("Temperature", [])),
-            ))
-        return tuple(out)
-
-    def _cell(self, row: int, col: int) -> str:
-        item = self._patterns.item(row, col)
-        return item.text().strip() if item is not None else ""
-
     # --- persistence -----------------------------------------------------
     def _persist_patterns_silently(self) -> None:
-        """Snapshot the current pattern table into the cornermodel and route
-        it through the view's apply hook — that fires _persist_cornermodel
-        on the main window, so authored patterns survive a GUI restart."""
+        """Snapshot the library into the cornermodel and route it through
+        the view's apply hook — that fires _persist_cornermodel on the
+        main window, so authored patterns survive a GUI restart."""
         cm = self._view.cornermodel()
-        snapshot = self._patterns_to_data()
+        snapshot = self._library.patterns()
         if snapshot == cm.patterns:
             return
-        self._view._apply(_replace(cm, patterns=snapshot))
+        self._view._apply(replace(cm, patterns=snapshot))
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
         self._persist_patterns_silently()
@@ -1027,6 +1283,21 @@ def _split_levels(text: str) -> list[str]:
             seen.add(tok)
             out.append(tok)
     return out
+
+
+def _pattern_is_blank(p: PvtPattern) -> bool:
+    return (
+        not p.name
+        and not p.process_levels
+        and not p.voltage_levels
+        and not p.temperature_levels
+    )
+
+
+def _pattern_axis_iter(p: PvtPattern):
+    yield ("Process", p.process_levels)
+    yield ("Voltage", p.voltage_levels)
+    yield ("Temperature", p.temperature_levels)
 
 
 def _resolve_pattern_name(
