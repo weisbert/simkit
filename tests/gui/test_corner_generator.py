@@ -148,6 +148,45 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         self.assertIn("temperature", all_vars)
         self.assertNotIn("var1", all_vars)
 
+    def test_legacy_var1_axis_migrates_to_convention_on_load(self):
+        # Regression: a project authored before the axis-named-variable fix
+        # persists a Temperature axis whose member is the old "var1"
+        # placeholder. Re-opening the generator must migrate it to
+        # "temperature" (carrying the saved value) so regenerate stops
+        # writing var1 into corners.
+        from simkit.corner_model import (
+            CorrelatedAxis, CorrelatedTuple, add_correlated_axis,
+        )
+        view = _view()
+        cm = add_correlated_axis(view.cornermodel(), CorrelatedAxis(
+            name="Temperature", members=("var1",),
+            tuples=(CorrelatedTuple(
+                label="NT", values={"var1": "27"}, section=None),),
+            model_file=None,
+        ))
+        view._apply(cm)
+        dlg = CornerGeneratorDialog(view)
+        tg = dlg._grids["Temperature"]
+        self.assertEqual(tg._member_names(), ["temperature"])
+        # The saved value follows the migrated header (read by orig key).
+        self.assertEqual(tg._cell(0, tg._member_start()), "27")
+
+        _fill_grid(
+            dlg._grids["Voltage"], model_file=None, var_headers=["vdd"],
+            rows=[("NV", "0.8")],
+        )
+        _set_pattern_one_corner(
+            dlg, 0, name="c1", process="", voltage="NV", temp="NT",
+        )
+        with mock.patch.object(cg.QMessageBox, "information"), \
+                mock.patch.object(cg.QMessageBox, "warning"):
+            dlg._on_generate()
+        all_vars = set()
+        for col in view.cornermodel().columns:
+            all_vars |= set(col.pvt_vars)
+        self.assertIn("temperature", all_vars)
+        self.assertNotIn("var1", all_vars)
+
     def test_generate_expands_composite_axes_and_imports(self):
         view, dlg = self._dialog()
         # Process — composite (section + CT).

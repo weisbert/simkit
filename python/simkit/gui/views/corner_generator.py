@@ -674,10 +674,26 @@ class _LevelGrid(QWidget):
 
     # --- load / dump -----------------------------------------------------
     def load(self, axis: CorrelatedAxis) -> None:
-        """Populate the grid from an existing axis."""
+        """Populate the grid from an existing axis.
+
+        A legacy ``var1`` member — the pre-fix default for a fresh
+        Temperature/Voltage grid — is migrated to the axis convention
+        (``temperature``/``vdd``) on load, so a project authored before that
+        fix regenerates onto the convention instead of carrying ``var1``
+        forward. The tuple values still key on the saved name, so we read by
+        the original member and display under the migrated one."""
         if axis.model_file is not None and self._model_file_edit is not None:
             self._model_file_edit.setText(axis.model_file)  # adds section col
-        for member in axis.members:
+        convention = _DEFAULT_AXIS_VAR.get(self._axis_name)
+        orig_members = list(axis.members)
+        display_members = [
+            convention
+            if (m == "var1" and convention is not None
+                and convention not in orig_members)
+            else m
+            for m in orig_members
+        ]
+        for member in display_members:
             c = self._table.columnCount()
             self._table.insertColumn(c)
             self._table.setHorizontalHeaderItem(c, QTableWidgetItem(member))
@@ -689,10 +705,10 @@ class _LevelGrid(QWidget):
                 self._table.setItem(
                     r, 1, QTableWidgetItem(ct.section or "")
                 )
-            for c in range(self._member_start(), self._table.columnCount()):
-                member = self._table.horizontalHeaderItem(c).text()
+            for i, orig in enumerate(orig_members):
                 self._table.setItem(
-                    r, c, QTableWidgetItem(ct.values.get(member, ""))
+                    r, self._member_start() + i,
+                    QTableWidgetItem(ct.values.get(orig, "")),
                 )
 
     def seed_blank(self, *, with_variable: bool) -> None:
