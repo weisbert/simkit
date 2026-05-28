@@ -658,6 +658,24 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         cb.lineEdit().setText("")
         self.assertEqual(cb.committed_value(), "TT, FF")
 
+    def test_checkable_combobox_clicks_keep_popup_open_for_multiselect(self):
+        # Regression: a plain combobox closes on the first item click, so
+        # the checkable combo felt single-select. The event filter toggles
+        # the clicked row and consumes the release so the popup stays open
+        # — letting the user tick several without re-opening.
+        from PyQt5.QtCore import QEvent
+        cb = cg._CheckableComboBox(["TT", "SS", "FF"], [])
+        view = cb.view()
+        for row in (0, 2):
+            idx = cb._model.index(row, 0)
+            ev = mock.Mock()
+            ev.type.return_value = QEvent.MouseButtonRelease
+            with mock.patch.object(view, "indexAt", return_value=idx):
+                consumed = cb.eventFilter(view.viewport(), ev)
+            # The release must be swallowed so the popup does not close.
+            self.assertTrue(consumed)
+        self.assertEqual(set(cb.checked_labels()), {"TT", "FF"})
+
 
 if __name__ == "__main__":
     unittest.main()

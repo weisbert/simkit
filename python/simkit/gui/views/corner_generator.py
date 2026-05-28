@@ -56,7 +56,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt, QItemSelectionModel
+from PyQt5.QtCore import QEvent, Qt, QItemSelectionModel
 from PyQt5.QtGui import QStandardItem, QStandardItemModel
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -227,10 +227,26 @@ class _CheckableComboBox(QComboBox):
         self._model: QStandardItemModel = QStandardItemModel(self)
         self.setModel(self._model)
         self._refresh_hook = refresh_hook
-        self.view().pressed.connect(self._toggle_at)
+        # Keep the popup open across multiple ticks: a plain QComboBox
+        # commits + closes on the first item click, which makes a
+        # checkable combo feel single-select. Intercept the popup view's
+        # mouse-release ourselves — toggle the row and swallow the event
+        # so the popup stays open (user closes it by clicking away / Esc).
+        self.view().viewport().installEventFilter(self)
         self.setLineEdit(QLineEdit())
         self.set_options(items, current)
         self._model.dataChanged.connect(self._refresh_line_edit)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt API)
+        if (
+            obj is self.view().viewport()
+            and event.type() == QEvent.MouseButtonRelease
+        ):
+            index = self.view().indexAt(event.pos())
+            if index.isValid():
+                self._toggle_at(index)
+            return True   # consume → the popup does not close
+        return super().eventFilter(obj, event)
 
     def set_options(self, items: list[str], current: list[str]) -> None:
         """Reseed the dropdown items, preserving ``current`` checks. The
