@@ -79,7 +79,7 @@ def _fill_grid(grid, *, model_file, var_headers, rows):
     """rows: list of cell-tuples in column order (Level, [section], vars...)."""
     if model_file is not None:
         grid._model_file_edit.setText(model_file)  # adds the section column
-    # the grid is seeded with one variable ("var1") for V/T — reuse / rename
+    # the grid is seeded with one variable for V/T — reuse / rename it
     existing = grid._member_names()
     for i, name in enumerate(var_headers):
         if i < len(existing):
@@ -107,6 +107,46 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         _view_, dlg = self._dialog()
         self.assertEqual(set(dlg._grids), {"Process", "Voltage", "Temperature"})
         self.assertEqual(dlg._mode_combo.currentText(), "Beacon")
+
+    def test_fresh_grids_seed_axis_named_variable(self):
+        # Regression: a fresh Temperature grid seeded its variable as
+        # "var1", so generated corners carried a "var1" var instead of
+        # "temperature". Defaults are now axis-aware (renamable).
+        _view_, dlg = self._dialog()
+        self.assertEqual(
+            dlg._grids["Temperature"]._member_names(), ["temperature"]
+        )
+        self.assertEqual(dlg._grids["Voltage"]._member_names(), ["vdd"])
+
+    def test_generate_writes_temperature_var_not_var1(self):
+        view, dlg = self._dialog()
+        # Use the axis defaults as-is (do NOT rename the seeded variable).
+        _fill_grid(
+            dlg._grids["Process"], model_file="/pdk/m.scs", var_headers=[],
+            rows=[("TT", "tt")],
+        )
+        # Voltage / Temperature keep their seeded var names (vdd /
+        # temperature) — only fill the level label + value.
+        _fill_grid(
+            dlg._grids["Voltage"], model_file=None, var_headers=["vdd"],
+            rows=[("NV", "0.8")],
+        )
+        _fill_grid(
+            dlg._grids["Temperature"], model_file=None,
+            var_headers=["temperature"], rows=[("NT", "27")],
+        )
+        _set_pattern_one_corner(
+            dlg, 0, name="c1", process="TT", voltage="NV", temp="NT",
+        )
+        with mock.patch.object(cg.QMessageBox, "information"), \
+                mock.patch.object(cg.QMessageBox, "warning"):
+            dlg._on_generate()
+        cm = view.cornermodel()
+        all_vars = set()
+        for col in cm.columns:
+            all_vars |= set(col.pvt_vars)
+        self.assertIn("temperature", all_vars)
+        self.assertNotIn("var1", all_vars)
 
     def test_generate_expands_composite_axes_and_imports(self):
         view, dlg = self._dialog()

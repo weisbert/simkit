@@ -101,6 +101,16 @@ _AXES = ("Process", "Voltage", "Temperature")
 _VAR_NAME_RE = r"^[A-Za-z][A-Za-z0-9_]*$"
 _LEVEL_RE = r"^[A-Za-z0-9_]+$"
 
+# The variable a fresh level grid seeds its single column with. Temperature
+# is the Spectre/Maestro convention ``temperature``; Voltage defaults to the
+# common supply name ``vdd`` (both renamable via the header). A generic
+# ``var1`` placeholder would otherwise leak into generated corners as the
+# variable name (2026 UX bug: temperature value landed on "var1").
+_DEFAULT_AXIS_VAR = {
+    "Temperature": "temperature",
+    "Voltage": "vdd",
+}
+
 # A few built-in pattern presets, surfaced by the Library's "Load preset…"
 # button. Loading a preset APPENDS its patterns to the project's library;
 # the level names referenced here (TT/SS/FF/NV/HV/LV/NT/HT/LT) follow the
@@ -686,9 +696,13 @@ class _LevelGrid(QWidget):
                 )
 
     def seed_blank(self, *, with_variable: bool) -> None:
-        """Start a fresh grid: one blank level row, optionally one variable."""
+        """Start a fresh grid: one blank level row, optionally one variable
+        named after the axis convention (temperature / vdd) — renamable via
+        the column header."""
         if with_variable:
-            self._add_variable(initial="var1")
+            self._add_variable(
+                initial=_DEFAULT_AXIS_VAR.get(self._axis_name, "var1")
+            )
         self._add_level()
 
     def level_labels(self) -> list[str]:
