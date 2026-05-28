@@ -27,8 +27,12 @@ Two halves:
 
   The library list checkbox enables / disables the whole pattern; the
   per-corner checkbox in the right table enables / disables a single
-  corner. ``Load preset…`` appends built-in PVT recipes (Standard,
-  Classic 5-corner) as new patterns. Patterns are mode-agnostic on
+  corner. ``Presets…`` browses built-in recipes (Standard, Classic
+  5-corner) + your own saved presets and appends one as new patterns;
+  ``Save as preset…`` stores the selected pattern in your personal
+  preset library (``~/.simkit/pattern_presets.json``, see
+  :mod:`simkit.gui.pattern_presets`) so it can be re-used in other
+  projects. Patterns are mode-agnostic on
   purpose — the bottom dropdown picks the target mode at *Generate*
   time so the same authored pattern can be re-applied to different
   modes. P / V / T cells use an inline checkable combobox (or just
@@ -775,6 +779,81 @@ _COR_AXIS_COLS = {
 }
 
 
+class _PresetPickDialog(QDialog):
+    """Pick a preset to load — built-in + user presets in one list —
+    or delete a user preset. Result is read via :meth:`result_action`."""
+
+    def __init__(
+        self, builtin_names: list[str], user_names: list[str],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        # Parentless + ApplicationModal, same X11 grouped-drag avoidance as
+        # CornerGeneratorDialog.
+        super().__init__()
+        self.setWindowModality(Qt.ApplicationModal)
+        self.setWindowTitle("Presets")
+        self._action: Optional[str] = None   # "load" | "delete"
+        self._kind: Optional[str] = None      # "builtin" | "user"
+        self._name: Optional[str] = None
+
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel(
+            "Built-in and your saved presets. Load appends the preset's "
+            "patterns to the library; Delete removes a user preset."
+        ))
+        self._list = QListWidget()
+        for n in builtin_names:
+            it = QListWidgetItem(f"[built-in]  {n}")
+            it.setData(Qt.UserRole, ("builtin", n))
+            self._list.addItem(it)
+        for n in user_names:
+            it = QListWidgetItem(f"[user]  {n}")
+            it.setData(Qt.UserRole, ("user", n))
+            self._list.addItem(it)
+        if self._list.count():
+            self._list.setCurrentRow(0)
+        v.addWidget(self._list, 1)
+
+        btns = QHBoxLayout()
+        b_load = QPushButton("Load")
+        b_delete = QPushButton("Delete (user)")
+        b_cancel = QPushButton("Cancel")
+        b_load.clicked.connect(lambda: self._finish("load"))
+        b_delete.clicked.connect(lambda: self._finish("delete"))
+        b_cancel.clicked.connect(self.reject)
+        btns.addWidget(b_load)
+        btns.addWidget(b_delete)
+        btns.addStretch(1)
+        btns.addWidget(b_cancel)
+        v.addLayout(btns)
+
+    def _current(self) -> Optional[tuple[str, str]]:
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        return item.data(Qt.UserRole)
+
+    def _finish(self, action: str) -> None:
+        cur = self._current()
+        if cur is None:
+            self.reject()
+            return
+        kind, name = cur
+        if action == "delete" and kind != "user":
+            QMessageBox.information(
+                self, "Presets",
+                "Only your own (user) presets can be deleted — built-in "
+                "presets are read-only.",
+            )
+            return
+        self._action, self._kind, self._name = action, kind, name
+        self.accept()
+
+    def result_action(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """(action, kind, name) — action is None if cancelled."""
+        return self._action, self._kind, self._name
+
+
 class _PatternLibrary(QWidget):
     """Left narrow list of named patterns + right detail editor showing the
     selected pattern's name and its corners. Each pattern is a *named
@@ -824,9 +903,22 @@ class _PatternLibrary(QWidget):
             b.clicked.connect(slot)
             btn_row1.addWidget(b)
         left.addLayout(btn_row1)
-        b_preset = QPushButton("Load preset…")
-        b_preset.clicked.connect(self._load_preset)
-        left.addWidget(b_preset)
+        preset_row = QHBoxLayout()
+        b_save_preset = QPushButton("Save as preset…")
+        b_save_preset.setToolTip(
+            "Save the selected pattern to your personal preset library "
+            "(~/.simkit) so you can re-use it in other projects."
+        )
+        b_save_preset.clicked.connect(self._save_as_preset)
+        b_presets = QPushButton("Presets…")
+        b_presets.setToolTip(
+            "Load a built-in or saved preset into this library, or delete "
+            "a user preset."
+        )
+        b_presets.clicked.connect(self._open_presets)
+        preset_row.addWidget(b_save_preset)
+        preset_row.addWidget(b_presets)
+        left.addLayout(preset_row)
         outer.addWidget(left_wrap, 0)
 
         # --- right: pattern detail = name + corner table ---------------
@@ -1240,38 +1332,100 @@ class _PatternLibrary(QWidget):
             self._current_index = None
             self._load_detail(None)
 
-    def _load_preset(self) -> None:
-        names = sorted(_BUILTIN_PRESETS)
-        if not names:
+    def _save_as_preset(self) -> None:
+        """Save the currently-selected pattern to the user preset library
+        so it can be re-loaded in any project (2026 UX)."""
+        from simkit.gui import pattern_presets as pp
+        if self._current_index is None:
+            QMessageBox.information(
+                self, "Save as preset",
+                "Select a pattern on the left first.",
+            )
             return
-        chosen, ok = QInputDialog.getItem(
-            self, "Load preset",
-            "Append this preset's patterns to your library:",
-            names, 0, False,
+        pattern = self._patterns[self._current_index]
+        default = pattern.name or "MyPreset"
+        name, ok = QInputDialog.getText(
+            self, "Save as preset", "Preset name:", text=default,
         )
-        if not ok:
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        existing = pp.load_user_presets()
+        if name in existing and QMessageBox.question(
+            self, "Save as preset",
+            f"A preset named {name!r} already exists. Overwrite it?",
+        ) != QMessageBox.Yes:
+            return
+        try:
+            pp.save_user_preset(name, pattern)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, "Save as preset",
+                f"Could not write the preset library:\n{exc}",
+            )
+            return
+        QMessageBox.information(
+            self, "Save as preset",
+            f"Saved {name!r} to your preset library "
+            f"({pp.presets_path()}).",
+        )
+
+    def _open_presets(self) -> None:
+        """Browse built-in + user presets; load one (appends its patterns)
+        or delete a user preset."""
+        from simkit.gui import pattern_presets as pp
+        user = pp.load_user_presets()
+        dlg = _PresetPickDialog(
+            builtin_names=sorted(_BUILTIN_PRESETS),
+            user_names=sorted(user),
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        action, kind, name = dlg.result_action()
+        if action is None or name is None:
+            return
+        if action == "delete":
+            if QMessageBox.question(
+                self, "Delete preset",
+                f"Delete user preset {name!r}? This removes it from your "
+                f"preset library on disk.",
+            ) != QMessageBox.Yes:
+                return
+            try:
+                pp.delete_user_preset(name)
+            except OSError as exc:
+                QMessageBox.warning(
+                    self, "Delete preset",
+                    f"Could not update the preset library:\n{exc}",
+                )
+            return
+        # action == "load": append the preset's patterns to the library.
+        if kind == "builtin":
+            patterns = _BUILTIN_PRESETS.get(name, ())
+        else:
+            pat = user.get(name)
+            patterns = (pat,) if pat is not None else ()
+        self._append_preset_patterns(patterns)
+
+    def _append_preset_patterns(self, patterns) -> None:
+        if not patterns:
             return
         before = len(self._patterns)
-        for src in _BUILTIN_PRESETS[chosen]:
+        for src in patterns:
             self._patterns.append(src)
             self._list.addItem(self._make_list_item(src))
-        if len(self._patterns) > before:
-            self._list.setCurrentRow(
-                before, QItemSelectionModel.ClearAndSelect,
+        self._list.setCurrentRow(before, QItemSelectionModel.ClearAndSelect)
+        missing = self._missing_levels_after_load(patterns)
+        if missing:
+            QMessageBox.information(
+                self, "Load preset",
+                "Preset loaded. The level grid(s) are missing some "
+                "labels this preset references — add them before "
+                "generating:\n\n" + "\n".join(
+                    f"  • {axis}: {', '.join(sorted(labels))}"
+                    for axis, labels in missing.items()
+                ),
             )
-            missing = self._missing_levels_after_load(
-                _BUILTIN_PRESETS[chosen]
-            )
-            if missing:
-                QMessageBox.information(
-                    self, "Load preset",
-                    "Preset loaded. The level grid(s) are missing some "
-                    "labels this preset references — add them before "
-                    "generating:\n\n" + "\n".join(
-                        f"  • {axis}: {', '.join(sorted(labels))}"
-                        for axis, labels in missing.items()
-                    ),
-                )
 
     def _missing_levels_after_load(
         self, preset: "tuple[PvtPattern, ...]"

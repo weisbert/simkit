@@ -472,23 +472,73 @@ class CornerGeneratorDialogTest(unittest.TestCase):
             dlg._library._delete_current()
         self.assertEqual(len(dlg._library.patterns()), 2)
 
-    def test_library_load_preset_appends_preset_patterns(self):
+    def test_append_preset_patterns_adds_to_library(self):
         _view_, dlg = self._dialog()
         before = len(dlg._library.patterns())
         preset_name = next(iter(cg._BUILTIN_PRESETS))
-        with mock.patch.object(
-            cg.QInputDialog, "getItem",
-            return_value=(preset_name, True),
-        ), mock.patch.object(cg.QMessageBox, "information"):
-            dlg._library._load_preset()
+        with mock.patch.object(cg.QMessageBox, "information"):
+            dlg._library._append_preset_patterns(
+                cg._BUILTIN_PRESETS[preset_name]
+            )
         ps = dlg._library.patterns()
         expected = before + len(cg._BUILTIN_PRESETS[preset_name])
         self.assertEqual(len(ps), expected)
-        # Last appended pattern's name comes from the preset definition.
         self.assertEqual(
-            ps[-1].name,
-            cg._BUILTIN_PRESETS[preset_name][-1].name,
+            ps[-1].name, cg._BUILTIN_PRESETS[preset_name][-1].name,
         )
+
+    def test_save_as_preset_writes_user_library(self):
+        import tempfile
+        from simkit.gui import pattern_presets as pp
+        home = tempfile.mkdtemp()
+        view, dlg = self._dialog()
+        _set_pattern_one_corner(
+            dlg, 0, name="c1", pattern_name="MyWorst",
+            process="TT, SS", voltage="LV", temp="HT",
+        )
+        with mock.patch.dict(os.environ, {"SIMKIT_HOME": home}), \
+                mock.patch.object(
+                    cg.QInputDialog, "getText",
+                    return_value=("MyWorst", True),
+                ), mock.patch.object(cg.QMessageBox, "information"), \
+                mock.patch.object(cg.QMessageBox, "question",
+                                  return_value=cg.QMessageBox.Yes):
+            dlg._library._save_as_preset()
+            saved = pp.load_user_presets()
+        self.assertIn("MyWorst", saved)
+        self.assertEqual(saved["MyWorst"].corners[0].process_levels,
+                         ("TT", "SS"))
+
+    def test_open_presets_loads_a_user_preset(self):
+        import tempfile
+        from simkit.gui import pattern_presets as pp
+        from simkit.corner_model import PvtPattern, PvtCornerEntry
+        home = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"SIMKIT_HOME": home}):
+            pp.save_user_preset("Saved1", PvtPattern(
+                enabled=True, name="Saved1", corners=(
+                    PvtCornerEntry(
+                        enabled=True, name="cc",
+                        process_levels=("FF",), voltage_levels=("HV",),
+                        temperature_levels=("LT",),
+                    ),
+                ),
+            ))
+            view, dlg = self._dialog()
+            before = len(dlg._library.patterns())
+            # Drive the picker: pick the user preset row, action=load.
+            with mock.patch.object(
+                cg._PresetPickDialog, "exec_",
+                return_value=cg.QDialog.Accepted,
+            ), mock.patch.object(
+                cg._PresetPickDialog, "result_action",
+                return_value=("load", "user", "Saved1"),
+            ), mock.patch.object(cg.QMessageBox, "information"):
+                dlg._library._open_presets()
+            ps = dlg._library.patterns()
+        self.assertEqual(len(ps), before + 1)
+        self.assertEqual(ps[-1].name, "Saved1")
+        self.assertEqual(ps[-1].corners[0].process_levels, ("FF",))
 
     def test_library_disabled_checkbox_round_trips_to_pattern(self):
         _view_, dlg = self._dialog()
