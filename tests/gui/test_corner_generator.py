@@ -460,6 +460,48 @@ class CornerGeneratorDialogTest(unittest.TestCase):
         # Original pattern is unchanged.
         self.assertEqual(ps[0].name, "my_pattern")
 
+    def test_list_context_menu_builds_without_crashing(self):
+        # Regression: the menu referenced a renamed method (_load_preset)
+        # and aborted the whole GUI on right-click. Build it with exec_
+        # stubbed and assert the actions resolve to real bound methods.
+        from PyQt5.QtCore import QPoint
+        _view_, dlg = self._dialog()
+        lib = dlg._library
+        captured = {}
+
+        def _fake_exec(_self, *a, **k):
+            captured["labels"] = [act.text() for act in _self.actions()]
+            return None
+
+        with mock.patch.object(cg.QMenu, "exec_", _fake_exec):
+            lib._on_list_context_menu(QPoint(2, 2))
+        self.assertIn("Rename…", captured["labels"])
+        self.assertIn("Presets…", captured["labels"])
+
+    def test_rename_via_dialog_updates_pattern_and_list(self):
+        _view_, dlg = self._dialog()
+        _set_pattern_one_corner(
+            dlg, 0, name="c1", pattern_name="orig",
+            process="TT", voltage="NV", temp="NT",
+        )
+        with mock.patch.object(
+            cg.QInputDialog, "getText", return_value=("renamed", True),
+        ):
+            dlg._library._rename_current()
+        self.assertEqual(dlg._library.patterns()[0].name, "renamed")
+        self.assertIn("renamed", dlg._library._list.item(0).text())
+
+    def test_rename_via_name_field_commits(self):
+        _view_, dlg = self._dialog()
+        _set_pattern_one_corner(
+            dlg, 0, name="c1", pattern_name="orig",
+            process="TT", voltage="NV", temp="NT",
+        )
+        dlg._library._name_edit.setText("typed_name")
+        dlg._library._commit_pattern_name()
+        self.assertEqual(dlg._library.patterns()[0].name, "typed_name")
+        self.assertIn("typed_name", dlg._library._list.item(0).text())
+
     def test_library_delete_removes_selected_with_confirm(self):
         _view_, dlg = self._dialog()
         dlg._library._new_pattern()

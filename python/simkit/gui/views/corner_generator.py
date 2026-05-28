@@ -1042,18 +1042,26 @@ class _PatternLibrary(QWidget):
 
     def _on_list_context_menu(self, pos) -> None:
         idx = self._list.indexAt(pos)
+        # Right-clicking a row makes it the current one, so Rename /
+        # Duplicate / Delete act on what the user clicked.
+        if idx.isValid():
+            self._list.setCurrentRow(
+                idx.row(), QItemSelectionModel.ClearAndSelect
+            )
         menu = QMenu(self._list)
         if idx.isValid():
-            menu.addAction(QAction("Duplicate", menu,
-                                    triggered=self._duplicate_current))
             menu.addAction(QAction("Rename…", menu,
                                     triggered=self._rename_current))
+            menu.addAction(QAction("Duplicate", menu,
+                                    triggered=self._duplicate_current))
+            menu.addAction(QAction("Save as preset…", menu,
+                                    triggered=self._save_as_preset))
             menu.addAction(QAction("Delete", menu,
                                     triggered=self._delete_current))
             menu.addSeparator()
         menu.addAction(QAction("+ New", menu, triggered=self._new_pattern))
-        menu.addAction(QAction("Load preset…", menu,
-                                triggered=self._load_preset))
+        menu.addAction(QAction("Presets…", menu,
+                                triggered=self._open_presets))
         menu.exec_(self._list.viewport().mapToGlobal(pos))
 
     # --- detail load -----------------------------------------------------
